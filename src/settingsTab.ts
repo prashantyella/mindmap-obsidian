@@ -1,6 +1,7 @@
 import { FileSystemAdapter, Notice, PluginSettingTab, Setting } from "obsidian";
 
 import { formatCommandPreview, type ResolvedRuntime } from "./pathResolver";
+import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
 import type MindmapPlugin from "./main";
 import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
 
@@ -39,10 +40,14 @@ export class MindmapSettingTab extends PluginSettingTab {
     containerEl.createEl("p", {
       text: "Portable defaults use the plugin runtime inside .obsidian/plugins. Override with vault-relative paths only when you need a custom script or config.",
     });
+    containerEl.createEl("p", {
+      text: "Trust warning: this plugin executes a local Python interpreter and reads local files. PATH commands and bundled runtime files are the safest options. Custom executable, script, or config paths should be reviewed before you run them.",
+    });
 
     this.renderPathSetting("pythonCommand");
     this.renderPathSetting("scriptPath");
     this.renderPathSetting("configPath");
+    this.renderSchedulerSettings();
 
     new Setting(containerEl)
       .setName("Validate runtime")
@@ -56,6 +61,67 @@ export class MindmapSettingTab extends PluginSettingTab {
       );
 
     this.renderSummary(this.plugin.getResolvedRuntime());
+  }
+
+  private renderSchedulerSettings(): void {
+    this.containerEl.createEl("h3", { text: "Scheduling" });
+    this.containerEl.createEl("p", {
+      text: "The built-in scheduler uses an internal plugin timer and works the same way on macOS, Windows, and Linux. OS-native schedulers remain optional external alternatives.",
+    });
+
+    new Setting(this.containerEl)
+      .setName("Scheduler mode")
+      .setDesc("Manual keeps runs on demand only. Interval runs the same Python command path on a repeating timer.")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("manual", "Manual only")
+          .addOption("interval", "Internal interval scheduler")
+          .setValue(this.plugin.settings.schedulerMode)
+          .onChange(async (value) => {
+            this.plugin.settings.schedulerMode = value === "interval" ? "interval" : "manual";
+            await this.plugin.saveSettings();
+            this.display();
+          });
+      })
+      .addExtraButton((button) => {
+        button
+          .setIcon("reset")
+          .setTooltip("Reset to default")
+          .onClick(async () => {
+            this.plugin.settings.schedulerMode = DEFAULT_SETTINGS.schedulerMode;
+            await this.plugin.saveSettings();
+            new Notice("Scheduler mode reset to default.");
+            this.display();
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Run interval")
+      .setDesc(`Minimum ${MIN_SCHEDULER_INTERVAL_MINUTES} minutes. Only used when the internal interval scheduler is enabled.`)
+      .addText((text) => {
+        text
+          .setPlaceholder(String(DEFAULT_SETTINGS.schedulerIntervalMinutes))
+          .setValue(String(this.plugin.settings.schedulerIntervalMinutes))
+          .onChange(async (value) => {
+            const parsed = Number.parseInt(value.trim(), 10);
+            this.plugin.settings.schedulerIntervalMinutes = Number.isFinite(parsed)
+              ? parsed
+              : DEFAULT_SETTINGS.schedulerIntervalMinutes;
+            await this.plugin.saveSettings();
+            this.display();
+          });
+      })
+      .addExtraButton((button) => {
+        button
+          .setIcon("reset")
+          .setTooltip("Reset to default")
+          .onClick(async () => {
+            this.plugin.settings.schedulerIntervalMinutes = DEFAULT_SETTINGS.schedulerIntervalMinutes;
+            await this.plugin.saveSettings();
+            new Notice("Scheduler interval reset to default.");
+            this.display();
+          });
+      });
   }
 
   private renderPathSetting(field: RuntimeField): void {
@@ -101,6 +167,14 @@ export class MindmapSettingTab extends PluginSettingTab {
     fragment.appendText(`Config: ${runtime.configPath}`);
     fragment.appendChild(document.createElement("br"));
     fragment.appendText(`Command: ${formatCommandPreview(runtime, ["--current"])}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Trust: ${runtime.trust.level}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Interpreter trust: ${runtime.trust.interpreter}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Script trust: ${runtime.trust.script}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Config trust: ${runtime.trust.config}`);
 
     for (const message of runtime.messages) {
       fragment.appendChild(document.createElement("br"));
@@ -113,5 +187,9 @@ export class MindmapSettingTab extends PluginSettingTab {
     }
 
     summary.setDesc(fragment);
+
+    new Setting(this.containerEl)
+      .setName("Scheduler status")
+      .setDesc(this.plugin.getSchedulerSummary());
   }
 }

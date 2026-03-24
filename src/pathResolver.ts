@@ -19,12 +19,23 @@ export interface ValidationMessage {
   message: string;
 }
 
+export type TrustLevel = "trusted" | "caution" | "blocked";
+
+export interface RuntimeTrustState {
+  level: TrustLevel;
+  interpreter: string;
+  script: string;
+  config: string;
+  reasons: string[];
+}
+
 export interface ResolvedRuntime {
   command: RuntimeCommand;
   scriptPath: string;
   configPath: string;
   usedDefaults: Record<RuntimeField, boolean>;
   messages: ValidationMessage[];
+  trust: RuntimeTrustState;
   valid: boolean;
 }
 
@@ -34,6 +45,8 @@ export interface PathFs {
 }
 
 const nodeFs: PathFs = fs;
+const SAFE_PATH_COMMAND_PATTERN = /^[A-Za-z0-9._-]+$/;
+const FORBIDDEN_COMMAND_CHARS_PATTERN = /["'`;&|<>\n\r]/;
 
 function normalizePath(targetPath: string): string {
   return path.normalize(targetPath);
@@ -70,6 +83,10 @@ function validateExistingFile(targetPath: string, field: RuntimeField, messages:
       message: `${field} must point to a file: ${targetPath}`,
     });
   }
+}
+
+function isPluginManagedPath(targetPath: string, context: RuntimeContext): boolean {
+  return isWithin(getPluginRuntimeDir(context), targetPath);
 }
 
 function resolveVaultBoundFile(
@@ -127,7 +144,24 @@ function resolvePythonCommand(
     return { command: "python3", usedDefault: true };
   }
 
+  if (FORBIDDEN_COMMAND_CHARS_PATTERN.test(trimmed)) {
+    messages.push({
+      field: "pythonCommand",
+      level: "error",
+      message: "pythonCommand contains blocked shell metacharacters. Enter a bare PATH command such as python3 or a direct file path only.",
+    });
+    return { command: trimmed, usedDefault: false };
+  }
+
   if (!path.isAbsolute(trimmed) && !hasPathSegment(trimmed)) {
+    if (!SAFE_PATH_COMMAND_PATTERN.test(trimmed)) {
+      messages.push({
+        field: "pythonCommand",
+        level: "error",
+        message: "pythonCommand must be a single executable name when resolved from PATH. Spaces and compound commands are blocked.",
+      });
+      return { command: trimmed, usedDefault: false };
+    }
     messages.push({
       field: "pythonCommand",
       level: "info",
@@ -151,6 +185,47 @@ function resolvePythonCommand(
 
   validateExistingFile(resolvedPath, "pythonCommand", messages, pathFs);
   return { command: resolvedPath, usedDefault: false };
+}
+
+function buildTrustState(
+  settings: MindmapSettings,
+  context: RuntimeContext,
+  scriptPath: string,
+  configPath: string,
+  valid: boolean,
+): RuntimeTrustState {
+  const reasons: string[] = [];
+  const interpreter = !settings.pythonCommand.trim()
+    ? "trusted: PATH command default (python3)"
+    : !path.isAbsolute(settings.pythonCommand) && !hasPathSegment(settings.pythonCommand)
+      ? `trusted: PATH command (${settings.pythonCommand.trim()})`
+      : "caution: direct Python executable path";
+
+  const script = isPluginManagedPath(scriptPath, context)
+    ? "trusted: bundled plugin runtime"
+    : "caution: custom vault file";
+
+  const config = isPluginManagedPath(configPath, context)
+    ? "trusted: bundled plugin config"
+    : "caution: custom vault config";
+
+  if (interpreter.startsWith("caution")) {
+    reasons.push("Python will execute through a direct file path. Verify the interpreter location before running.");
+  }
+  if (script.startsWith("caution")) {
+    reasons.push("Mindmap script uses a custom vault file instead of the bundled runtime.");
+  }
+  if (config.startsWith("caution")) {
+    reasons.push("Mindmap config uses a custom vault file instead of the bundled default.");
+  }
+
+  return {
+    level: valid ? (reasons.length > 0 ? "caution" : "trusted") : "blocked",
+    interpreter,
+    script,
+    config,
+    reasons,
+  };
 }
 
 export function getPluginRuntimeDir(context: RuntimeContext): string {
@@ -196,6 +271,16 @@ export function resolveRuntime(
   }
 
   const valid = !messages.some((message) => message.level === "error");
+  const trust = buildTrustState(settings, context, script.path, config.path, valid);
+  if (trust.level === "caution") {
+    for (const reason of trust.reasons) {
+      messages.push({
+        field: "runtime",
+        level: "info",
+        message: reason,
+      });
+    }
+  }
   if (!valid) {
     messages.push({
       field: "runtime",
@@ -218,6 +303,7 @@ export function resolveRuntime(
       configPath: config.usedDefault,
     },
     messages,
+    trust,
     valid,
   };
 }

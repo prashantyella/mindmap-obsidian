@@ -13,11 +13,12 @@ import sys
 import time
 from dataclasses import dataclass
 import difflib
+from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Callable
 from urllib import request
 
-import chromadb
+from ruamel.yaml import YAML
 
 
 @dataclass
@@ -39,95 +40,62 @@ def save_json(path: Path, data):
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
-def yaml_escape(value: str) -> str:
-    if value is None:
-        return ""
-    needs_quotes = any(ch in value for ch in [":", "#", "\n", "\r", "\t", "\"", "'"])
-    if needs_quotes:
-        return json.dumps(value)
+def make_yaml_round_trip() -> YAML:
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+    yaml.width = 4096
+    yaml.indent(mapping=2, sequence=4, offset=2)
+    return yaml
+
+
+def make_yaml_safe() -> YAML:
+    return YAML(typ="safe")
+
+
+def split_frontmatter(text: str) -> Tuple[Optional[str], str]:
+    if not text.startswith("---"):
+        return None, text
+
+    lines = text.splitlines(keepends=True)
+    if len(lines) < 2:
+        return None, text
+
+    offset = len(lines[0])
+    for line in lines[1:]:
+        if line.strip() == "---":
+            frontmatter = text[len(lines[0]) : offset]
+            body = text[offset + len(line) :]
+            return frontmatter, body
+        offset += len(line)
+
+    return None, text
+
+
+def to_plain_data(value):
+    if isinstance(value, dict):
+        return {str(key): to_plain_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [to_plain_data(item) for item in value]
     return value
 
 
 def parse_frontmatter(text: str) -> Tuple[Dict, str]:
-    if not text.startswith("---"):
-        return {}, text
-    lines = text.splitlines()
-    if len(lines) < 2:
-        return {}, text
-    end_idx = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end_idx = i
-            break
-    if end_idx is None:
+    frontmatter, body = split_frontmatter(text)
+    if frontmatter is None:
         return {}, text
 
-    fm_lines = lines[1:end_idx]
-    body_lines = lines[end_idx + 1 :]
-
-    data = {}
-    key_order = []
-    current_key = None
-    for line in fm_lines:
-        if not line.strip():
-            continue
-        if re.match(r"^[A-Za-z0-9_-]+:\s*", line):
-            key, val = line.split(":", 1)
-            key = key.strip()
-            val = val.strip()
-            key_order.append(key)
-            if val.startswith("[") and val.endswith("]"):
-                inner = val[1:-1].strip()
-                if inner:
-                    items = [v.strip() for v in inner.split(",")]
-                else:
-                    items = []
-                data[key] = items
-            elif val == "":
-                data[key] = []
-                current_key = key
-            else:
-                data[key] = val
-                current_key = None
-        elif line.strip().startswith("-") and current_key:
-            item = line.strip()[1:].strip()
-            data[current_key].append(item)
-        else:
-            # Unrecognized line; keep as raw string under a special key
-            data.setdefault("_raw", []).append(line)
-
-    data["_key_order"] = key_order
-    return data, "\n".join(body_lines) + ("\n" if body_lines else "")
+    yaml = make_yaml_safe()
+    data = yaml.load(frontmatter) or {}
+    if not isinstance(data, dict):
+        return {}, body
+    return to_plain_data(data), body
 
 
-def build_frontmatter(data: Dict, preferred_order: List[str]) -> str:
-    key_order = [k for k in data.get("_key_order", []) if k in data]
-    for key in preferred_order:
-        if key not in key_order and key in data:
-            key_order.append(key)
-    # Include any remaining keys not tracked
-    for key in data.keys():
-        if key in ("_key_order", "_raw"):
-            continue
-        if key not in key_order:
-            key_order.append(key)
-
-    lines = ["---"]
-    for key in key_order:
-        value = data.get(key)
-        if isinstance(value, list):
-            lines.append(f"{key}:")
-            for item in value:
-                lines.append(f"  - {item}")
-        else:
-            lines.append(f"{key}: {yaml_escape(str(value))}")
-
-    # Preserve any raw lines at end
-    for raw in data.get("_raw", []):
-        lines.append(raw)
-
-    lines.append("---")
-    return "\n".join(lines) + "\n\n"
+def dump_frontmatter(data) -> str:
+    yaml = make_yaml_round_trip()
+    buffer = StringIO()
+    yaml.dump(data, buffer)
+    return buffer.getvalue()
 
 
 def strip_related_section(text: str, heading: str) -> str:
@@ -568,11 +536,24 @@ def select_mindmap_links(
 
 
 def update_frontmatter(text: str, updates: Dict, preferred_order: List[str]) -> str:
-    fm, body = parse_frontmatter(text)
+    frontmatter, body = split_frontmatter(text)
+    yaml = make_yaml_round_trip()
+    data = yaml.load(frontmatter) if frontmatter is not None else None
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError("Frontmatter must be a YAML mapping.")
+
+    for key in preferred_order:
+        if key in updates and key not in data:
+            data[key] = updates[key]
     for key, value in updates.items():
-        fm[key] = value
-    fm_text = build_frontmatter(fm, preferred_order)
-    return fm_text + body.lstrip()
+        data[key] = value
+
+    fm_text = dump_frontmatter(data)
+    if frontmatter is None:
+        return f"---\n{fm_text}---\n{body}"
+    return f"---\n{fm_text}---{body if body.startswith(chr(10)) else chr(10) + body}"
 
 def strip_trailing_dividers(text: str) -> str:
     lines = text.splitlines()
@@ -781,6 +762,8 @@ def main():
         tag_aliases = load_tag_aliases(alias_path)
 
     # Initialize Chroma
+    import chromadb
+
     client = chromadb.PersistentClient(path=str(db_path))
     chunks_collection = "mindmap_chunks"
     notes_collection = "mindmap_notes"
