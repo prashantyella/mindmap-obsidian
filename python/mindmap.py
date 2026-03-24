@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Callable
 from urllib import request
 
-from ruamel.yaml import YAML
+try:
+    from ruamel.yaml import YAML
+    YAML_IMPORT_ERROR = None
+except ModuleNotFoundError as exc:
+    YAML = None
+    YAML_IMPORT_ERROR = exc
 
 
 @dataclass
@@ -27,6 +32,163 @@ class Note:
     relpath: str
     title: str
     body: str
+
+
+def diagnostic_line(level: str, code: str, message: str, guidance: Optional[str] = None, context: Optional[Dict] = None) -> str:
+    parts = [f"[{level}][{code}] {message}"]
+    if guidance:
+        parts.append(f"Guidance: {guidance}")
+    if context:
+        context_parts = [f"{key}={value}" for key, value in context.items()]
+        if context_parts:
+            parts.append("Context: " + ", ".join(context_parts))
+    return " ".join(parts)
+
+
+def emit_stderr(level: str, code: str, message: str, guidance: Optional[str] = None, context: Optional[Dict] = None):
+    print(diagnostic_line(level, code, message, guidance=guidance, context=context), file=sys.stderr, flush=True)
+
+
+def build_runtime_issue(
+    level: str,
+    code: str,
+    message: str,
+    guidance: Optional[str] = None,
+    context: Optional[Dict] = None,
+) -> Dict:
+    issue = {"level": level, "code": code, "message": message}
+    if guidance:
+        issue["guidance"] = guidance
+    if context:
+        issue["context"] = context
+    return issue
+
+
+def is_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_vault_markdown_write_target(vault_root: Path, raw_target: str) -> Tuple[Optional[Path], Optional[Dict]]:
+    target_text = str(raw_target).strip()
+    if not target_text:
+        return None, build_runtime_issue(
+            "error",
+            "WRITE_TARGET_EMPTY",
+            "Write target path is empty.",
+            guidance="Use a vault-relative markdown path such as Notes/Example.md.",
+        )
+
+    vault_abs = vault_root.resolve()
+    candidate = Path(target_text)
+    if not candidate.is_absolute() and ".." in candidate.parts:
+        return None, build_runtime_issue(
+            "error",
+            "WRITE_TARGET_TRAVERSAL",
+            "Write target path traversal is not allowed.",
+            guidance="Remove '..' from the path and use a direct vault-relative markdown path.",
+            context={"path": target_text},
+        )
+
+    target = candidate if candidate.is_absolute() else vault_abs / candidate
+    resolved_target = target.resolve(strict=False)
+    if not is_within_root(resolved_target, vault_abs):
+        return None, build_runtime_issue(
+            "error",
+            "WRITE_TARGET_OUTSIDE_VAULT",
+            "Write target resolves outside the configured vault root.",
+            guidance="Use a path inside the vault_root directory.",
+            context={"path": target_text, "vault_root": str(vault_abs)},
+        )
+
+    if resolved_target.suffix.lower() != ".md":
+        return None, build_runtime_issue(
+            "error",
+            "WRITE_TARGET_NOT_MARKDOWN",
+            "Write target must be a markdown file (*.md).",
+            guidance="Update the target path to a .md note file.",
+            context={"path": target_text},
+        )
+
+    return resolved_target, None
+
+
+def validate_preview_entry(entry: Dict, vault_root: Path, entry_index: int) -> Tuple[Optional[Path], Optional[Dict]]:
+    context = {"entry_index": entry_index}
+    if not isinstance(entry, dict):
+        return None, build_runtime_issue(
+            "warn",
+            "PREVIEW_ENTRY_INVALID",
+            "Skipping preview entry because it is not a JSON object.",
+            guidance="Ensure each preview.jsonl row is a JSON object with a 'path' field.",
+            context=context,
+        )
+
+    raw_path = entry.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None, build_runtime_issue(
+            "warn",
+            "PREVIEW_PATH_MISSING",
+            "Skipping preview entry because 'path' is missing.",
+            guidance="Regenerate preview rows so each item includes a non-empty 'path'.",
+            context=context,
+        )
+
+    target, issue = resolve_vault_markdown_write_target(vault_root, raw_path)
+    if issue:
+        issue_context = dict(issue.get("context", {}))
+        issue_context.update(context)
+        return None, build_runtime_issue(
+            "warn",
+            issue["code"],
+            f"Skipping preview entry: {issue['message']}",
+            guidance=issue.get("guidance"),
+            context=issue_context,
+        )
+
+    if not target.exists():
+        return None, build_runtime_issue(
+            "warn",
+            "PREVIEW_TARGET_MISSING",
+            f"Skipping preview entry because note does not exist: {raw_path}",
+            guidance="Rebuild preview output or remove stale rows before applying preview.",
+            context={"path": raw_path, **context},
+        )
+
+    if not target.is_file():
+        return None, build_runtime_issue(
+            "warn",
+            "PREVIEW_TARGET_NOT_FILE",
+            f"Skipping preview entry because target is not a file: {raw_path}",
+            guidance="Point preview path rows to markdown files, not directories.",
+            context={"path": raw_path, **context},
+        )
+
+    return target, None
+
+
+def build_preflight_check(
+    code: str,
+    label: str,
+    status: str,
+    message: str,
+    guidance: Optional[str] = None,
+    context: Optional[Dict] = None,
+) -> Dict:
+    payload = {
+        "code": code,
+        "label": label,
+        "status": status,
+        "message": message,
+    }
+    if guidance:
+        payload["guidance"] = guidance
+    if context:
+        payload["context"] = context
+    return payload
 
 
 def load_json(path: Path, default=None):
@@ -41,6 +203,8 @@ def save_json(path: Path, data):
 
 
 def make_yaml_round_trip() -> YAML:
+    if YAML is None:
+        raise ModuleNotFoundError("ruamel.yaml is required to update frontmatter.") from YAML_IMPORT_ERROR
     yaml = YAML(typ="rt")
     yaml.preserve_quotes = True
     yaml.width = 4096
@@ -49,6 +213,8 @@ def make_yaml_round_trip() -> YAML:
 
 
 def make_yaml_safe() -> YAML:
+    if YAML is None:
+        raise ModuleNotFoundError("ruamel.yaml is required to parse frontmatter.") from YAML_IMPORT_ERROR
     return YAML(typ="safe")
 
 
@@ -290,6 +456,7 @@ def ollama_request(
     url = base_url.rstrip("/") + endpoint
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    model = payload.get("model", "unknown")
 
     last_err = None
     attempts = max(1, retries + 1)
@@ -300,11 +467,26 @@ def ollama_request(
         except Exception as exc:
             last_err = exc
             if log_fn:
-                log_fn(f"[warn] Ollama request failed (attempt {attempt}/{attempts}): {exc}")
+                log_fn(
+                    diagnostic_line(
+                        "warn",
+                        "OLLAMA_REQUEST_FAILED",
+                        f"Ollama request failed on attempt {attempt}/{attempts}: {exc}",
+                        context={"endpoint": endpoint, "model": model, "base_url": base_url},
+                    )
+                )
             if attempt < attempts:
                 time.sleep(backoff_seconds * attempt)
 
-    raise RuntimeError(f"Ollama request failed after {attempts} attempts: {last_err}")
+    raise RuntimeError(
+        diagnostic_line(
+            "error",
+            "OLLAMA_REQUEST_FAILED",
+            f"Ollama request failed after {attempts} attempts: {last_err}",
+            guidance="Check that Ollama is running and that the configured model exists.",
+            context={"endpoint": endpoint, "model": model, "base_url": base_url},
+        )
+    )
 
 
 def embed_texts(
@@ -393,7 +575,15 @@ def llm_extract(
         end = content.rfind("}")
         if start != -1 and end != -1 and end > start:
             return json.loads(content[start : end + 1])
-        raise
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "OLLAMA_INVALID_RESPONSE",
+                "LLM response did not contain valid JSON.",
+                guidance="Retry the run or switch to a model that follows JSON output more reliably.",
+                context={"model": model},
+            )
+        )
 
 
 def list_notes(vault_root: Path, notes_paths: List[str], min_words: int, related_heading: str) -> List[Note]:
@@ -601,9 +791,231 @@ def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
 
+def resolve_config_path(raw_config_path: Optional[str]) -> Path:
+    if raw_config_path:
+        return Path(raw_config_path).resolve()
+
+    cwd_candidate = Path.cwd() / "config.json"
+    script_candidate = Path(__file__).resolve().parent / "config.json"
+    if cwd_candidate.exists():
+        return cwd_candidate.resolve()
+    return script_candidate
+
+
+def load_config_with_diagnostics(config_path: Path) -> Tuple[Optional[Dict], Optional[Dict]]:
+    if not config_path.exists():
+        return None, build_preflight_check(
+            "CONFIG_MISSING",
+            "Config file",
+            "error",
+            f"Config file not found: {config_path}",
+            guidance="Create config.json from config.template.json or point --config to a valid file.",
+            context={"config_path": str(config_path)},
+        )
+    try:
+        config = load_json(config_path)
+    except json.JSONDecodeError as exc:
+        return None, build_preflight_check(
+            "CONFIG_INVALID",
+            "Config file",
+            "error",
+            f"Config file contains invalid JSON: {exc}",
+            guidance="Fix the JSON syntax in the config file and re-run preflight.",
+            context={"config_path": str(config_path)},
+        )
+
+    if not isinstance(config, dict) or not config:
+        return None, build_preflight_check(
+            "CONFIG_EMPTY",
+            "Config file",
+            "error",
+            f"Config file is empty or not a JSON object: {config_path}",
+            guidance="Populate the config file with the required runtime settings.",
+            context={"config_path": str(config_path)},
+        )
+
+    return config, build_preflight_check(
+        "CONFIG_OK",
+        "Config file",
+        "ok",
+        f"Loaded config: {config_path}",
+        context={"config_path": str(config_path)},
+    )
+
+
+def fetch_ollama_models(base_url: str, timeout: int) -> List[str]:
+    url = base_url.rstrip("/") + "/api/tags"
+    req = request.Request(url, method="GET")
+    with request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+
+    models = []
+    for item in payload.get("models", []):
+        if isinstance(item, dict) and item.get("name"):
+            models.append(str(item["name"]))
+    return models
+
+
+def find_missing_models(required_models: List[str], available_models: List[str]) -> List[str]:
+    available = set(available_models)
+    available_bases = {model.split(":", 1)[0] for model in available_models}
+
+    missing = []
+    for model in required_models:
+        if not model:
+            continue
+        base_name = model.split(":", 1)[0]
+        if model in available or base_name in available_bases:
+            continue
+        missing.append(model)
+    return missing
+
+
+def run_preflight(config_path: Path) -> Dict:
+    checks = [
+        build_preflight_check(
+            "PYTHON_RUNTIME_OK",
+            "Python runtime",
+            "ok",
+            f"Using Python executable: {sys.executable}",
+            context={"python_executable": sys.executable},
+        )
+    ]
+
+    if YAML_IMPORT_ERROR is None:
+        checks.append(
+            build_preflight_check(
+                "DEPENDENCY_RUAMEL_OK",
+                "Python dependency",
+                "ok",
+                "Imported ruamel.yaml successfully.",
+            )
+        )
+    else:
+        checks.append(
+            build_preflight_check(
+                "DEPENDENCY_RUAMEL_MISSING",
+                "Python dependency",
+                "error",
+                f"ruamel.yaml import failed: {YAML_IMPORT_ERROR}",
+                guidance="Install dependencies with `python3 -m pip install -r python/requirements.txt`.",
+            )
+        )
+
+    try:
+        import chromadb  # noqa: F401
+
+        checks.append(
+            build_preflight_check(
+                "DEPENDENCY_CHROMADB_OK",
+                "Python dependency",
+                "ok",
+                "Imported chromadb successfully.",
+            )
+        )
+    except ModuleNotFoundError as exc:
+        checks.append(
+            build_preflight_check(
+                "DEPENDENCY_CHROMADB_MISSING",
+                "Python dependency",
+                "error",
+                f"chromadb import failed: {exc}",
+                guidance="Install dependencies with `python3 -m pip install -r python/requirements.txt`.",
+            )
+        )
+
+    config, config_check = load_config_with_diagnostics(config_path)
+    checks.append(config_check)
+    if config is None:
+        ok = not any(check["status"] == "error" for check in checks)
+        return {
+            "ok": ok,
+            "summary": "Preflight failed: config is missing or invalid.",
+            "checks": checks,
+            "config_path": str(config_path),
+        }
+
+    base_url = str(config.get("ollama_base_url", "")).strip()
+    embed_model = str(config.get("embed_model", "")).strip()
+    llm_model = str(config.get("llm_model", "")).strip()
+    timeout = int(config.get("ollama_timeout_seconds", 120))
+
+    missing_fields = [field for field, value in [("ollama_base_url", base_url), ("embed_model", embed_model), ("llm_model", llm_model)] if not value]
+    if missing_fields:
+        checks.append(
+            build_preflight_check(
+                "CONFIG_FIELDS_MISSING",
+                "Config values",
+                "error",
+                f"Config is missing required values: {', '.join(missing_fields)}",
+                guidance="Add the missing Ollama URL and model names to the config file.",
+                context={"config_path": str(config_path)},
+            )
+        )
+    else:
+        try:
+            available_models = fetch_ollama_models(base_url, timeout=timeout)
+            checks.append(
+                build_preflight_check(
+                    "OLLAMA_REACHABLE",
+                    "Ollama server",
+                    "ok",
+                    f"Ollama is reachable at {base_url}.",
+                    context={"ollama_base_url": base_url},
+                )
+            )
+            missing_models = find_missing_models([embed_model, llm_model], available_models)
+            if missing_models:
+                checks.append(
+                    build_preflight_check(
+                        "OLLAMA_MODELS_MISSING",
+                        "Ollama models",
+                        "error",
+                        f"Required models are missing: {', '.join(missing_models)}",
+                        guidance="Pull the missing models with `ollama pull <model>` and re-run preflight.",
+                        context={"available_models": ", ".join(available_models) or "none"},
+                    )
+                )
+            else:
+                checks.append(
+                    build_preflight_check(
+                        "OLLAMA_MODELS_OK",
+                        "Ollama models",
+                        "ok",
+                        f"Required models are available: {embed_model}, {llm_model}",
+                    )
+                )
+        except Exception as exc:
+            checks.append(
+                build_preflight_check(
+                    "OLLAMA_UNREACHABLE",
+                    "Ollama server",
+                    "error",
+                    f"Failed to reach Ollama at {base_url}: {exc}",
+                    guidance="Start Ollama locally or update ollama_base_url in the config.",
+                    context={"ollama_base_url": base_url},
+                )
+            )
+
+    ok = not any(check["status"] == "error" for check in checks)
+    if ok:
+        summary = "Preflight passed: Python, dependencies, Ollama, and required models are ready."
+    else:
+        first_error = next(check for check in checks if check["status"] == "error")
+        summary = f"Preflight failed: {first_error['message']}"
+
+    return {
+        "ok": ok,
+        "summary": summary,
+        "checks": checks,
+        "config_path": str(config_path),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Local knowledge maintenance for Obsidian notes")
     parser.add_argument("--config", default=None, help="Config path")
+    parser.add_argument("--preflight", action="store_true", help="Validate config, dependencies, Ollama, and model availability")
     parser.add_argument("--index", action="store_true", help="Build embeddings index")
     parser.add_argument("--tag", action="store_true", help="Generate tags/concepts/summary")
     parser.add_argument("--apply", action="store_true", help="Write changes to notes")
@@ -618,20 +1030,22 @@ def main():
     scope_group.add_argument("--all", action="store_true", help="Use all scope folders from config")
 
     args = parser.parse_args()
+    config_path = resolve_config_path(args.config)
 
-    if args.config:
-        config_path = Path(args.config).resolve()
-    else:
-        # Try current working dir first, then script directory
-        cwd_candidate = Path.cwd() / "config.json"
-        script_candidate = Path(__file__).resolve().parent / "config.json"
-        if cwd_candidate.exists():
-            config_path = cwd_candidate.resolve()
-        else:
-            config_path = script_candidate
-    config = load_json(config_path)
-    if not config:
-        print(f"Config not found: {config_path}")
+    if args.preflight:
+        result = run_preflight(config_path)
+        print(json.dumps(result, ensure_ascii=True))
+        return 0 if result["ok"] else 1
+
+    config, config_check = load_config_with_diagnostics(config_path)
+    if config is None:
+        emit_stderr(
+            "error",
+            config_check["code"],
+            config_check["message"],
+            guidance=config_check.get("guidance"),
+            context=config_check.get("context"),
+        )
         return 1
 
     vault_root = Path(config.get("vault_root", "."))
@@ -679,7 +1093,13 @@ def main():
     if args.apply_preview:
         preview_path = vault_root / config.get("preview_log_path", "Scripts/_Mindmap/_logs/preview.jsonl")
         if not preview_path.exists():
-            print(f"Preview file not found: {preview_path}")
+            emit_stderr(
+                "error",
+                "PREVIEW_MISSING",
+                f"Preview file not found: {preview_path}",
+                guidance="Run with --preview first or update preview_log_path in the config.",
+                context={"preview_path": str(preview_path)},
+            )
             return 1
 
         items = []
@@ -688,23 +1108,41 @@ def main():
                 continue
             try:
                 items.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+            except json.JSONDecodeError as exc:
+                emit_stderr(
+                    "warn",
+                    "PREVIEW_LINE_INVALID",
+                    f"Skipping invalid preview line: {exc}",
+                    context={"preview_path": str(preview_path)},
+                )
 
         if not items:
-            print("No preview entries found.")
+            emit_stderr(
+                "error",
+                "PREVIEW_EMPTY",
+                "No preview entries found.",
+                guidance="Re-run with --preview before applying preview results.",
+                context={"preview_path": str(preview_path)},
+            )
             return 1
 
         log_lines = []
-        for entry in items:
-            relpath = entry.get("path")
-            if not relpath:
-                continue
-            file_path = vault_root / relpath
-            if not file_path.exists():
-                log_lines.append(f"[skip] Missing: {relpath}")
+        for entry_index, entry in enumerate(items, start=1):
+            file_path, issue = validate_preview_entry(entry, vault_root, entry_index)
+            if issue:
+                issue_context = dict(issue.get("context", {}))
+                issue_context["preview_path"] = str(preview_path)
+                emit_stderr(
+                    issue["level"],
+                    issue["code"],
+                    issue["message"],
+                    guidance=issue.get("guidance"),
+                    context=issue_context,
+                )
+                log_lines.append(f"[skip] {issue['code']}: {entry.get('path', '<missing>') if isinstance(entry, dict) else '<invalid>'}")
                 continue
 
+            relpath = entry["path"]
             updates = {
                 "summary": entry.get("summary", ""),
                 "tags": entry.get("tags", []),
@@ -712,12 +1150,22 @@ def main():
                 "related": entry.get("related", []),
             }
 
-            original = file_path.read_text(encoding="utf-8", errors="ignore")
-            updated = update_frontmatter(original, updates, config["frontmatter_keys"])
-            if write_mindmap_section:
-                updated = update_related_section(updated, mindmap_heading, updates["related"])
-            file_path.write_text(updated, encoding="utf-8")
-            log_lines.append(f"Applied preview: {relpath}")
+            try:
+                original = file_path.read_text(encoding="utf-8", errors="ignore")
+                updated = update_frontmatter(original, updates, config["frontmatter_keys"])
+                if write_mindmap_section:
+                    updated = update_related_section(updated, mindmap_heading, updates["related"])
+                file_path.write_text(updated, encoding="utf-8")
+                log_lines.append(f"Applied preview: {relpath}")
+            except Exception as exc:
+                emit_stderr(
+                    "warn",
+                    "PREVIEW_APPLY_FAILED",
+                    f"Skipping preview entry due to write failure: {exc}",
+                    guidance="Fix the note or frontmatter format for this entry, then re-run --apply-preview.",
+                    context={"entry_index": entry_index, "path": relpath, "preview_path": str(preview_path)},
+                )
+                log_lines.append(f"[error] PREVIEW_APPLY_FAILED: {relpath}")
 
         ensure_dir(log_path.parent)
         log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
@@ -752,7 +1200,14 @@ def main():
         if ctl_path.exists():
             try:
                 controlled_tags = json.loads(ctl_path.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                emit_stderr(
+                    "warn",
+                    "CONTROLLED_TAGS_INVALID",
+                    f"Failed to load controlled tags: {exc}",
+                    guidance="Fix the JSON file or remove controlled_tags_path from the config.",
+                    context={"controlled_tags_path": str(ctl_path)},
+                )
                 controlled_tags = []
     tag_aliases = {}
     if tag_aliases_path:
@@ -762,9 +1217,28 @@ def main():
         tag_aliases = load_tag_aliases(alias_path)
 
     # Initialize Chroma
-    import chromadb
+    try:
+        import chromadb
+    except ModuleNotFoundError as exc:
+        emit_stderr(
+            "error",
+            "DEPENDENCY_CHROMADB_MISSING",
+            f"chromadb import failed: {exc}",
+            guidance="Install dependencies with `python3 -m pip install -r python/requirements.txt`.",
+        )
+        return 1
 
-    client = chromadb.PersistentClient(path=str(db_path))
+    try:
+        client = chromadb.PersistentClient(path=str(db_path))
+    except Exception as exc:
+        emit_stderr(
+            "error",
+            "CHROMADB_INIT_FAILED",
+            f"Failed to initialize ChromaDB: {exc}",
+            guidance="Check db_path permissions and clear any corrupted local database before retrying.",
+            context={"db_path": str(db_path)},
+        )
+        return 1
     chunks_collection = "mindmap_chunks"
     notes_collection = "mindmap_notes"
 
@@ -792,13 +1266,27 @@ def main():
             print(line, file=stream, flush=True)
 
     def write_note_update(note: Note, updates: Dict, related_items: List = None) -> bool:
-        original = note.path.read_text(encoding="utf-8", errors="ignore")
+        target_path, issue = resolve_vault_markdown_write_target(vault_root, note.relpath)
+        if issue:
+            issue_context = dict(issue.get("context", {}))
+            issue_context["note"] = note.relpath
+            raise RuntimeError(
+                diagnostic_line(
+                    issue["level"],
+                    issue["code"],
+                    issue["message"],
+                    guidance=issue.get("guidance"),
+                    context=issue_context,
+                )
+            )
+
+        original = target_path.read_text(encoding="utf-8", errors="ignore")
         updated = update_frontmatter(original, updates, config["frontmatter_keys"])
         if write_mindmap_section:
             links = related_items or updates.get("related", [])
             updated = update_related_section(updated, mindmap_heading, links)
         if updated != original:
-            note.path.write_text(updated, encoding="utf-8")
+            target_path.write_text(updated, encoding="utf-8")
             return True
         return False
 
@@ -808,8 +1296,16 @@ def main():
             _fm, body = parse_frontmatter(text)
             body = strip_related_section(body, mindmap_heading)
             state_files[note.relpath] = {"hash": file_signature(body)}
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event(
+                diagnostic_line(
+                    "warn",
+                    "STATE_REFRESH_FAILED",
+                    f"Failed to refresh note state: {exc}",
+                    context={"note": note.relpath},
+                ),
+                to_stderr=True,
+            )
 
     for note in notes:
         content_hash = file_signature(note.body)

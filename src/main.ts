@@ -2,9 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
-import { FileSystemAdapter, Notice, Plugin } from "obsidian";
+import { FileSystemAdapter, Notice, Plugin, TAbstractFile, TFile, TFolder } from "obsidian";
 
+import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput, type PreflightResult } from "./diagnostics";
+import { isScopeSetupComplete, listVaultFolderOptions, readScopeSelection, updateScopeSelection, type ScopeSelection, type VaultFolderOption } from "./onboarding";
 import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
+import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { assertAllowedPluginArgs } from "./runArguments";
 import {
   buildSchedulerStatus,
@@ -31,6 +34,21 @@ interface SchedulerState {
   lastMessage: string;
 }
 
+interface DiagnosticsState {
+  inProgress: boolean;
+  lastRunAt: number | null;
+  result: PreflightResult | null;
+}
+
+export interface ScopeSetupStatus {
+  complete: boolean;
+  canManage: boolean;
+  configPath: string | null;
+  currentPaths: string[];
+  allPaths: string[];
+  guidance: string;
+}
+
 export default class MindmapPlugin extends Plugin {
   settings: MindmapSettings = DEFAULT_SETTINGS;
 
@@ -45,6 +63,12 @@ export default class MindmapPlugin extends Plugin {
   };
   private readonly recentLog: string[] = [];
   private statusBarEl: HTMLElement | null = null;
+  private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
+  private diagnosticsState: DiagnosticsState = {
+    inProgress: false,
+    lastRunAt: null,
+    result: null,
+  };
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -52,6 +76,13 @@ export default class MindmapPlugin extends Plugin {
 
     this.statusBarEl = this.addStatusBarItem();
     this.addSettingTab(new MindmapSettingTab(this.app, this));
+    this.pendingScanService = createPendingScanService(
+      this.app.vault,
+      this.getRuntimeContext(),
+      () => this.getResolvedRuntime(),
+      (message) => this.appendLog(message),
+      () => this.updateStatusBar(),
+    );
 
     this.addCommand({
       id: "mindmap-run-now",
@@ -89,14 +120,18 @@ export default class MindmapPlugin extends Plugin {
       id: "mindmap-validate-runtime",
       name: "Validate Mindmap runtime",
       callback: () => {
-        this.showRuntimeNotice(this.getResolvedRuntime());
+        void this.runPreflight("manual");
       },
     });
 
     this.syncScheduler();
+    this.registerVaultRefreshEvents();
+    void this.pendingScanService.warm().then(() => this.updateStatusBar());
+    void this.runPreflight("startup");
   }
 
   onunload(): void {
+    this.pendingScanService?.dispose();
     this.stopScheduler("Plugin unloaded. Internal scheduler stopped.");
     if (this.currentProcess) {
       this.appendLog("Stopping active Mindmap run because the plugin is unloading.");
@@ -114,6 +149,7 @@ export default class MindmapPlugin extends Plugin {
     this.settings.schedulerIntervalMinutes = normalizeSchedulerInterval(this.settings.schedulerIntervalMinutes);
     await this.saveData(this.settings);
     this.syncScheduler();
+    this.pendingScanService?.requestRefresh("settings updated");
   }
 
   getResolvedRuntime(): ResolvedRuntime {
@@ -153,6 +189,176 @@ export default class MindmapPlugin extends Plugin {
     return [...this.recentLog];
   }
 
+  getPendingSnapshot(): PendingSnapshot {
+    return this.pendingScanService?.getSnapshot() ?? {
+      available: false,
+      reason: "Pending scan service not initialized yet.",
+      current: { total: 0, items: [] },
+      all: { total: 0, items: [] },
+      metrics: {
+        durationMs: 0,
+        filesListed: 0,
+        filesScanned: 0,
+        filesUpdated: 0,
+        totalTracked: 0,
+        dirtyPaths: 0,
+        stateReloaded: false,
+        configReloaded: false,
+      },
+      lastUpdatedAt: null,
+    };
+  }
+
+  getPendingSummary(): DocumentFragment {
+    const snapshot = this.getPendingSnapshot();
+    const fragment = document.createDocumentFragment();
+    if (!snapshot.available) {
+      fragment.appendText(`Pending scan unavailable: ${snapshot.reason}`);
+      return fragment;
+    }
+
+    fragment.appendText(`Current scope: ${snapshot.current.total} pending`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`All scopes: ${snapshot.all.total} pending`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Top current items: ${snapshot.current.items.join(", ") || "None"}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Top all items: ${snapshot.all.items.join(", ") || "None"}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(
+      `Last scan: ${snapshot.metrics.durationMs}ms, listed ${snapshot.metrics.filesListed}, rescanned ${snapshot.metrics.filesScanned}, updated ${snapshot.metrics.filesUpdated}`,
+    );
+    return fragment;
+  }
+
+  getScopeSetupStatus(): ScopeSetupStatus {
+    const runtime = this.getResolvedRuntime();
+    if (!runtime.valid) {
+      const error = runtime.messages.find((message) => message.level === "error");
+      return {
+        complete: false,
+        canManage: false,
+        configPath: null,
+        currentPaths: [],
+        allPaths: [],
+        guidance: error?.message ?? "Mindmap runtime is not ready.",
+      };
+    }
+
+    if (!this.canManageConfig(runtime)) {
+      return {
+        complete: false,
+        canManage: false,
+        configPath: runtime.configPath,
+        currentPaths: [],
+        allPaths: [],
+        guidance: "First-run setup is only available for the bundled plugin config. Reset the config path to the default or update your custom config manually.",
+      };
+    }
+
+    try {
+      const rawConfig = fs.readFileSync(runtime.configPath, "utf8");
+      const selection = readScopeSelection(rawConfig);
+      return {
+        complete: isScopeSetupComplete(selection),
+        canManage: true,
+        configPath: runtime.configPath,
+        currentPaths: selection.currentPaths,
+        allPaths: selection.allPaths,
+        guidance: isScopeSetupComplete(selection)
+          ? "Scope folders are configured."
+          : "Select at least one folder for both current and all scopes, then save setup.",
+      };
+    } catch (error) {
+      return {
+        complete: false,
+        canManage: true,
+        configPath: runtime.configPath,
+        currentPaths: [],
+        allPaths: [],
+        guidance: error instanceof Error
+          ? `Mindmap config could not be read: ${error.message}`
+          : "Mindmap config could not be read.",
+      };
+    }
+  }
+
+  getVaultFolderOptions(): VaultFolderOption[] {
+    const folderPaths = this.app.vault
+      .getAllLoadedFiles()
+      .filter((file): file is TFolder => file instanceof TFolder)
+      .map((folder) => folder.path);
+    return listVaultFolderOptions(folderPaths);
+  }
+
+  async saveScopeSetup(selection: ScopeSelection): Promise<void> {
+    const runtime = this.getResolvedRuntime();
+    const status = this.getScopeSetupStatus();
+    if (!runtime.valid || !status.canManage || !status.configPath) {
+      throw new Error(status.guidance);
+    }
+
+    const updated = updateScopeSelection(fs.readFileSync(status.configPath, "utf8"), selection);
+    fs.writeFileSync(status.configPath, updated, "utf8");
+    this.appendLog(`[setup] Updated scope folders in ${status.configPath}`);
+    this.pendingScanService?.requestRefresh("scope setup updated");
+    this.updateStatusBar();
+  }
+
+  getScopeSetupSummary(): DocumentFragment {
+    const status = this.getScopeSetupStatus();
+    const fragment = document.createDocumentFragment();
+    fragment.appendText(`Configured: ${status.complete ? "Yes" : "No"}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Config: ${status.configPath ?? "Unavailable"}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Current scope: ${status.currentPaths.join(", ") || "None"}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`All scope: ${status.allPaths.join(", ") || "None"}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(status.guidance);
+    return fragment;
+  }
+
+  getDiagnosticsSummary(): DocumentFragment {
+    const fragment = document.createDocumentFragment();
+    const { result, inProgress, lastRunAt } = this.diagnosticsState;
+
+    fragment.appendText(`Preflight running: ${inProgress ? "Yes" : "No"}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Last preflight: ${formatTimestamp(lastRunAt)}`);
+
+    if (!result) {
+      fragment.appendChild(document.createElement("br"));
+      fragment.appendText("No preflight result recorded yet.");
+    } else {
+      fragment.appendChild(document.createElement("br"));
+      fragment.appendText(`Status: ${result.ok ? "Ready" : "Not ready"}`);
+      fragment.appendChild(document.createElement("br"));
+      fragment.appendText(`Summary: ${result.summary}`);
+      for (const check of result.checks) {
+        fragment.appendChild(document.createElement("br"));
+        fragment.appendText(`[${check.status}] ${check.label}: ${check.message}`);
+        if (check.guidance) {
+          fragment.appendChild(document.createElement("br"));
+          fragment.appendText(`Guidance: ${check.guidance}`);
+        }
+      }
+    }
+
+    const recent = this.getRecentLogLines().slice(-6);
+    if (recent.length > 0) {
+      fragment.appendChild(document.createElement("br"));
+      fragment.appendText("Recent diagnostics:");
+      for (const line of recent) {
+        fragment.appendChild(document.createElement("br"));
+        fragment.appendText(line);
+      }
+    }
+
+    return fragment;
+  }
+
   showRuntimeNotice(runtime: ResolvedRuntime): void {
     if (!runtime.valid) {
       const error = runtime.messages.find((message) => message.level === "error");
@@ -163,9 +369,20 @@ export default class MindmapPlugin extends Plugin {
     const scheduleLabel = isSchedulerEnabled(this.settings.schedulerMode)
       ? `Scheduler on. Next run ${formatTimestamp(this.schedulerState.nextRunAt)}.`
       : "Scheduler off. Manual runs stay available on all desktop platforms.";
+    const pending = this.getPendingSnapshot();
+    const pendingLabel = pending.available
+      ? `Pending current/all: ${pending.current.total}/${pending.all.total}.`
+      : `Pending unavailable: ${pending.reason}.`;
+    const preflightLabel = this.diagnosticsState.result
+      ? `Preflight: ${this.diagnosticsState.result.ok ? "ready" : "failed"}. ${this.diagnosticsState.result.summary}`
+      : "Preflight has not run yet.";
+    const setup = this.getScopeSetupStatus();
+    const setupLabel = setup.complete
+      ? `Scope setup ready. Current/all: ${setup.currentPaths.length}/${setup.allPaths.length}.`
+      : `Setup required. ${setup.guidance}`;
 
     new Notice(
-      `Mindmap runtime ${runtime.trust.level}. ${formatCommandPreview(runtime, DEFAULT_RUN_ARGS)}. ${scheduleLabel}`,
+      `Mindmap runtime ${runtime.trust.level}. ${formatCommandPreview(runtime, DEFAULT_RUN_ARGS)}. ${scheduleLabel} ${pendingLabel} ${preflightLabel} ${setupLabel}`,
       12000,
     );
   }
@@ -187,6 +404,112 @@ export default class MindmapPlugin extends Plugin {
       ? `Mindmap scheduler enabled. Next run ${formatTimestamp(this.schedulerState.nextRunAt)}.`
       : "Mindmap scheduler disabled. Manual runs remain available.";
     new Notice(message, 8000);
+  }
+
+  async runPreflight(trigger: "manual" | "startup"): Promise<PreflightResult> {
+    const runtime = this.getResolvedRuntime();
+    if (!runtime.valid) {
+      const error = runtime.messages.find((message) => message.level === "error");
+      const result: PreflightResult = {
+        ok: false,
+        summary: error?.message ?? "Mindmap runtime is not ready.",
+        checks: [
+          {
+            code: "RUNTIME_PATH_INVALID",
+            label: "Runtime paths",
+            status: "error",
+            message: error?.message ?? "Mindmap runtime is not ready.",
+            guidance: "Fix the configured paths or reset them to the bundled defaults before running preflight.",
+          },
+        ],
+        rawStdout: "",
+        rawStderr: "",
+        exitCode: 1,
+      };
+      this.diagnosticsState.result = result;
+      this.diagnosticsState.lastRunAt = Date.now();
+      this.appendLog(`[preflight] ${result.summary}`);
+      if (trigger === "manual") {
+        new Notice(formatPreflightNotice(result), 12000);
+      }
+      this.updateStatusBar();
+      return result;
+    }
+
+    let command: { command: string; args: string[]; cwd: string };
+    try {
+      command = this.buildRuntimeCommand(["--preflight"]);
+    } catch (error) {
+      const result: PreflightResult = {
+        ok: false,
+        summary: error instanceof Error ? error.message : "Blocked unexpected preflight arguments.",
+        checks: [
+          {
+            code: "PREFLIGHT_ARGUMENTS_BLOCKED",
+            label: "Preflight execution",
+            status: "error",
+            message: error instanceof Error ? error.message : "Blocked unexpected preflight arguments.",
+            guidance: "Use only plugin-managed Mindmap commands.",
+          },
+        ],
+        rawStdout: "",
+        rawStderr: "",
+        exitCode: 1,
+      };
+      this.diagnosticsState.result = result;
+      this.diagnosticsState.lastRunAt = Date.now();
+      this.appendLog(`[preflight] ${result.summary}`);
+      if (trigger === "manual") {
+        new Notice(formatPreflightNotice(result), 12000);
+      }
+      this.updateStatusBar();
+      return result;
+    }
+
+    this.diagnosticsState.inProgress = true;
+    this.updateStatusBar();
+    this.appendLog(`[preflight] Starting ${formatCommandPreview(runtime, ["--preflight"])}`);
+
+    const result = await new Promise<PreflightResult>((resolve) => {
+      let stdout = "";
+      let stderr = "";
+      const child = spawn(command.command, command.args, {
+        cwd: command.cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+      });
+
+      child.stderr.on("data", (chunk) => {
+        const text = chunk.toString();
+        stderr += text;
+        for (const line of text.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)) {
+          this.appendLog(`[preflight][stderr] ${line}`);
+        }
+      });
+
+      child.on("error", (error) => {
+        resolve(buildSpawnFailureResult(error, command.command));
+      });
+
+      child.on("close", (code) => {
+        resolve(parsePreflightOutput(stdout, stderr, code ?? 1));
+      });
+    });
+
+    this.diagnosticsState.inProgress = false;
+    this.diagnosticsState.lastRunAt = Date.now();
+    this.diagnosticsState.result = result;
+    this.appendLog(`[preflight] ${result.summary}`);
+    this.updateStatusBar();
+
+    if (trigger === "manual" || !result.ok) {
+      new Notice(formatPreflightNotice(result), 12000);
+    }
+
+    return result;
   }
 
   private syncScheduler(): void {
@@ -275,6 +598,16 @@ export default class MindmapPlugin extends Plugin {
       return;
     }
 
+    const scopeSetup = this.getScopeSetupStatus();
+    if (!scopeSetup.complete) {
+      const message = `Mindmap ${trigger} run skipped: ${scopeSetup.guidance}`;
+      this.schedulerState.lastMessage = message;
+      this.appendLog(message);
+      new Notice(message, 12000);
+      this.updateStatusBar();
+      return;
+    }
+
     let command: { command: string; args: string[]; cwd: string };
     try {
       command = this.buildRuntimeCommand(DEFAULT_RUN_ARGS);
@@ -303,16 +636,19 @@ export default class MindmapPlugin extends Plugin {
       this.schedulerState.lastMessage = `Running via ${trigger} trigger.`;
       this.updateStatusBar();
 
+      const stdoutLines: string[] = [];
+      const stderrLines: string[] = [];
+
       child.stdout.on("data", (chunk) => {
-        const line = chunk.toString().trim();
-        if (line) {
+        for (const line of chunk.toString().split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)) {
+          stdoutLines.push(line);
           this.appendLog(`[stdout] ${line}`);
         }
       });
 
       child.stderr.on("data", (chunk) => {
-        const line = chunk.toString().trim();
-        if (line) {
+        for (const line of chunk.toString().split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)) {
+          stderrLines.push(line);
           this.appendLog(`[stderr] ${line}`);
         }
       });
@@ -333,13 +669,15 @@ export default class MindmapPlugin extends Plugin {
         this.currentProcess = null;
         this.schedulerState.lastRunAt = Date.now();
         this.schedulerState.lastExitCode = code;
+        const failureContext = stderrLines.at(-1) ?? stdoutLines.at(-1);
         this.schedulerState.lastMessage = code === 0
           ? `Last ${trigger} run finished successfully.`
-          : `Last ${trigger} run exited with code ${code}.`;
+          : `Last ${trigger} run exited with code ${code}.${failureContext ? ` ${failureContext}` : ""}`;
         this.appendLog(this.schedulerState.lastMessage);
         if (code !== 0 || trigger === "manual") {
           new Notice(this.schedulerState.lastMessage, 10000);
         }
+        this.pendingScanService?.requestRefresh("run completed");
         this.updateStatusBar();
         resolve();
       });
@@ -365,12 +703,30 @@ export default class MindmapPlugin extends Plugin {
       return;
     }
 
-    if (isSchedulerEnabled(this.settings.schedulerMode)) {
-      this.statusBarEl.setText(`Mindmap: next ${formatTimestamp(this.schedulerState.nextRunAt)}`);
+    if (this.diagnosticsState.inProgress) {
+      this.statusBarEl.setText("Mindmap: preflight");
       return;
     }
 
-    this.statusBarEl.setText("Mindmap: manual");
+    if (this.diagnosticsState.result && !this.diagnosticsState.result.ok) {
+      this.statusBarEl.setText("Mindmap: preflight failed");
+      return;
+    }
+
+    if (!this.getScopeSetupStatus().complete) {
+      this.statusBarEl.setText("Mindmap: setup required");
+      return;
+    }
+
+    if (isSchedulerEnabled(this.settings.schedulerMode)) {
+      const pending = this.getPendingSnapshot();
+      const pendingLabel = pending.available ? `${pending.current.total} pending` : "pending n/a";
+      this.statusBarEl.setText(`Mindmap: ${pendingLabel} • next ${formatTimestamp(this.schedulerState.nextRunAt)}`);
+      return;
+    }
+
+    const pending = this.getPendingSnapshot();
+    this.statusBarEl.setText(pending.available ? `Mindmap: ${pending.current.total} pending` : "Mindmap: manual");
   }
 
   private getRuntimeContext(): RuntimeContext {
@@ -398,5 +754,30 @@ export default class MindmapPlugin extends Plugin {
 
     await fs.promises.mkdir(runtimeDir, { recursive: true });
     await fs.promises.copyFile(templatePath, configPath);
+  }
+
+  private canManageConfig(runtime: ResolvedRuntime): boolean {
+    const runtimeDir = getPluginRuntimeDir(this.getRuntimeContext());
+    return path.normalize(runtime.configPath).startsWith(path.normalize(runtimeDir));
+  }
+
+  private registerVaultRefreshEvents(): void {
+    const markDirty = (file: TAbstractFile | null, oldPath?: string) => {
+      const relpaths: string[] = [];
+      if (oldPath && oldPath.endsWith(".md")) {
+        relpaths.push(oldPath);
+      }
+      if (file instanceof TFile && file.extension === "md") {
+        relpaths.push(file.path);
+      }
+      if (relpaths.length > 0) {
+        this.pendingScanService?.requestRefresh("vault file changed", relpaths);
+      }
+    };
+
+    this.registerEvent(this.app.vault.on("create", (file) => markDirty(file)));
+    this.registerEvent(this.app.vault.on("modify", (file) => markDirty(file)));
+    this.registerEvent(this.app.vault.on("delete", (file) => markDirty(file)));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => markDirty(file, oldPath)));
   }
 }

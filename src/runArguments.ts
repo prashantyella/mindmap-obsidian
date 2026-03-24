@@ -1,4 +1,5 @@
 export const ALLOWED_PLUGIN_ARGS = new Set([
+  "--preflight",
   "--current",
   "--all",
   "--apply",
