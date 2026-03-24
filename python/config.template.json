@@ -1,0 +1,54 @@
+{
+  "vault_root": "../..",
+  "db_path": ".obsidian/plugins/mindmap-obsidian/data/chroma",
+  "state_path": ".obsidian/plugins/mindmap-obsidian/data/state.json",
+  "log_path": ".obsidian/plugins/mindmap-obsidian/logs/last-run.txt",
+  "preview_log_path": ".obsidian/plugins/mindmap-obsidian/logs/preview.jsonl",
+  "ollama_base_url": "http://localhost:11434",
+  "embed_model": "mxbai-embed-large",
+  "llm_model": "llama3.1:8b",
+  "chunk_target_tokens": 300,
+  "chunk_overlap_tokens": 40,
+  "tag_limit": 3,
+  "concept_limit": 4,
+  "related_limit": 8,
+  "frontmatter_keys": [
+    "summary",
+    "tags",
+    "concepts",
+    "related"
+  ],
+  "min_note_words": 30,
+  "concept_max_words": 4,
+  "related_min_score": 0.6,
+  "allow_free_tags": true,
+  "min_tag_length": 2,
+  "concept_case": "lower",
+  "related_strategy": "chunk",
+  "related_candidate_limit": 120,
+  "notes_paths": [
+    "Notes"
+  ],
+  "notes_paths_current": [
+    "Notes"
+  ],
+  "notes_paths_all": [
+    "Notes"
+  ],
+  "tag_max_words": 3,
+  "min_tag_frequency": 2,
+  "tag_frequency_fallback": 1,
+  "tag_aliases_path": "tag_aliases.json",
+  "mindmap_heading": "## Mindmap",
+  "write_mindmap_section": true,
+  "related_overreach": 2,
+  "related_creative": 2,
+  "related_creative_min": 0.45,
+  "related_creative_max": 0.7,
+  "apply_per_note": false,
+  "ollama_timeout_seconds": 120,
+  "ollama_retries": 1,
+  "ollama_backoff_seconds": 2.0,
+  "ollama_embed_timeout_seconds": 120,
+  "ollama_llm_timeout_seconds": 180
+}

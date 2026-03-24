@@ -1,0 +1,7 @@
+.mindmap-validation-ok .setting-item-description {
+  color: var(--text-normal);
+}
+
+.mindmap-validation-error .setting-item-description {
+  color: var(--text-error);
+}

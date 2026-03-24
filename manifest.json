@@ -1,0 +1,10 @@
+{
+  "id": "mindmap-obsidian",
+  "name": "Mindmap",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.12",
+  "description": "Desktop-first Obsidian plugin that orchestrates the Mindmap Python engine.",
+  "author": "yella",
+  "authorUrl": "",
+  "isDesktopOnly": true
+}

@@ -1,0 +1,21 @@
+{
+  "name": "mindmap-obsidian",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone Obsidian plugin repo for the Mindmap Python-powered workflow.",
+  "license": "MIT",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "test": "tsx --test src/**/*.test.ts",
+    "validate": "node scripts/validate-release.mjs",
+    "release:prepare": "npm run build && npm run validate && node scripts/prepare-release.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.1",
+    "esbuild": "^0.25.10",
+    "obsidian": "latest",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
