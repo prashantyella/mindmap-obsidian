@@ -46,7 +46,7 @@ class PreflightHelperTests(unittest.TestCase):
     def test_dependency_install_guidance_uses_installed_plugin_path(self):
         self.assertEqual(
             dependency_install_guidance(),
-            "Install dependencies with `python3 -m pip install -r .obsidian/plugins/mindmap-obsidian/python/requirements.txt`.",
+            "Install dependencies with `python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt`.",
         )
 
 

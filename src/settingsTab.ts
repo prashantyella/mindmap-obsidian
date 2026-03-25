@@ -26,7 +26,7 @@ const FIELD_META: Record<RuntimeField, { name: string; description: string; plac
 };
 
 function thisPluginId(): string {
-  return "mindmap-obsidian";
+  return "mindmap-ai";
 }
 
 export class MindmapSettingTab extends PluginSettingTab {

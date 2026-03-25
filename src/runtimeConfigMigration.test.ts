@@ -36,16 +36,16 @@ class MemoryFs implements RuntimeConfigMigrationFs {
 function baseConfig(vaultRoot: string): string {
   return JSON.stringify({
     vault_root: vaultRoot,
-    db_path: ".obsidian/plugins/mindmap-obsidian/data/chroma",
-    state_path: ".obsidian/plugins/mindmap-obsidian/data/state.json",
-    log_path: ".obsidian/plugins/mindmap-obsidian/logs/last-run.txt",
+    db_path: ".obsidian/plugins/mindmap-ai/data/chroma",
+    state_path: ".obsidian/plugins/mindmap-ai/data/state.json",
+    log_path: ".obsidian/plugins/mindmap-ai/logs/last-run.txt",
     notes_paths_current: [],
     notes_paths_all: [],
   });
 }
 
 test("migrateLegacyPluginVaultRoot updates legacy plugin vault_root value", async () => {
-  const configPath = "/vault/.obsidian/plugins/mindmap-obsidian/python/config.json";
+  const configPath = "/vault/.obsidian/plugins/mindmap-ai/python/config.json";
   const fs = new MemoryFs({
     [configPath]: baseConfig("../.."),
   });
@@ -59,7 +59,7 @@ test("migrateLegacyPluginVaultRoot updates legacy plugin vault_root value", asyn
 });
 
 test("migrateLegacyPluginVaultRoot skips non-plugin-managed configs", async () => {
-  const configPath = "/vault/.obsidian/plugins/mindmap-obsidian/python/config.json";
+  const configPath = "/vault/.obsidian/plugins/mindmap-ai/python/config.json";
   const fs = new MemoryFs({
     [configPath]: JSON.stringify({
       vault_root: "../..",
@@ -78,7 +78,7 @@ test("migrateLegacyPluginVaultRoot skips non-plugin-managed configs", async () =
 });
 
 test("migrateLegacyPluginVaultRoot returns warning when write fails", async () => {
-  const configPath = "/vault/.obsidian/plugins/mindmap-obsidian/python/config.json";
+  const configPath = "/vault/.obsidian/plugins/mindmap-ai/python/config.json";
   const fs = new MemoryFs({
     [configPath]: baseConfig("../.."),
   });

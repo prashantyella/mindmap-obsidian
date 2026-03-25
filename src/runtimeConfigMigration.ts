@@ -1,6 +1,6 @@
 const LEGACY_PLUGIN_VAULT_ROOT = "../..";
 const CURRENT_PLUGIN_VAULT_ROOT = "../../../../";
-const PLUGIN_PATH_PREFIX = ".obsidian/plugins/mindmap-obsidian/";
+const PLUGIN_PATH_PREFIX = ".obsidian/plugins/mindmap-ai/";
 
 export interface RuntimeConfigMigrationFs {
   existsSync(targetPath: string): boolean;

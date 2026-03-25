@@ -25,7 +25,7 @@ except ModuleNotFoundError as exc:
     YAML = None
     YAML_IMPORT_ERROR = exc
 
-DEPENDENCY_INSTALL_COMMAND = "python3 -m pip install -r .obsidian/plugins/mindmap-obsidian/python/requirements.txt"
+DEPENDENCY_INSTALL_COMMAND = "python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt"
 
 
 @dataclass

@@ -18,10 +18,11 @@ Mindmap is a desktop-only Obsidian plugin that runs a local Python workflow to:
 
 1. In Obsidian: `Settings -> Community plugins`.
 2. Install and enable `Mindmap`.
+   On first enable, the plugin can restore its Python runtime automatically inside the plugin folder.
 3. From your vault root, install Python dependencies:
 
 ```bash
-python3 -m pip install -r .obsidian/plugins/mindmap-obsidian/python/requirements.txt
+python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt
 ```
 
 4. Pull required Ollama models:
@@ -52,14 +53,14 @@ ollama pull llama3.1:8b
 
 ## Vault Path Safety
 
-By default, Mindmap stores runtime data under `.obsidian/plugins/mindmap-obsidian/` inside your current vault; if you customize runtime paths, keep them vault-relative and inside the same vault.
+By default, Mindmap stores runtime data under `.obsidian/plugins/mindmap-ai/` inside your current vault; if you customize runtime paths, keep them vault-relative and inside the same vault.
 
 ## Troubleshooting
 
 - Python/dependency issues:
 
 ```bash
-python3 -m pip install -r .obsidian/plugins/mindmap-obsidian/python/requirements.txt
+python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt
 ```
 
 - Missing models:
@@ -77,3 +78,8 @@ ollama pull llama3.1:8b
 - Desktop only (`isDesktopOnly: true`)
 - Mobile is not supported
 - All processing is local (Python + Ollama on your machine)
+
+## Release Metadata
+
+- `manifest.json` defines plugin ID, version, and compatibility.
+- `versions.json` maps plugin versions to minimum Obsidian versions.

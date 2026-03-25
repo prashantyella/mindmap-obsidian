@@ -9,6 +9,13 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.1.2
+
+### Changed
+- Updated plugin ID from `mindmap-obsidian` to `mindmap-ai` for community-directory compliance.
+- Updated bundled runtime paths, dependency guidance, and defaults to use `.obsidian/plugins/mindmap-ai/`.
+- Updated tests and docs to reflect the new plugin ID and install paths.
+
 ## 0.1.1
 
 ### Fixed

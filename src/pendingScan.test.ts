@@ -40,7 +40,7 @@ test("PendingIndex rescans only changed files and recomputes counts from state w
     allPaths: ["Notes"],
     heading: "## Mindmap",
     minWords: 0,
-    statePath: "/vault/.obsidian/plugins/mindmap-obsidian/data/state.json",
+    statePath: "/vault/.obsidian/plugins/mindmap-ai/data/state.json",
   };
 
   const first = await index.refresh({
@@ -130,7 +130,7 @@ test("PendingIndex treats vault-root scope (.) as matching all markdown files", 
     allPaths: ["."],
     heading: "## Mindmap",
     minWords: 0,
-    statePath: "/vault/.obsidian/plugins/mindmap-obsidian/data/state.json",
+    statePath: "/vault/.obsidian/plugins/mindmap-ai/data/state.json",
   };
 
   const snapshot = await index.refresh({

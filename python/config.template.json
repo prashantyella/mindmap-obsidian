@@ -1,9 +1,9 @@
 {
   "vault_root": "../../../../",
-  "db_path": ".obsidian/plugins/mindmap-obsidian/data/chroma",
-  "state_path": ".obsidian/plugins/mindmap-obsidian/data/state.json",
-  "log_path": ".obsidian/plugins/mindmap-obsidian/logs/last-run.txt",
-  "preview_log_path": ".obsidian/plugins/mindmap-obsidian/logs/preview.jsonl",
+  "db_path": ".obsidian/plugins/mindmap-ai/data/chroma",
+  "state_path": ".obsidian/plugins/mindmap-ai/data/state.json",
+  "log_path": ".obsidian/plugins/mindmap-ai/logs/last-run.txt",
+  "preview_log_path": ".obsidian/plugins/mindmap-ai/logs/preview.jsonl",
   "ollama_base_url": "http://localhost:11434",
   "embed_model": "mxbai-embed-large",
   "llm_model": "llama3.1:8b",

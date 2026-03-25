@@ -27,7 +27,7 @@ class FakeFs implements PathFs {
 function createContext(): RuntimeContext {
   return {
     vaultRoot: path.normalize("/vault"),
-    pluginDir: path.normalize("/vault/.obsidian/plugins/mindmap-obsidian"),
+    pluginDir: path.normalize("/vault/.obsidian/plugins/mindmap-ai"),
   };
 }
 
@@ -55,8 +55,8 @@ test("resolveRuntime accepts vault-relative overrides inside the vault", () => {
   const context = createContext();
   const fakeFs = new FakeFs(
     new Set([
-      "/vault/.obsidian/plugins/mindmap-obsidian/python/mindmap.py",
-      "/vault/.obsidian/plugins/mindmap-obsidian/python/config.template.json",
+      "/vault/.obsidian/plugins/mindmap-ai/python/mindmap.py",
+      "/vault/.obsidian/plugins/mindmap-ai/python/config.template.json",
       "/vault/tools/python/bin/python",
       "/vault/custom/mindmap.py",
       "/vault/custom/config.json",

@@ -37,7 +37,7 @@ const assets: BundledRuntimeAssets = {
 };
 
 test("ensureBundledRuntimeAssets repairs missing runtime files and creates config.json", async () => {
-  const runtimeDir = path.normalize("/vault/.obsidian/plugins/mindmap-obsidian/python");
+  const runtimeDir = path.normalize("/vault/.obsidian/plugins/mindmap-ai/python");
   const fs = new MemoryFs();
 
   const result = await ensureBundledRuntimeAssets(runtimeDir, assets, fs);
@@ -52,7 +52,7 @@ test("ensureBundledRuntimeAssets repairs missing runtime files and creates confi
 });
 
 test("ensureBundledRuntimeAssets leaves existing runtime files untouched", async () => {
-  const runtimeDir = path.normalize("/vault/.obsidian/plugins/mindmap-obsidian/python");
+  const runtimeDir = path.normalize("/vault/.obsidian/plugins/mindmap-ai/python");
   const fs = new MemoryFs({
     [path.join(runtimeDir, "mindmap.py")]: "custom script\n",
     [path.join(runtimeDir, "requirements.txt")]: "custom req\n",
@@ -70,7 +70,7 @@ test("ensureBundledRuntimeAssets leaves existing runtime files untouched", async
 });
 
 test("ensureBundledRuntimeAssets reports actionable failure when writing bundled assets fails", async () => {
-  const runtimeDir = path.normalize("/vault/.obsidian/plugins/mindmap-obsidian/python");
+  const runtimeDir = path.normalize("/vault/.obsidian/plugins/mindmap-ai/python");
   const fs = new MemoryFs();
   fs.failWrites = true;
 
