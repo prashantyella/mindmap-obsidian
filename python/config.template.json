@@ -1,5 +1,5 @@
 {
-  "vault_root": "../..",
+  "vault_root": "../../../../",
   "db_path": ".obsidian/plugins/mindmap-obsidian/data/chroma",
   "state_path": ".obsidian/plugins/mindmap-obsidian/data/state.json",
   "log_path": ".obsidian/plugins/mindmap-obsidian/logs/last-run.txt",

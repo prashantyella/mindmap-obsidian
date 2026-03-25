@@ -125,7 +125,7 @@ function isWithinScope(relpath: string, folders: string[]): boolean {
     return false;
   }
 
-  return folders.some((folder) => relpath === folder || relpath.startsWith(`${folder}/`));
+  return folders.some((folder) => folder === "." || relpath === folder || relpath.startsWith(`${folder}/`));
 }
 
 function stripFrontmatter(text: string): string {

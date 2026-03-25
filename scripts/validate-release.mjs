@@ -77,6 +77,9 @@ const serialized = JSON.stringify(config);
 if (serialized.includes("/Users/") || serialized.includes("\\Users\\")) {
   throw new Error("config.template.json contains a machine-specific path");
 }
+if (config.vault_root !== "../../../../") {
+  throw new Error(`config.template.json vault_root must be "../../../../", got ${String(config.vault_root)}`);
+}
 
 const distManifest = JSON.parse(fs.readFileSync(path.join("dist", "manifest.json"), "utf8"));
 if (distManifest.version !== manifest.version) {

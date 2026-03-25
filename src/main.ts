@@ -10,6 +10,7 @@ import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type Resolve
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { assertAllowedPluginArgs } from "./runArguments";
 import { getRunProfile, type RunScope } from "./runProfiles";
+import { migrateLegacyPluginVaultRoot } from "./runtimeConfigMigration";
 import { ensureBundledRuntimeAssets } from "./runtimeAssets";
 import {
   buildSchedulerStatus,
@@ -771,6 +772,17 @@ export default class MindmapPlugin extends Plugin {
     this.appendLog(`[runtime] ${result.message}`);
     if (!result.ok) {
       new Notice(result.message, 12000);
+      return;
+    }
+
+    const configMigration = await migrateLegacyPluginVaultRoot(path.join(runtimeDir, "config.json"), {
+      existsSync: fs.existsSync,
+      readFile: (targetPath, encoding) => fs.promises.readFile(targetPath, encoding),
+      writeFile: (targetPath, content, encoding) => fs.promises.writeFile(targetPath, content, encoding),
+    });
+    if (configMigration.message) {
+      this.appendLog(`[runtime] ${configMigration.message}`);
+      new Notice(configMigration.message, 12000);
     }
   }
 

@@ -33,7 +33,7 @@ class MemoryFs implements RuntimeAssetFs {
 const assets: BundledRuntimeAssets = {
   "mindmap.py": "print('mindmap')\n",
   "requirements.txt": "chromadb\n",
-  "config.template.json": '{"vault_root":"../.."}\n',
+  "config.template.json": '{"vault_root":"../../../../"}\n',
 };
 
 test("ensureBundledRuntimeAssets repairs missing runtime files and creates config.json", async () => {

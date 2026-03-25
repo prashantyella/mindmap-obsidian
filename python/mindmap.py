@@ -786,9 +786,6 @@ def update_related_section(text: str, heading: str, links: List) -> str:
         css_class = f"mindmap-link is-{kind}"
         block.append(f'> - <span class="{css_class}">[[{path}|{label}]]</span>')
 
-    # Graph lens shortcut (local graph)
-    block.append('> [◎](obsidian://command?name=graph:open-local-graph)')
-
     clean = clean.rstrip() + "\n\n---\n\n"
     return clean + "\n".join(block) + "\n"
 

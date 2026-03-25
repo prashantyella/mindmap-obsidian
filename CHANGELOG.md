@@ -9,6 +9,18 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.1.1
+
+### Fixed
+- Pending counter now correctly includes vault-wide scope (`"."`) notes.
+- Bundled `config.json` vault root migration for existing installs using legacy `../..` path.
+- Default bundled runtime config now targets correct plugin-to-vault relative root.
+- Mindmap callout output no longer inserts the graph command shortcut link.
+
+### Changed
+- Mindmap callout UI spacing tightened and icon hidden for a cleaner output.
+- Release validation now enforces the correct bundled `vault_root`.
+
 ## 0.1.0
 
 ### Added

@@ -5,3 +5,45 @@
 .mindmap-validation-error .setting-item-description {
   color: var(--text-error);
 }
+
+.callout[data-callout="mindmap"] {
+  margin: 0.8rem 0 0;
+  border-radius: 10px;
+}
+
+.callout[data-callout="mindmap"] .callout-icon {
+  display: none;
+}
+
+.callout[data-callout="mindmap"] .callout-title {
+  padding: 0.55rem 0.8rem 0.2rem;
+}
+
+.callout[data-callout="mindmap"] .callout-title-inner {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.callout[data-callout="mindmap"] .callout-content {
+  padding: 0.15rem 0.8rem 0.65rem;
+}
+
+.callout[data-callout="mindmap"] .callout-content ul {
+  margin: 0;
+  padding-left: 1rem;
+}
+
+.callout[data-callout="mindmap"] .callout-content li {
+  margin: 0.1rem 0;
+}
+
+.callout[data-callout="mindmap"] .mindmap-link {
+  display: inline-block;
+  line-height: 1.2;
+}
+
+.callout[data-callout="mindmap"] a[href^="obsidian://command?name=graph:open-local-graph"] {
+  display: none;
+}

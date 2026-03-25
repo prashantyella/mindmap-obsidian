@@ -122,3 +122,33 @@ test("DebouncedRefreshController collapses repeated triggers into one callback",
   assert.equal(callbackCount, 1);
   controller.dispose();
 });
+
+test("PendingIndex treats vault-root scope (.) as matching all markdown files", async () => {
+  const index = new PendingIndex();
+  const config = {
+    currentPaths: ["."],
+    allPaths: ["."],
+    heading: "## Mindmap",
+    minWords: 0,
+    statePath: "/vault/.obsidian/plugins/mindmap-obsidian/data/state.json",
+  };
+
+  const snapshot = await index.refresh({
+    config,
+    stateHashes: {},
+    files: [
+      {
+        relpath: "Notes/new-note.md",
+        mtimeMs: 10,
+        read: async () => "this note should be considered pending",
+      },
+    ],
+    dirtyPaths: new Set<string>(),
+    forceFull: true,
+    now: 10,
+  });
+
+  assert.equal(snapshot.current.total, 1);
+  assert.equal(snapshot.all.total, 1);
+  assert.deepEqual(snapshot.current.items, ["Notes/new-note.md"]);
+});
