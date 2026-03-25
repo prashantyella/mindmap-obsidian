@@ -1,6 +1,7 @@
 import esbuild from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
+import { runtimeAssetPlugin } from "./scripts/runtime-asset-plugin.mjs";
 
 const production = process.argv.includes("production");
 const watch = process.argv.includes("--watch");
@@ -47,6 +48,7 @@ const ctx = await esbuild.context({
   banner: {
     js: "/* Generated for Obsidian plugin distribution. */",
   },
+  plugins: [runtimeAssetPlugin(process.cwd())],
 });
 
 if (watch) {

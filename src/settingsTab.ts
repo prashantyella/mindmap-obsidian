@@ -2,6 +2,7 @@ import { FileSystemAdapter, Notice, PluginSettingTab, Setting } from "obsidian";
 
 import type { ScopeSelection } from "./onboarding";
 import { formatCommandPreview, type ResolvedRuntime } from "./pathResolver";
+import { getRunProfile } from "./runProfiles";
 import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
 import type MindmapPlugin from "./main";
 import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
@@ -94,7 +95,7 @@ export class MindmapSettingTab extends PluginSettingTab {
     for (const option of options) {
       new Setting(this.containerEl)
         .setName(option.label)
-        .setDesc("Used by the default run command.")
+        .setDesc("Used by Run Mindmap (current scope).")
         .addToggle((toggle) => {
           toggle
             .setValue(draft.currentPaths.includes(option.value))
@@ -108,7 +109,7 @@ export class MindmapSettingTab extends PluginSettingTab {
     for (const option of options) {
       new Setting(this.containerEl)
         .setName(option.label)
-        .setDesc("Used by --all runs.")
+        .setDesc("Used by Run Mindmap (all scopes).")
         .addToggle((toggle) => {
           toggle
             .setValue(draft.allPaths.includes(option.value))
@@ -148,7 +149,7 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderSchedulerSettings(): void {
-    this.renderSection("Scheduler", "Use manual runs or enable interval scheduling.");
+    this.renderSection("Scheduler", "Use manual runs or enable interval scheduling for current-scope runs.");
 
     new Setting(this.containerEl)
       .setName("Mode")
@@ -240,9 +241,11 @@ export class MindmapSettingTab extends PluginSettingTab {
     summary.setClass(runtime.valid ? "mindmap-validation-ok" : "mindmap-validation-error");
 
     const fragment = document.createDocumentFragment();
+    const currentPreview = formatCommandPreview(runtime, getRunProfile("current").args);
+    const allPreview = formatCommandPreview(runtime, getRunProfile("all").args);
     fragment.appendText(`Status: ${runtime.valid ? "Ready" : "Not ready"}`);
     fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Run command: ${formatCommandPreview(runtime, ["--current"])}`);
+    fragment.appendText(`Run commands: current ${currentPreview}; all ${allPreview}`);
     fragment.appendChild(document.createElement("br"));
     fragment.appendText(`Python: ${runtime.command.command}`);
     fragment.appendChild(document.createElement("br"));

@@ -23,19 +23,17 @@ Install and verify:
   - Embeddings: `mxbai-embed-large`
   - LLM: `llama3.1:8b`
 
-### 2. Install plugin files (manual release install)
+### 2. Install the plugin
 
-1. Download these release assets:
-   - `main.js`
-   - `manifest.json`
-   - `styles.css`
-   - `mindmap-python.zip`
-2. Create `.obsidian/plugins/mindmap-obsidian/` in your vault.
-3. Copy `main.js`, `manifest.json`, and `styles.css` into that folder.
-4. Extract `mindmap-python.zip` into `.obsidian/plugins/mindmap-obsidian/` so `python/` exists there.
-5. Enable the plugin in Obsidian.
+Primary path:
 
-When the plugin is enabled, it creates `.obsidian/plugins/mindmap-obsidian/python/config.json` from `config.template.json` if `config.json` does not already exist.
+1. Open `Settings -> Community plugins` in Obsidian.
+2. Install `Mindmap`.
+3. Enable the plugin.
+
+On first enable, the plugin verifies its bundled Python runtime and restores any missing runtime files automatically in `.obsidian/plugins/mindmap-obsidian/python/`.
+
+If `config.json` does not exist yet, the plugin creates it from `config.template.json` automatically.
 
 ### 3. Install Python dependencies (exact command)
 
@@ -81,8 +79,9 @@ If scope setup is incomplete, the status bar shows `Mindmap: scope setup require
 In Command Palette, run:
 
 - `Run Mindmap (current scope)`
+- `Run Mindmap (all scopes)`
 
-This executes the plugin-managed runtime command with `--current --apply`.
+These execute the plugin-managed runtime commands with `--current --apply` and `--all --apply`.
 
 Use `Show Mindmap status` to inspect runtime trust, scheduler state, pending counts, and latest preflight summary.
 
@@ -167,7 +166,7 @@ Fix:
 
 ## Runtime files
 
-The repository ships the Python engine in [`python/`](python/):
+The repository ships the Python engine in [`python/`](python/) and embeds the required runtime assets into the plugin bundle for one-click installs:
 
 - `mindmap.py`
 - `requirements.txt`
@@ -203,6 +202,22 @@ Prepare release assets:
 npm run release:prepare
 ```
 
+## Manual fallback install
+
+If you are testing an unreleased build or recovering from a broken plugin folder manually, you can still install from release assets:
+
+1. Download:
+   - `main.js`
+   - `manifest.json`
+   - `styles.css`
+2. Copy them into `.obsidian/plugins/mindmap-obsidian/`.
+3. Enable the plugin.
+4. Let the plugin restore its Python runtime automatically on load.
+
+Optional fallback only:
+
+- `mindmap-python.zip` remains available as a recovery artifact if you need to inspect or restore the runtime manually.
+
 ## Release assets
 
 `npm run release:prepare` and the GitHub Actions release workflow produce:
@@ -210,9 +225,9 @@ npm run release:prepare
 - `main.js`
 - `manifest.json`
 - `styles.css`
-- `mindmap-python.zip`
+- `mindmap-python.zip` (optional fallback)
 
-`mindmap-python.zip` contains:
+Optional fallback archive contents:
 
 - `mindmap.py`
 - `requirements.txt`
@@ -224,7 +239,7 @@ The release metadata is prepared for Obsidian community-plugin packaging:
 
 - `manifest.json` declares the plugin ID, version, minimum app version, and desktop-only support.
 - `versions.json` maps each plugin version to its required `minAppVersion`.
-- The release workflow publishes the standard plugin assets plus the Python runtime bundle required for v1.
+- The release workflow publishes the standard plugin assets and an optional Python runtime fallback archive for recovery/debugging.
 
 ## Version compatibility
 

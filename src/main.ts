@@ -9,6 +9,8 @@ import { isScopeSetupComplete, listVaultFolderOptions, readScopeSelection, updat
 import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { assertAllowedPluginArgs } from "./runArguments";
+import { getRunProfile, type RunScope } from "./runProfiles";
+import { ensureBundledRuntimeAssets } from "./runtimeAssets";
 import {
   buildSchedulerStatus,
   computeNextRunAt,
@@ -20,8 +22,8 @@ import {
 } from "./scheduler";
 import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./settings";
 import { MindmapSettingTab } from "./settingsTab";
+import { BUNDLED_RUNTIME_ASSETS } from "virtual:runtime-assets";
 
-const DEFAULT_RUN_ARGS = ["--current", "--apply"];
 const LOG_LIMIT = 50;
 
 type RunTrigger = "manual" | "scheduled";
@@ -72,7 +74,7 @@ export default class MindmapPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
-    await this.ensureBundledConfig();
+    await this.ensureBundledRuntime();
 
     this.statusBarEl = this.addStatusBarItem();
     this.addSettingTab(new MindmapSettingTab(this.app, this));
@@ -88,7 +90,15 @@ export default class MindmapPlugin extends Plugin {
       id: "mindmap-run-now",
       name: "Run Mindmap (current scope)",
       callback: () => {
-        void this.runMindmap("manual");
+        void this.runMindmap("manual", "current");
+      },
+    });
+
+    this.addCommand({
+      id: "mindmap-run-all",
+      name: "Run Mindmap (all scopes)",
+      callback: () => {
+        void this.runMindmap("manual", "all");
       },
     });
 
@@ -380,9 +390,11 @@ export default class MindmapPlugin extends Plugin {
     const setupLabel = setup.complete
       ? `Scope setup: ready (${setup.currentPaths.length}/${setup.allPaths.length}).`
       : `Scope setup: required. ${setup.guidance}`;
+    const currentPreview = formatCommandPreview(runtime, getRunProfile("current").args);
+    const allPreview = formatCommandPreview(runtime, getRunProfile("all").args);
 
     new Notice(
-      `Runtime trust: ${runtime.trust.level}. Run: ${formatCommandPreview(runtime, DEFAULT_RUN_ARGS)}. ${scheduleLabel} ${pendingLabel} ${preflightLabel} ${setupLabel}`,
+      `Runtime trust: ${runtime.trust.level}. Runs: current ${currentPreview}; all ${allPreview}. ${scheduleLabel} ${pendingLabel} ${preflightLabel} ${setupLabel}`,
       12000,
     );
   }
@@ -573,11 +585,11 @@ export default class MindmapPlugin extends Plugin {
       return;
     }
 
-    await this.runMindmap("scheduled");
+    await this.runMindmap("scheduled", "current");
     this.scheduleNextTick(Date.now());
   }
 
-  private async runMindmap(trigger: RunTrigger): Promise<void> {
+  private async runMindmap(trigger: RunTrigger, scope: RunScope = "current"): Promise<void> {
     if (this.currentProcess) {
       const message = "Mindmap is already running. Skipping the new request.";
       this.appendLog(message);
@@ -609,8 +621,9 @@ export default class MindmapPlugin extends Plugin {
     }
 
     let command: { command: string; args: string[]; cwd: string };
+    const profile = getRunProfile(scope);
     try {
-      command = this.buildRuntimeCommand(DEFAULT_RUN_ARGS);
+      command = this.buildRuntimeCommand(profile.args);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Blocked unexpected subprocess arguments.";
       this.schedulerState.lastMessage = message;
@@ -620,10 +633,10 @@ export default class MindmapPlugin extends Plugin {
       return;
     }
 
-    const preview = formatCommandPreview(runtime, DEFAULT_RUN_ARGS);
-    this.appendLog(`Starting ${trigger} run: ${preview}`);
+    const preview = formatCommandPreview(runtime, profile.args);
+    this.appendLog(`Starting ${trigger} ${profile.label} run: ${preview}`);
     if (trigger === "manual") {
-      new Notice(`Mindmap run started (current scope). ${preview}`, 8000);
+      new Notice(`Mindmap run started (${profile.label}). ${preview}`, 8000);
     }
 
     await new Promise<void>((resolve) => {
@@ -633,7 +646,7 @@ export default class MindmapPlugin extends Plugin {
       });
       this.currentProcess = child;
       this.schedulerState.lastTrigger = trigger;
-      this.schedulerState.lastMessage = `Running via ${trigger} trigger.`;
+      this.schedulerState.lastMessage = `Running ${profile.label} via ${trigger} trigger.`;
       this.updateStatusBar();
 
       const stdoutLines: string[] = [];
@@ -654,7 +667,7 @@ export default class MindmapPlugin extends Plugin {
       });
 
       child.on("error", (error) => {
-        const message = `Mindmap ${trigger} run failed to start: ${error.message}`;
+        const message = `Mindmap ${trigger} ${profile.label} run failed to start: ${error.message}`;
         this.currentProcess = null;
         this.schedulerState.lastRunAt = Date.now();
         this.schedulerState.lastExitCode = -1;
@@ -671,8 +684,8 @@ export default class MindmapPlugin extends Plugin {
         this.schedulerState.lastExitCode = code;
         const failureContext = stderrLines.at(-1) ?? stdoutLines.at(-1);
         this.schedulerState.lastMessage = code === 0
-          ? `Last ${trigger} run finished successfully.`
-          : `Last ${trigger} run exited with code ${code}.${failureContext ? ` ${failureContext}` : ""}`;
+          ? `Last ${trigger} ${profile.label} run finished successfully.`
+          : `Last ${trigger} ${profile.label} run exited with code ${code}.${failureContext ? ` ${failureContext}` : ""}`;
         this.appendLog(this.schedulerState.lastMessage);
         if (code !== 0 || trigger === "manual") {
           new Notice(this.schedulerState.lastMessage, 10000);
@@ -743,17 +756,22 @@ export default class MindmapPlugin extends Plugin {
     };
   }
 
-  private async ensureBundledConfig(): Promise<void> {
+  private async ensureBundledRuntime(): Promise<void> {
     const runtimeDir = getPluginRuntimeDir(this.getRuntimeContext());
-    const templatePath = path.join(runtimeDir, "config.template.json");
-    const configPath = path.join(runtimeDir, "config.json");
+    const result = await ensureBundledRuntimeAssets(
+      runtimeDir,
+      BUNDLED_RUNTIME_ASSETS,
+      {
+        existsSync: fs.existsSync,
+        mkdir: (targetPath, options) => fs.promises.mkdir(targetPath, options),
+        writeFile: (targetPath, content, encoding) => fs.promises.writeFile(targetPath, content, encoding),
+      },
+    );
 
-    if (!fs.existsSync(templatePath) || fs.existsSync(configPath)) {
-      return;
+    this.appendLog(`[runtime] ${result.message}`);
+    if (!result.ok) {
+      new Notice(result.message, 12000);
     }
-
-    await fs.promises.mkdir(runtimeDir, { recursive: true });
-    await fs.promises.copyFile(templatePath, configPath);
   }
 
   private canManageConfig(runtime: ResolvedRuntime): boolean {
