@@ -4,6 +4,7 @@ import type { MindmapSettings, RuntimeField } from "./settings";
 
 export interface RuntimeContext {
   vaultRoot: string;
+  configDir: string;
   pluginDir: string;
 }
 

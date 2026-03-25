@@ -27,11 +27,12 @@ class FakeFs implements PathFs {
 function createContext(): RuntimeContext {
   return {
     vaultRoot: path.normalize("/vault"),
-    pluginDir: path.normalize("/vault/.obsidian/plugins/mindmap-ai"),
+    configDir: "config",
+    pluginDir: path.normalize("/vault/config/plugins/mindmap-ai"),
   };
 }
 
-test("resolveRuntime uses bundled defaults when settings are blank", () => {
+void test("resolveRuntime uses bundled defaults when settings are blank", () => {
   const context = createContext();
   const fakeFs = new FakeFs(
     new Set([
@@ -51,12 +52,12 @@ test("resolveRuntime uses bundled defaults when settings are blank", () => {
   assert.match(formatCommandPreview(runtime, ["--current"]), /python3/);
 });
 
-test("resolveRuntime accepts vault-relative overrides inside the vault", () => {
+void test("resolveRuntime accepts vault-relative overrides inside the vault", () => {
   const context = createContext();
   const fakeFs = new FakeFs(
     new Set([
-      "/vault/.obsidian/plugins/mindmap-ai/python/mindmap.py",
-      "/vault/.obsidian/plugins/mindmap-ai/python/config.template.json",
+      "/vault/config/plugins/mindmap-ai/python/mindmap.py",
+      "/vault/config/plugins/mindmap-ai/python/config.template.json",
       "/vault/tools/python/bin/python",
       "/vault/custom/mindmap.py",
       "/vault/custom/config.json",
@@ -80,7 +81,7 @@ test("resolveRuntime accepts vault-relative overrides inside the vault", () => {
   assert.equal(runtime.trust.level, "caution");
 });
 
-test("resolveRuntime rejects traversal outside the vault", () => {
+void test("resolveRuntime rejects traversal outside the vault", () => {
   const context = createContext();
   const fakeFs = new FakeFs(new Set());
 
@@ -99,7 +100,7 @@ test("resolveRuntime rejects traversal outside the vault", () => {
   assert(runtime.messages.some((message) => message.field === "configPath" && message.level === "error"));
 });
 
-test("resolveRuntime rejects absolute script and config paths", () => {
+void test("resolveRuntime rejects absolute script and config paths", () => {
   const context = createContext();
   const fakeFs = new FakeFs(new Set());
 
@@ -118,7 +119,7 @@ test("resolveRuntime rejects absolute script and config paths", () => {
   assert(runtime.messages.some((message) => message.field === "configPath" && message.message.includes("Absolute paths are not allowed")));
 });
 
-test("resolveRuntime rejects python commands with shell metacharacters", () => {
+void test("resolveRuntime rejects python commands with shell metacharacters", () => {
   const context = createContext();
   const fakeFs = new FakeFs(
     new Set([
@@ -141,7 +142,7 @@ test("resolveRuntime rejects python commands with shell metacharacters", () => {
   assert(runtime.messages.some((message) => message.field === "pythonCommand" && message.message.includes("blocked shell metacharacters")));
 });
 
-test("resolveRuntime rejects compound python commands with spaces", () => {
+void test("resolveRuntime rejects compound python commands with spaces", () => {
   const context = createContext();
   const fakeFs = new FakeFs(
     new Set([

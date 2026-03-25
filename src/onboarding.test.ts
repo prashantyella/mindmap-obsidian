@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { isScopeSetupComplete, listVaultFolderOptions, readScopeSelection, updateScopeSelection } from "./onboarding";
 
-test("config template uses neutral empty scope defaults", () => {
+void test("config template uses neutral empty scope defaults", () => {
   const template = JSON.parse(fs.readFileSync(path.join(process.cwd(), "python", "config.template.json"), "utf8")) as Record<string, unknown>;
 
   assert.equal(template.vault_root, "../../../../");
@@ -14,7 +14,7 @@ test("config template uses neutral empty scope defaults", () => {
   assert.deepEqual(template.notes_paths_all, []);
 });
 
-test("updateScopeSelection preserves unrelated config keys and writes valid JSON", () => {
+void test("updateScopeSelection preserves unrelated config keys and writes valid JSON", () => {
   const rawConfig = JSON.stringify({
     vault_root: "../..",
     embed_model: "mxbai-embed-large",
@@ -36,7 +36,7 @@ test("updateScopeSelection preserves unrelated config keys and writes valid JSON
   assert.equal(parsed.custom_flag, true);
 });
 
-test("readScopeSelection and completion reflect configured folders", () => {
+void test("readScopeSelection and completion reflect configured folders", () => {
   const selection = readScopeSelection(JSON.stringify({
     notes_paths_current: ["Projects"],
     notes_paths_all: [".", "Projects"],
@@ -47,8 +47,8 @@ test("readScopeSelection and completion reflect configured folders", () => {
   assert.equal(isScopeSetupComplete(selection), true);
 });
 
-test("listVaultFolderOptions filters plugin internals and includes vault root", () => {
-  const options = listVaultFolderOptions(["Projects", ".obsidian", ".obsidian/plugins", "Areas/Work"]);
+void test("listVaultFolderOptions filters plugin internals and includes vault root", () => {
+  const options = listVaultFolderOptions(["Projects", "config", "config/plugins", "Areas/Work"], "config");
 
   assert.deepEqual(options, [
     { value: ".", label: "Vault root" },

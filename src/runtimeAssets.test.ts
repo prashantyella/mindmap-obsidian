@@ -18,15 +18,16 @@ class MemoryFs implements RuntimeAssetFs {
     return this.files.has(path.normalize(targetPath));
   }
 
-  async mkdir(_targetPath: string, _options: { recursive: boolean }): Promise<void> {
-    return;
+  mkdir(_targetPath: string, _options: { recursive: boolean }): Promise<void> {
+    return Promise.resolve();
   }
 
-  async writeFile(targetPath: string, content: string, _encoding: BufferEncoding): Promise<void> {
+  writeFile(targetPath: string, content: string, _encoding: BufferEncoding): Promise<void> {
     if (this.failWrites) {
-      throw new Error("disk full");
+      return Promise.reject(new Error("disk full"));
     }
     this.files.set(path.normalize(targetPath), content);
+    return Promise.resolve();
   }
 }
 
@@ -36,8 +37,8 @@ const assets: BundledRuntimeAssets = {
   "config.template.json": '{"vault_root":"../../../../"}\n',
 };
 
-test("ensureBundledRuntimeAssets repairs missing runtime files and creates config.json", async () => {
-  const runtimeDir = path.normalize("/vault/.obsidian/plugins/mindmap-ai/python");
+void test("ensureBundledRuntimeAssets repairs missing runtime files and creates config.json", async () => {
+  const runtimeDir = path.normalize("/vault/config/plugins/mindmap-ai/python");
   const fs = new MemoryFs();
 
   const result = await ensureBundledRuntimeAssets(runtimeDir, assets, fs);
@@ -51,8 +52,8 @@ test("ensureBundledRuntimeAssets repairs missing runtime files and creates confi
   assert.equal(fs.files.get(path.join(runtimeDir, "config.json")), assets["config.template.json"]);
 });
 
-test("ensureBundledRuntimeAssets leaves existing runtime files untouched", async () => {
-  const runtimeDir = path.normalize("/vault/.obsidian/plugins/mindmap-ai/python");
+void test("ensureBundledRuntimeAssets leaves existing runtime files untouched", async () => {
+  const runtimeDir = path.normalize("/vault/config/plugins/mindmap-ai/python");
   const fs = new MemoryFs({
     [path.join(runtimeDir, "mindmap.py")]: "custom script\n",
     [path.join(runtimeDir, "requirements.txt")]: "custom req\n",
@@ -69,8 +70,8 @@ test("ensureBundledRuntimeAssets leaves existing runtime files untouched", async
   assert.equal(result.message, "Mindmap runtime assets verified.");
 });
 
-test("ensureBundledRuntimeAssets reports actionable failure when writing bundled assets fails", async () => {
-  const runtimeDir = path.normalize("/vault/.obsidian/plugins/mindmap-ai/python");
+void test("ensureBundledRuntimeAssets reports actionable failure when writing bundled assets fails", async () => {
+  const runtimeDir = path.normalize("/vault/config/plugins/mindmap-ai/python");
   const fs = new MemoryFs();
   fs.failWrites = true;
 

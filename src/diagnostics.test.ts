@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 
 import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput } from "./diagnostics";
 
-test("parsePreflightOutput parses structured JSON output", () => {
+void test("parsePreflightOutput parses structured JSON output", () => {
   const stdout = `${JSON.stringify({
     ok: false,
     summary: "Preflight failed: model missing",
-    config_path: "/vault/.obsidian/plugins/mindmap-ai/python/config.json",
+    config_path: "/vault/config/plugins/mindmap-ai/python/config.json",
     checks: [
       {
         code: "OLLAMA_MODELS_MISSING",
@@ -22,12 +22,12 @@ test("parsePreflightOutput parses structured JSON output", () => {
   const result = parsePreflightOutput(stdout, "", 1);
 
   assert.equal(result.ok, false);
-  assert.equal(result.configPath, "/vault/.obsidian/plugins/mindmap-ai/python/config.json");
+  assert.equal(result.configPath, "/vault/config/plugins/mindmap-ai/python/config.json");
   assert.equal(result.checks[0]?.code, "OLLAMA_MODELS_MISSING");
   assert.match(formatPreflightNotice(result), /Pull the missing models/);
 });
 
-test("buildSpawnFailureResult maps missing executable to actionable guidance", () => {
+void test("buildSpawnFailureResult maps missing executable to actionable guidance", () => {
   const error = Object.assign(new Error("spawn python3 ENOENT"), { code: "ENOENT" as const });
   const result = buildSpawnFailureResult(error, "python3");
 

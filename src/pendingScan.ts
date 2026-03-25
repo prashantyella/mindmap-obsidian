@@ -221,7 +221,9 @@ function parsePendingConfig(rawConfig: unknown, runtimeConfigPath: string, conte
     ? config.notes_paths_all.map((value) => normalizeFolder(String(value))).filter(Boolean)
     : currentPaths;
 
-  const statePathValue = typeof config.state_path === "string" ? config.state_path : ".obsidian/plugins/mindmap-ai/data/state.json";
+  const statePathValue = typeof config.state_path === "string"
+    ? config.state_path
+    : `${context.configDir}/plugins/mindmap-ai/data/state.json`;
   const statePath = path.isAbsolute(statePathValue)
     ? statePathValue
     : path.resolve(context.vaultRoot, statePathValue);
@@ -391,8 +393,8 @@ export class PendingScanService {
     private readonly deps: PendingServiceDeps,
   ) {
     this.debouncer = new DebouncedRefreshController(
-      deps.setTimer,
-      deps.clearTimer,
+      (callback, delayMs) => deps.setTimer(callback, delayMs),
+      (handle) => deps.clearTimer(handle),
       () => {
         void this.refresh();
       },

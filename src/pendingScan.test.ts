@@ -8,7 +8,7 @@ function hashBody(text: string): string {
   return createHash("sha1").update(`${text.trim()}\n`).digest("hex");
 }
 
-test("PendingIndex rescans only changed files and recomputes counts from state without rereading", async () => {
+void test("PendingIndex rescans only changed files and recomputes counts from state without rereading", async () => {
   const index = new PendingIndex();
   const reads = new Map<string, number>();
   const contents = new Map<string, string>([
@@ -20,17 +20,17 @@ test("PendingIndex rescans only changed files and recomputes counts from state w
     {
       relpath: "Notes/one.md",
       mtimeMs: 1,
-      read: async () => {
+      read: () => {
         reads.set("Notes/one.md", (reads.get("Notes/one.md") ?? 0) + 1);
-        return contents.get("Notes/one.md") ?? "";
+        return Promise.resolve(contents.get("Notes/one.md") ?? "");
       },
     },
     {
       relpath: "Notes/two.md",
       mtimeMs: mtimeTwo,
-      read: async () => {
+      read: () => {
         reads.set("Notes/two.md", (reads.get("Notes/two.md") ?? 0) + 1);
-        return contents.get("Notes/two.md") ?? "";
+        return Promise.resolve(contents.get("Notes/two.md") ?? "");
       },
     },
   ];
@@ -40,7 +40,7 @@ test("PendingIndex rescans only changed files and recomputes counts from state w
     allPaths: ["Notes"],
     heading: "## Mindmap",
     minWords: 0,
-    statePath: "/vault/.obsidian/plugins/mindmap-ai/data/state.json",
+    statePath: "/vault/config/plugins/mindmap-ai/data/state.json",
   };
 
   const first = await index.refresh({
@@ -93,7 +93,7 @@ test("PendingIndex rescans only changed files and recomputes counts from state w
   assert.equal(reads.get("Notes/two.md"), 2);
 });
 
-test("DebouncedRefreshController collapses repeated triggers into one callback", () => {
+void test("DebouncedRefreshController collapses repeated triggers into one callback", () => {
   let callbackCount = 0;
   const handles = new Set<{ run: () => void }>();
   const controller = new DebouncedRefreshController(
@@ -123,14 +123,14 @@ test("DebouncedRefreshController collapses repeated triggers into one callback",
   controller.dispose();
 });
 
-test("PendingIndex treats vault-root scope (.) as matching all markdown files", async () => {
+void test("PendingIndex treats vault-root scope (.) as matching all markdown files", async () => {
   const index = new PendingIndex();
   const config = {
     currentPaths: ["."],
     allPaths: ["."],
     heading: "## Mindmap",
     minWords: 0,
-    statePath: "/vault/.obsidian/plugins/mindmap-ai/data/state.json",
+    statePath: "/vault/config/plugins/mindmap-ai/data/state.json",
   };
 
   const snapshot = await index.refresh({
@@ -140,7 +140,7 @@ test("PendingIndex treats vault-root scope (.) as matching all markdown files", 
       {
         relpath: "Notes/new-note.md",
         mtimeMs: 10,
-        read: async () => "this note should be considered pending",
+        read: () => Promise.resolve("this note should be considered pending"),
       },
     ],
     dirtyPaths: new Set<string>(),

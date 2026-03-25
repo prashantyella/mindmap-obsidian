@@ -1,6 +1,6 @@
 const LEGACY_PLUGIN_VAULT_ROOT = "../..";
 const CURRENT_PLUGIN_VAULT_ROOT = "../../../../";
-const PLUGIN_PATH_PREFIX = ".obsidian/plugins/mindmap-ai/";
+const PLUGIN_DIR_SEGMENT = "plugins/mindmap-ai/";
 
 export interface RuntimeConfigMigrationFs {
   existsSync(targetPath: string): boolean;
@@ -17,22 +17,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isPluginManagedPath(value: unknown): boolean {
-  return typeof value === "string" && value.startsWith(PLUGIN_PATH_PREFIX);
+function getPluginPathPrefix(configDir: string): string {
+  const normalized = configDir.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  return `${normalized}/${PLUGIN_DIR_SEGMENT}`;
 }
 
-function canMigrate(config: Record<string, unknown>): boolean {
+function isPluginManagedPath(value: unknown, configDir: string): boolean {
+  return typeof value === "string" && value.startsWith(getPluginPathPrefix(configDir));
+}
+
+function canMigrate(config: Record<string, unknown>, configDir: string): boolean {
   if (config.vault_root !== LEGACY_PLUGIN_VAULT_ROOT) {
     return false;
   }
 
-  return isPluginManagedPath(config.db_path)
-    && isPluginManagedPath(config.state_path)
-    && isPluginManagedPath(config.log_path);
+  return isPluginManagedPath(config.db_path, configDir)
+    && isPluginManagedPath(config.state_path, configDir)
+    && isPluginManagedPath(config.log_path, configDir);
 }
 
 export async function migrateLegacyPluginVaultRoot(
   configPath: string,
+  configDir: string,
   fileSystem: RuntimeConfigMigrationFs,
 ): Promise<RuntimeConfigMigrationResult> {
   if (!fileSystem.existsSync(configPath)) {
@@ -46,7 +52,7 @@ export async function migrateLegacyPluginVaultRoot(
     return { migrated: false, message: null };
   }
 
-  if (!isRecord(parsed) || !canMigrate(parsed)) {
+  if (!isRecord(parsed) || !canMigrate(parsed, configDir)) {
     return { migrated: false, message: null };
   }
 
@@ -66,4 +72,3 @@ export async function migrateLegacyPluginVaultRoot(
     message: `Mindmap updated config.json vault_root from "${LEGACY_PLUGIN_VAULT_ROOT}" to "${CURRENT_PLUGIN_VAULT_ROOT}" for plugin installs.`,
   };
 }
-

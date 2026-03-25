@@ -26,13 +26,23 @@ function normalizeFolderPath(rawPath: string): string | null {
   return normalized;
 }
 
+function shouldSkipInternalFolder(value: string, configDir: string): boolean {
+  if (!value) {
+    return true;
+  }
+  if (value === "." || value === "/") {
+    return false;
+  }
+  return value === configDir || value.startsWith(`${configDir}/`);
+}
+
 export function normalizeScopePaths(paths: string[]): string[] {
   const seen = new Set<string>();
   const normalized: string[] = [];
 
   for (const rawPath of paths) {
     const value = normalizeFolderPath(rawPath);
-    if (!value || value === ".obsidian" || value.startsWith(".obsidian/")) {
+    if (!value) {
       continue;
     }
     if (seen.has(value)) {
@@ -53,8 +63,8 @@ export function normalizeScopePaths(paths: string[]): string[] {
   });
 }
 
-export function listVaultFolderOptions(folderPaths: string[]): VaultFolderOption[] {
-  const values = normalizeScopePaths([".", ...folderPaths]);
+export function listVaultFolderOptions(folderPaths: string[], configDir: string): VaultFolderOption[] {
+  const values = normalizeScopePaths([".", ...folderPaths]).filter((value) => !shouldSkipInternalFolder(value, configDir));
   return values.map((value) => ({
     value,
     label: value === "." ? "Vault root" : value,

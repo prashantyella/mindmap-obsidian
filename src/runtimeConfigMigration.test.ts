@@ -17,40 +17,41 @@ class MemoryFs implements RuntimeConfigMigrationFs {
     return this.files.has(targetPath);
   }
 
-  async readFile(targetPath: string, _encoding: BufferEncoding): Promise<string> {
+  readFile(targetPath: string, _encoding: BufferEncoding): Promise<string> {
     const value = this.files.get(targetPath);
     if (value === undefined) {
-      throw new Error("missing file");
+      return Promise.reject(new Error("missing file"));
     }
-    return value;
+    return Promise.resolve(value);
   }
 
-  async writeFile(targetPath: string, content: string, _encoding: BufferEncoding): Promise<void> {
+  writeFile(targetPath: string, content: string, _encoding: BufferEncoding): Promise<void> {
     if (this.failWrites) {
-      throw new Error("disk full");
+      return Promise.reject(new Error("disk full"));
     }
     this.files.set(targetPath, content);
+    return Promise.resolve();
   }
 }
 
 function baseConfig(vaultRoot: string): string {
   return JSON.stringify({
     vault_root: vaultRoot,
-    db_path: ".obsidian/plugins/mindmap-ai/data/chroma",
-    state_path: ".obsidian/plugins/mindmap-ai/data/state.json",
-    log_path: ".obsidian/plugins/mindmap-ai/logs/last-run.txt",
+    db_path: "config/plugins/mindmap-ai/data/chroma",
+    state_path: "config/plugins/mindmap-ai/data/state.json",
+    log_path: "config/plugins/mindmap-ai/logs/last-run.txt",
     notes_paths_current: [],
     notes_paths_all: [],
   });
 }
 
-test("migrateLegacyPluginVaultRoot updates legacy plugin vault_root value", async () => {
-  const configPath = "/vault/.obsidian/plugins/mindmap-ai/python/config.json";
+void test("migrateLegacyPluginVaultRoot updates legacy plugin vault_root value", async () => {
+  const configPath = "/vault/config/plugins/mindmap-ai/python/config.json";
   const fs = new MemoryFs({
     [configPath]: baseConfig("../.."),
   });
 
-  const result = await migrateLegacyPluginVaultRoot(configPath, fs);
+  const result = await migrateLegacyPluginVaultRoot(configPath, "config", fs);
   const updated = JSON.parse(fs.files.get(configPath) ?? "{}") as Record<string, unknown>;
 
   assert.equal(result.migrated, true);
@@ -58,8 +59,8 @@ test("migrateLegacyPluginVaultRoot updates legacy plugin vault_root value", asyn
   assert.equal(updated.vault_root, "../../../../");
 });
 
-test("migrateLegacyPluginVaultRoot skips non-plugin-managed configs", async () => {
-  const configPath = "/vault/.obsidian/plugins/mindmap-ai/python/config.json";
+void test("migrateLegacyPluginVaultRoot skips non-plugin-managed configs", async () => {
+  const configPath = "/vault/config/plugins/mindmap-ai/python/config.json";
   const fs = new MemoryFs({
     [configPath]: JSON.stringify({
       vault_root: "../..",
@@ -69,7 +70,7 @@ test("migrateLegacyPluginVaultRoot skips non-plugin-managed configs", async () =
     }),
   });
 
-  const result = await migrateLegacyPluginVaultRoot(configPath, fs);
+  const result = await migrateLegacyPluginVaultRoot(configPath, "config", fs);
   const updated = JSON.parse(fs.files.get(configPath) ?? "{}") as Record<string, unknown>;
 
   assert.equal(result.migrated, false);
@@ -77,16 +78,15 @@ test("migrateLegacyPluginVaultRoot skips non-plugin-managed configs", async () =
   assert.equal(updated.vault_root, "../..");
 });
 
-test("migrateLegacyPluginVaultRoot returns warning when write fails", async () => {
-  const configPath = "/vault/.obsidian/plugins/mindmap-ai/python/config.json";
+void test("migrateLegacyPluginVaultRoot returns warning when write fails", async () => {
+  const configPath = "/vault/config/plugins/mindmap-ai/python/config.json";
   const fs = new MemoryFs({
     [configPath]: baseConfig("../.."),
   });
   fs.failWrites = true;
 
-  const result = await migrateLegacyPluginVaultRoot(configPath, fs);
+  const result = await migrateLegacyPluginVaultRoot(configPath, "config", fs);
 
   assert.equal(result.migrated, false);
   assert.match(result.message ?? "", /could not auto-migrate/i);
 });
-

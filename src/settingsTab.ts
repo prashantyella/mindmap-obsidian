@@ -7,26 +7,27 @@ import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
 import type MindmapPlugin from "./main";
 import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
 
-const FIELD_META: Record<RuntimeField, { name: string; description: string; placeholder: string }> = {
+const FIELD_META: Record<RuntimeField, { name: string; description: string }> = {
   pythonCommand: {
     name: "Python command",
     description: "Use a PATH command (for example python3) or a vault-relative executable path.",
-    placeholder: DEFAULT_SETTINGS.pythonCommand,
   },
   scriptPath: {
     name: "Script path",
     description: "Leave blank to use the bundled script, or enter a vault-relative path.",
-    placeholder: `.obsidian/plugins/${thisPluginId()}/python/mindmap.py`,
   },
   configPath: {
     name: "Config path",
     description: "Leave blank to use the bundled config, or enter a vault-relative path.",
-    placeholder: `.obsidian/plugins/${thisPluginId()}/python/config.json`,
   },
 };
 
 function thisPluginId(): string {
   return "mindmap-ai";
+}
+
+function getPluginRuntimeRelativePath(configDir: string): string {
+  return `${configDir}/plugins/${thisPluginId()}/python`;
 }
 
 export class MindmapSettingTab extends PluginSettingTab {
@@ -58,7 +59,7 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderSection(title: string, description: string): void {
-    this.containerEl.createEl("h2", { text: title });
+    new Setting(this.containerEl).setName(title).setHeading();
     this.containerEl.createEl("p", { text: description });
   }
 
@@ -91,11 +92,11 @@ export class MindmapSettingTab extends PluginSettingTab {
       return;
     }
 
-    this.containerEl.createEl("h3", { text: "Current scope (--current)" });
+    new Setting(this.containerEl).setName("Current scope (--current)").setHeading();
     for (const option of options) {
       new Setting(this.containerEl)
         .setName(option.label)
-        .setDesc("Used by Run Mindmap (current scope).")
+        .setDesc("Used by run mindmap (current scope).")
         .addToggle((toggle) => {
           toggle
             .setValue(draft.currentPaths.includes(option.value))
@@ -105,11 +106,11 @@ export class MindmapSettingTab extends PluginSettingTab {
         });
     }
 
-    this.containerEl.createEl("h3", { text: "All scope (--all)" });
+    new Setting(this.containerEl).setName("All scope (--all)").setHeading();
     for (const option of options) {
       new Setting(this.containerEl)
         .setName(option.label)
-        .setDesc("Used by Run Mindmap (all scopes).")
+        .setDesc("Used by run mindmap (all scopes).")
         .addToggle((toggle) => {
           toggle
             .setValue(draft.allPaths.includes(option.value))
@@ -123,15 +124,16 @@ export class MindmapSettingTab extends PluginSettingTab {
       .setName("Save scope setup")
       .setDesc("Save selected folders to the bundled config file.")
       .addButton((button) =>
-        button.setButtonText("Save setup").setCta().onClick(() => {
-          void this.plugin.saveScopeSetup(this.getOnboardingDraft(status)).then(async () => {
+        button.setButtonText("Save setup").setCta().onClick(async () => {
+          try {
+            this.plugin.saveScopeSetup(this.getOnboardingDraft(status));
             this.onboardingDraft = null;
             await this.plugin.runPreflight("manual");
             new Notice("Scope setup saved.");
             this.display();
-          }).catch((error) => {
+          } catch (error) {
             new Notice(error instanceof Error ? error.message : "Failed to save scope setup.", 12000);
-          });
+          }
         }),
       )
       .addExtraButton((button) => {
@@ -208,13 +210,19 @@ export class MindmapSettingTab extends PluginSettingTab {
 
   private renderPathSetting(field: RuntimeField): void {
     const metadata = FIELD_META[field];
+    const runtimePath = getPluginRuntimeRelativePath(this.app.vault.configDir);
+    const placeholder = field === "pythonCommand"
+      ? DEFAULT_SETTINGS.pythonCommand
+      : field === "scriptPath"
+        ? `${runtimePath}/mindmap.py`
+        : `${runtimePath}/config.json`;
 
     new Setting(this.containerEl)
       .setName(metadata.name)
       .setDesc(metadata.description)
       .addText((text) => {
         text
-          .setPlaceholder(metadata.placeholder)
+          .setPlaceholder(placeholder)
           .setValue(this.plugin.settings[field])
           .onChange(async (value) => {
             this.plugin.settings[field] = value.trim();
@@ -236,7 +244,7 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderSummary(runtime: ResolvedRuntime): void {
-    this.containerEl.createEl("h2", { text: "Status" });
+    new Setting(this.containerEl).setName("Status").setHeading();
     const summary = new Setting(this.containerEl).setName("Runtime status");
     summary.setClass(runtime.valid ? "mindmap-validation-ok" : "mindmap-validation-error");
 

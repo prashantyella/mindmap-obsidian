@@ -89,7 +89,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-run-now",
-      name: "Run Mindmap (current scope)",
+      name: "Run mindmap (current scope)",
       callback: () => {
         void this.runMindmap("manual", "current");
       },
@@ -97,7 +97,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-run-all",
-      name: "Run Mindmap (all scopes)",
+      name: "Run mindmap (all scopes)",
       callback: () => {
         void this.runMindmap("manual", "all");
       },
@@ -105,7 +105,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-enable-scheduler",
-      name: "Enable Mindmap interval scheduler",
+      name: "Enable mindmap interval scheduler",
       callback: () => {
         void this.setSchedulerMode("interval");
       },
@@ -113,7 +113,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-disable-scheduler",
-      name: "Disable Mindmap interval scheduler",
+      name: "Disable mindmap interval scheduler",
       callback: () => {
         void this.setSchedulerMode("manual");
       },
@@ -121,7 +121,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-open-status",
-      name: "Show Mindmap status",
+      name: "Show mindmap status",
       callback: () => {
         this.showRuntimeNotice(this.getResolvedRuntime());
       },
@@ -129,7 +129,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-validate-runtime",
-      name: "Run Mindmap preflight checks",
+      name: "Run mindmap preflight checks",
       callback: () => {
         void this.runPreflight("manual");
       },
@@ -299,10 +299,10 @@ export default class MindmapPlugin extends Plugin {
       .getAllLoadedFiles()
       .filter((file): file is TFolder => file instanceof TFolder)
       .map((folder) => folder.path);
-    return listVaultFolderOptions(folderPaths);
+    return listVaultFolderOptions(folderPaths, this.app.vault.configDir);
   }
 
-  async saveScopeSetup(selection: ScopeSelection): Promise<void> {
+  saveScopeSetup(selection: ScopeSelection): void {
     const runtime = this.getResolvedRuntime();
     const status = this.getScopeSetupStatus();
     if (!runtime.valid || !status.canManage || !status.configPath) {
@@ -704,7 +704,7 @@ export default class MindmapPlugin extends Plugin {
     if (this.recentLog.length > LOG_LIMIT) {
       this.recentLog.shift();
     }
-    console.info(`[Mindmap] ${message}`);
+    console.debug(`[Mindmap] ${message}`);
   }
 
   private updateStatusBar(): void {
@@ -749,10 +749,12 @@ export default class MindmapPlugin extends Plugin {
     }
 
     const vaultRoot = this.app.vault.adapter.getBasePath();
-    const pluginDirRelative = this.manifest.dir ?? path.posix.join(".obsidian", "plugins", this.manifest.id);
+    const configDir = this.app.vault.configDir;
+    const pluginDirRelative = this.manifest.dir ?? path.posix.join(configDir, "plugins", this.manifest.id);
 
     return {
       vaultRoot,
+      configDir,
       pluginDir: path.join(vaultRoot, pluginDirRelative),
     };
   }
@@ -775,7 +777,7 @@ export default class MindmapPlugin extends Plugin {
       return;
     }
 
-    const configMigration = await migrateLegacyPluginVaultRoot(path.join(runtimeDir, "config.json"), {
+    const configMigration = await migrateLegacyPluginVaultRoot(path.join(runtimeDir, "config.json"), this.app.vault.configDir, {
       existsSync: fs.existsSync,
       readFile: (targetPath, encoding) => fs.promises.readFile(targetPath, encoding),
       writeFile: (targetPath, content, encoding) => fs.promises.writeFile(targetPath, content, encoding),

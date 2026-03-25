@@ -19,7 +19,7 @@ function getRuntimeSourceFiles(rootDir: string): string[] {
     .map((entry) => path.join(rootDir, entry));
 }
 
-test("runtime UI source files do not use unsafe HTML insertion APIs", () => {
+void test("runtime UI source files do not use unsafe HTML insertion APIs", () => {
   const srcDir = path.join(process.cwd(), "src");
   const files = getRuntimeSourceFiles(srcDir);
 
