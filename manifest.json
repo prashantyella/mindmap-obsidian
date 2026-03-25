@@ -1,9 +1,9 @@
 {
   "id": "mindmap-ai",
-  "name": "Mindmap",
-  "version": "0.1.2",
+  "name": "Mindmap AI",
+  "version": "0.1.3",
   "minAppVersion": "1.5.12",
-  "description": "Desktop-first Obsidian plugin that orchestrates the Mindmap Python engine.",
+  "description": "Desktop-first plugin that orchestrates the Mindmap Python engine.",
   "author": "yella",
   "authorUrl": "",
   "isDesktopOnly": true

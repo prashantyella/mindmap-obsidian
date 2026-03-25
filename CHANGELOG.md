@@ -9,6 +9,12 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.1.3
+
+### Changed
+- Updated plugin display name to `Mindmap AI` to avoid collisions in the community directory.
+- Updated plugin description to satisfy community directory validation rules.
+
 ## 0.1.2
 
 ### Changed
