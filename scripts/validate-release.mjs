@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { execSync } from "node:child_process";
 import path from "node:path";
 
 const requiredFiles = [
@@ -23,6 +24,17 @@ for (const file of requiredFiles) {
   if (!fs.existsSync(file)) {
     throw new Error(`Missing required file: ${file}`);
   }
+}
+
+const trackedCacheArtifacts = execSync(
+  "git ls-files",
+  { encoding: "utf8" },
+).split("\n").filter((file) => /(^|\/)__pycache__\/|\.pyc$/.test(file));
+
+if (trackedCacheArtifacts.length > 0) {
+  throw new Error(
+    `Tracked Python cache artifacts must not be committed: ${trackedCacheArtifacts.join(", ")}`,
+  );
 }
 
 const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
@@ -76,6 +88,14 @@ for (const phrase of ["desktop-only", "Python", "Ollama", "versions.json", "mani
   if (!readme.includes(phrase)) {
     throw new Error(`README.md must mention ${phrase}`);
   }
+}
+for (const phrase of ["Community plugins", "restore its Python runtime automatically"]) {
+  if (!readme.includes(phrase)) {
+    throw new Error(`README.md must mention ${phrase} for one-click onboarding.`);
+  }
+}
+if (readme.includes("manual release install")) {
+  throw new Error("README.md must not present manual release install as the primary onboarding path.");
 }
 
 const changelog = fs.readFileSync("CHANGELOG.md", "utf8");
