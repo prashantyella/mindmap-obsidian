@@ -6,7 +6,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from mindmap import find_missing_models, load_config_with_diagnostics  # noqa: E402
+from mindmap import (  # noqa: E402
+    dependency_install_guidance,
+    find_missing_models,
+    load_config_with_diagnostics,
+)
 
 
 class PreflightHelperTests(unittest.TestCase):
@@ -38,6 +42,12 @@ class PreflightHelperTests(unittest.TestCase):
 
         self.assertEqual(config["vault_root"], ".")
         self.assertEqual(check["code"], "CONFIG_OK")
+
+    def test_dependency_install_guidance_uses_installed_plugin_path(self):
+        self.assertEqual(
+            dependency_install_guidance(),
+            "Install dependencies with `python3 -m pip install -r .obsidian/plugins/mindmap-obsidian/python/requirements.txt`.",
+        )
 
 
 if __name__ == "__main__":

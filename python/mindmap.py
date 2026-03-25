@@ -25,6 +25,8 @@ except ModuleNotFoundError as exc:
     YAML = None
     YAML_IMPORT_ERROR = exc
 
+DEPENDENCY_INSTALL_COMMAND = "python3 -m pip install -r .obsidian/plugins/mindmap-obsidian/python/requirements.txt"
+
 
 @dataclass
 class Note:
@@ -47,6 +49,10 @@ def diagnostic_line(level: str, code: str, message: str, guidance: Optional[str]
 
 def emit_stderr(level: str, code: str, message: str, guidance: Optional[str] = None, context: Optional[Dict] = None):
     print(diagnostic_line(level, code, message, guidance=guidance, context=context), file=sys.stderr, flush=True)
+
+
+def dependency_install_guidance() -> str:
+    return f"Install dependencies with `{DEPENDENCY_INSTALL_COMMAND}`."
 
 
 def build_runtime_issue(
@@ -898,7 +904,7 @@ def run_preflight(config_path: Path) -> Dict:
                 "Python dependency",
                 "error",
                 f"ruamel.yaml import failed: {YAML_IMPORT_ERROR}",
-                guidance="Install dependencies with `python3 -m pip install -r python/requirements.txt`.",
+                guidance=dependency_install_guidance(),
             )
         )
 
@@ -920,7 +926,7 @@ def run_preflight(config_path: Path) -> Dict:
                 "Python dependency",
                 "error",
                 f"chromadb import failed: {exc}",
-                guidance="Install dependencies with `python3 -m pip install -r python/requirements.txt`.",
+                guidance=dependency_install_guidance(),
             )
         )
 
@@ -1224,7 +1230,7 @@ def main():
             "error",
             "DEPENDENCY_CHROMADB_MISSING",
             f"chromadb import failed: {exc}",
-            guidance="Install dependencies with `python3 -m pip install -r python/requirements.txt`.",
+            guidance=dependency_install_guidance(),
         )
         return 1
 
