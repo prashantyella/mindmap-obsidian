@@ -9,17 +9,17 @@ import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
 const FIELD_META: Record<RuntimeField, { name: string; description: string; placeholder: string }> = {
   pythonCommand: {
     name: "Python command",
-    description: "Use a PATH command like python3, or a vault-relative executable path such as .venv/bin/python.",
+    description: "Use a PATH command (for example python3) or a vault-relative executable path.",
     placeholder: DEFAULT_SETTINGS.pythonCommand,
   },
   scriptPath: {
-    name: "Mindmap script path",
-    description: "Leave blank to use the bundled runtime, or enter a vault-relative file path.",
+    name: "Script path",
+    description: "Leave blank to use the bundled script, or enter a vault-relative path.",
     placeholder: `.obsidian/plugins/${thisPluginId()}/python/mindmap.py`,
   },
   configPath: {
-    name: "Mindmap config path",
-    description: "Leave blank to use the bundled config, or enter a vault-relative file path inside the vault.",
+    name: "Config path",
+    description: "Leave blank to use the bundled config, or enter a vault-relative path.",
     placeholder: `.obsidian/plugins/${thisPluginId()}/python/config.json`,
   },
 };
@@ -39,57 +39,62 @@ export class MindmapSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Mindmap Runtime" });
+    this.renderSection(
+      "Runtime",
+      "Use bundled defaults unless you need vault-relative overrides.",
+    );
     containerEl.createEl("p", {
-      text: "Portable defaults use the plugin runtime inside .obsidian/plugins. Override with vault-relative paths only when you need a custom script or config.",
-    });
-    containerEl.createEl("p", {
-      text: "Trust warning: this plugin executes a local Python interpreter and reads local files. PATH commands and bundled runtime files are the safest options. Custom executable, script, or config paths should be reviewed before you run them.",
+      text: "Safety: this plugin runs a local Python process and reads local files. Review custom executable, script, and config paths before running.",
     });
 
     this.renderPathSetting("pythonCommand");
     this.renderPathSetting("scriptPath");
     this.renderPathSetting("configPath");
-    this.renderFirstRunSetup();
+    this.renderScopeSetupSettings();
     this.renderSchedulerSettings();
+    this.renderDiagnosticsSettings();
+    this.renderSummary(this.plugin.getResolvedRuntime());
+  }
 
-    new Setting(containerEl)
-      .setName("Run preflight diagnostics")
-      .setDesc("Validate Python execution, dependencies, Ollama reachability, and required models using the script's --preflight mode.")
+  private renderSection(title: string, description: string): void {
+    this.containerEl.createEl("h2", { text: title });
+    this.containerEl.createEl("p", { text: description });
+  }
+
+  private renderDiagnosticsSettings(): void {
+    this.renderSection("Diagnostics", "Run preflight checks and review runtime status.");
+    new Setting(this.containerEl)
+      .setName("Preflight checks")
+      .setDesc("Verify Python execution, dependencies, Ollama, and required models.")
       .addButton((button) =>
-        button.setButtonText("Run preflight").onClick(() => {
+        button.setButtonText("Run checks").onClick(() => {
           void this.plugin.runPreflight("manual").then(() => {
             this.display();
           });
         }),
       );
-
-    this.renderSummary(this.plugin.getResolvedRuntime());
   }
 
-  private renderFirstRunSetup(): void {
+  private renderScopeSetupSettings(): void {
     const status = this.plugin.getScopeSetupStatus();
     const options = this.plugin.getVaultFolderOptions();
     const draft = this.getOnboardingDraft(status);
 
-    this.containerEl.createEl("h3", { text: "First-run setup" });
-    this.containerEl.createEl("p", {
-      text: "Choose which vault folders Mindmap should use for the current scope and for all-scope runs. This updates the plugin-managed config file only and preserves unrelated config keys.",
-    });
+    this.renderSection("Scope setup", "Choose folders used for current-scope and all-scope runs.");
 
     new Setting(this.containerEl)
-      .setName("Setup status")
+      .setName("Scope status")
       .setDesc(this.plugin.getScopeSetupSummary());
 
     if (!status.canManage) {
       return;
     }
 
-    this.containerEl.createEl("h4", { text: "Current scope folders" });
+    this.containerEl.createEl("h3", { text: "Current scope (--current)" });
     for (const option of options) {
       new Setting(this.containerEl)
         .setName(option.label)
-        .setDesc("Included when the plugin runs with --current.")
+        .setDesc("Used by the default run command.")
         .addToggle((toggle) => {
           toggle
             .setValue(draft.currentPaths.includes(option.value))
@@ -99,11 +104,11 @@ export class MindmapSettingTab extends PluginSettingTab {
         });
     }
 
-    this.containerEl.createEl("h4", { text: "All-scope folders" });
+    this.containerEl.createEl("h3", { text: "All scope (--all)" });
     for (const option of options) {
       new Setting(this.containerEl)
         .setName(option.label)
-        .setDesc("Included when the plugin runs with --all.")
+        .setDesc("Used by --all runs.")
         .addToggle((toggle) => {
           toggle
             .setValue(draft.allPaths.includes(option.value))
@@ -114,24 +119,24 @@ export class MindmapSettingTab extends PluginSettingTab {
     }
 
     new Setting(this.containerEl)
-      .setName("Save setup")
-      .setDesc("Write the selected folders into the bundled config.json.")
+      .setName("Save scope setup")
+      .setDesc("Save selected folders to the bundled config file.")
       .addButton((button) =>
-        button.setButtonText("Save scope folders").setCta().onClick(() => {
+        button.setButtonText("Save setup").setCta().onClick(() => {
           void this.plugin.saveScopeSetup(this.getOnboardingDraft(status)).then(async () => {
             this.onboardingDraft = null;
             await this.plugin.runPreflight("manual");
-            new Notice("Mindmap scope setup saved.");
+            new Notice("Scope setup saved.");
             this.display();
           }).catch((error) => {
-            new Notice(error instanceof Error ? error.message : "Failed to save Mindmap scope setup.", 12000);
+            new Notice(error instanceof Error ? error.message : "Failed to save scope setup.", 12000);
           });
         }),
       )
       .addExtraButton((button) => {
         button
           .setIcon("reset")
-          .setTooltip("Reset draft to the saved config")
+          .setTooltip("Reset unsaved changes")
           .onClick(() => {
             this.onboardingDraft = {
               currentPaths: [...status.currentPaths],
@@ -143,18 +148,15 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderSchedulerSettings(): void {
-    this.containerEl.createEl("h3", { text: "Scheduling" });
-    this.containerEl.createEl("p", {
-      text: "The built-in scheduler uses an internal plugin timer and works the same way on macOS, Windows, and Linux. OS-native schedulers remain optional external alternatives.",
-    });
+    this.renderSection("Scheduler", "Use manual runs or enable interval scheduling.");
 
     new Setting(this.containerEl)
-      .setName("Scheduler mode")
-      .setDesc("Manual keeps runs on demand only. Interval runs the same Python command path on a repeating timer.")
+      .setName("Mode")
+      .setDesc("Manual runs on demand. Interval runs on a repeating timer.")
       .addDropdown((dropdown) => {
         dropdown
-          .addOption("manual", "Manual only")
-          .addOption("interval", "Internal interval scheduler")
+          .addOption("manual", "Manual")
+          .addOption("interval", "Interval")
           .setValue(this.plugin.settings.schedulerMode)
           .onChange(async (value) => {
             this.plugin.settings.schedulerMode = value === "interval" ? "interval" : "manual";
@@ -169,14 +171,14 @@ export class MindmapSettingTab extends PluginSettingTab {
           .onClick(async () => {
             this.plugin.settings.schedulerMode = DEFAULT_SETTINGS.schedulerMode;
             await this.plugin.saveSettings();
-            new Notice("Scheduler mode reset to default.");
+            new Notice("Scheduler mode reset.");
             this.display();
           });
       });
 
     new Setting(this.containerEl)
-      .setName("Run interval")
-      .setDesc(`Minimum ${MIN_SCHEDULER_INTERVAL_MINUTES} minutes. Only used when the internal interval scheduler is enabled.`)
+      .setName("Interval (minutes)")
+      .setDesc(`Minimum ${MIN_SCHEDULER_INTERVAL_MINUTES}. Used only in interval mode.`)
       .addText((text) => {
         text
           .setPlaceholder(String(DEFAULT_SETTINGS.schedulerIntervalMinutes))
@@ -197,7 +199,7 @@ export class MindmapSettingTab extends PluginSettingTab {
           .onClick(async () => {
             this.plugin.settings.schedulerIntervalMinutes = DEFAULT_SETTINGS.schedulerIntervalMinutes;
             await this.plugin.saveSettings();
-            new Notice("Scheduler interval reset to default.");
+            new Notice("Scheduler interval reset.");
             this.display();
           });
       });
@@ -233,11 +235,14 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderSummary(runtime: ResolvedRuntime): void {
-    const summary = new Setting(this.containerEl).setName("Resolved runtime");
+    this.containerEl.createEl("h2", { text: "Status" });
+    const summary = new Setting(this.containerEl).setName("Runtime status");
     summary.setClass(runtime.valid ? "mindmap-validation-ok" : "mindmap-validation-error");
 
     const fragment = document.createDocumentFragment();
     fragment.appendText(`Status: ${runtime.valid ? "Ready" : "Not ready"}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Run command: ${formatCommandPreview(runtime, ["--current"])}`);
     fragment.appendChild(document.createElement("br"));
     fragment.appendText(`Python: ${runtime.command.command}`);
     fragment.appendChild(document.createElement("br"));
@@ -245,15 +250,13 @@ export class MindmapSettingTab extends PluginSettingTab {
     fragment.appendChild(document.createElement("br"));
     fragment.appendText(`Config: ${runtime.configPath}`);
     fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Command: ${formatCommandPreview(runtime, ["--current"])}`);
-    fragment.appendChild(document.createElement("br"));
     fragment.appendText(`Trust: ${runtime.trust.level}`);
     fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Interpreter trust: ${runtime.trust.interpreter}`);
+    fragment.appendText(`Interpreter: ${runtime.trust.interpreter}`);
     fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Script trust: ${runtime.trust.script}`);
+    fragment.appendText(`Script source: ${runtime.trust.script}`);
     fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Config trust: ${runtime.trust.config}`);
+    fragment.appendText(`Config source: ${runtime.trust.config}`);
 
     for (const message of runtime.messages) {
       fragment.appendChild(document.createElement("br"));
@@ -268,15 +271,15 @@ export class MindmapSettingTab extends PluginSettingTab {
     summary.setDesc(fragment);
 
     new Setting(this.containerEl)
-      .setName("Scheduler status")
+      .setName("Scheduler")
       .setDesc(this.plugin.getSchedulerSummary());
 
     new Setting(this.containerEl)
-      .setName("Pending scan")
+      .setName("Pending notes")
       .setDesc(this.plugin.getPendingSummary());
 
     new Setting(this.containerEl)
-      .setName("Diagnostics")
+      .setName("Preflight")
       .setDesc(this.plugin.getDiagnosticsSummary());
   }
 

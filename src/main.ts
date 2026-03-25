@@ -59,7 +59,7 @@ export default class MindmapPlugin extends Plugin {
     lastRunAt: null,
     lastTrigger: null,
     lastExitCode: null,
-    lastMessage: "Manual run only.",
+    lastMessage: "Manual mode.",
   };
   private readonly recentLog: string[] = [];
   private statusBarEl: HTMLElement | null = null;
@@ -86,7 +86,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-run-now",
-      name: "Run Mindmap now",
+      name: "Run Mindmap (current scope)",
       callback: () => {
         void this.runMindmap("manual");
       },
@@ -94,7 +94,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-enable-scheduler",
-      name: "Enable Mindmap scheduler",
+      name: "Enable Mindmap interval scheduler",
       callback: () => {
         void this.setSchedulerMode("interval");
       },
@@ -102,7 +102,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-disable-scheduler",
-      name: "Disable Mindmap scheduler",
+      name: "Disable Mindmap interval scheduler",
       callback: () => {
         void this.setSchedulerMode("manual");
       },
@@ -110,7 +110,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-open-status",
-      name: "Open Mindmap status",
+      name: "Show Mindmap status",
       callback: () => {
         this.showRuntimeNotice(this.getResolvedRuntime());
       },
@@ -118,7 +118,7 @@ export default class MindmapPlugin extends Plugin {
 
     this.addCommand({
       id: "mindmap-validate-runtime",
-      name: "Validate Mindmap runtime",
+      name: "Run Mindmap preflight checks",
       callback: () => {
         void this.runPreflight("manual");
       },
@@ -252,7 +252,7 @@ export default class MindmapPlugin extends Plugin {
         configPath: runtime.configPath,
         currentPaths: [],
         allPaths: [],
-        guidance: "First-run setup is only available for the bundled plugin config. Reset the config path to the default or update your custom config manually.",
+        guidance: "Scope setup controls only the bundled plugin config. Reset config path to default or update your custom config manually.",
       };
     }
 
@@ -267,7 +267,7 @@ export default class MindmapPlugin extends Plugin {
         allPaths: selection.allPaths,
         guidance: isScopeSetupComplete(selection)
           ? "Scope folders are configured."
-          : "Select at least one folder for both current and all scopes, then save setup.",
+          : "Select at least one folder for current and all scopes, then save setup.",
       };
     } catch (error) {
       return {
@@ -314,7 +314,7 @@ export default class MindmapPlugin extends Plugin {
     fragment.appendChild(document.createElement("br"));
     fragment.appendText(`Current scope: ${status.currentPaths.join(", ") || "None"}`);
     fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`All scope: ${status.allPaths.join(", ") || "None"}`);
+    fragment.appendText(`All scopes: ${status.allPaths.join(", ") || "None"}`);
     fragment.appendChild(document.createElement("br"));
     fragment.appendText(status.guidance);
     return fragment;
@@ -367,22 +367,22 @@ export default class MindmapPlugin extends Plugin {
     }
 
     const scheduleLabel = isSchedulerEnabled(this.settings.schedulerMode)
-      ? `Scheduler on. Next run ${formatTimestamp(this.schedulerState.nextRunAt)}.`
-      : "Scheduler off. Manual runs stay available on all desktop platforms.";
+      ? `Scheduler: interval (next ${formatTimestamp(this.schedulerState.nextRunAt)}).`
+      : "Scheduler: manual.";
     const pending = this.getPendingSnapshot();
     const pendingLabel = pending.available
       ? `Pending current/all: ${pending.current.total}/${pending.all.total}.`
       : `Pending unavailable: ${pending.reason}.`;
     const preflightLabel = this.diagnosticsState.result
-      ? `Preflight: ${this.diagnosticsState.result.ok ? "ready" : "failed"}. ${this.diagnosticsState.result.summary}`
-      : "Preflight has not run yet.";
+      ? `Preflight: ${this.diagnosticsState.result.ok ? "ready" : "failed"} (${this.diagnosticsState.result.summary}).`
+      : "Preflight: not run yet.";
     const setup = this.getScopeSetupStatus();
     const setupLabel = setup.complete
-      ? `Scope setup ready. Current/all: ${setup.currentPaths.length}/${setup.allPaths.length}.`
-      : `Setup required. ${setup.guidance}`;
+      ? `Scope setup: ready (${setup.currentPaths.length}/${setup.allPaths.length}).`
+      : `Scope setup: required. ${setup.guidance}`;
 
     new Notice(
-      `Mindmap runtime ${runtime.trust.level}. ${formatCommandPreview(runtime, DEFAULT_RUN_ARGS)}. ${scheduleLabel} ${pendingLabel} ${preflightLabel} ${setupLabel}`,
+      `Runtime trust: ${runtime.trust.level}. Run: ${formatCommandPreview(runtime, DEFAULT_RUN_ARGS)}. ${scheduleLabel} ${pendingLabel} ${preflightLabel} ${setupLabel}`,
       12000,
     );
   }
@@ -401,8 +401,8 @@ export default class MindmapPlugin extends Plugin {
     this.settings.schedulerMode = mode;
     await this.saveSettings();
     const message = mode === "interval"
-      ? `Mindmap scheduler enabled. Next run ${formatTimestamp(this.schedulerState.nextRunAt)}.`
-      : "Mindmap scheduler disabled. Manual runs remain available.";
+      ? `Mindmap interval scheduler enabled. Next run ${formatTimestamp(this.schedulerState.nextRunAt)}.`
+      : "Mindmap interval scheduler disabled. Manual runs remain available.";
     new Notice(message, 8000);
   }
 
@@ -516,7 +516,7 @@ export default class MindmapPlugin extends Plugin {
     if (isSchedulerEnabled(this.settings.schedulerMode)) {
       this.startScheduler();
     } else {
-      this.stopScheduler("Manual mode. Internal scheduler disabled.");
+      this.stopScheduler("Manual mode. Interval scheduler disabled.");
     }
     this.updateStatusBar();
   }
@@ -623,7 +623,7 @@ export default class MindmapPlugin extends Plugin {
     const preview = formatCommandPreview(runtime, DEFAULT_RUN_ARGS);
     this.appendLog(`Starting ${trigger} run: ${preview}`);
     if (trigger === "manual") {
-      new Notice(`Mindmap run started. ${preview}`, 8000);
+      new Notice(`Mindmap run started (current scope). ${preview}`, 8000);
     }
 
     await new Promise<void>((resolve) => {
@@ -714,7 +714,7 @@ export default class MindmapPlugin extends Plugin {
     }
 
     if (!this.getScopeSetupStatus().complete) {
-      this.statusBarEl.setText("Mindmap: setup required");
+      this.statusBarEl.setText("Mindmap: scope setup required");
       return;
     }
 

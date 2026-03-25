@@ -348,7 +348,7 @@ export class DebouncedRefreshController {
     private readonly clearTimer: PendingServiceDeps["clearTimer"],
     private readonly callback: () => void,
     private readonly delayMs = DEFAULT_DEBOUNCE_MS,
-  ) {}
+  ) { }
 
   trigger(): void {
     if (this.handle) {
@@ -534,7 +534,13 @@ export class PendingScanService {
       return { hashes: this.stateCache.hashes, reloaded: false };
     }
 
-    const rawState = JSON.parse(await this.deps.readTextFile(statePath));
+    let rawState: unknown;
+    try {
+      rawState = JSON.parse(await this.deps.readTextFile(statePath));
+    } catch {
+      this.stateCache = null;
+      return { hashes: {}, reloaded: true };
+    }
     const hashes = buildStateHashes(rawState);
     this.stateCache = { mtimeMs, hashes };
     return { hashes, reloaded: true };
