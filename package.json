@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test $(find src -name '*.test.ts' -print)",
     "validate": "node scripts/validate-release.mjs",
     "release:prepare": "npm run build && npm run validate && node scripts/prepare-release.mjs"
   },
