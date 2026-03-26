@@ -46,7 +46,7 @@ export class MindmapSettingTab extends PluginSettingTab {
       "Use bundled defaults unless you need vault-relative overrides.",
     );
     containerEl.createEl("p", {
-      text: "Safety: this plugin runs a local Python process and reads local files. Review custom executable, script, and config paths before running.",
+      text: "This plugin runs a local Python process and reads local files. Review custom executable, script, and config paths before running.",
     });
 
     this.renderPathSetting("pythonCommand");
@@ -67,7 +67,9 @@ export class MindmapSettingTab extends PluginSettingTab {
     this.renderSection("Diagnostics", "Run preflight checks and review runtime status.");
     new Setting(this.containerEl)
       .setName("Preflight checks")
-      .setDesc("Verify Python execution, dependencies, Ollama, and required models.")
+      .setDesc(
+        "Checks the local Python runtime, dependencies, Ollama, and required models.",
+      )
       .addButton((button) =>
         button.setButtonText("Run checks").onClick(() => {
           void this.plugin.runPreflight("manual").then(() => {
