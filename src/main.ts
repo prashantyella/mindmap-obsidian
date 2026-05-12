@@ -37,6 +37,7 @@ import {
 } from "./scheduler";
 import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./settings";
 import { MindmapSettingTab } from "./settingsTab";
+import { MindmapWorkspaceView, MINDMAP_VIEW_TYPE } from "./workspaceView";
 import { BUNDLED_RUNTIME_ASSETS } from "virtual:runtime-assets";
 
 const LOG_LIMIT = 50;
@@ -105,6 +106,10 @@ export default class MindmapPlugin extends Plugin {
     await this.ensureBundledRuntime();
 
     this.statusBarEl = this.addStatusBarItem();
+    this.registerView(MINDMAP_VIEW_TYPE, (leaf) => new MindmapWorkspaceView(leaf, this));
+    this.addRibbonIcon("orbit", "Open Mindmap", () => {
+      void this.openMindmapView();
+    });
     this.addSettingTab(new MindmapSettingTab(this.app, this));
     this.pendingScanService = createPendingScanService(
       this.app.vault,
@@ -113,6 +118,14 @@ export default class MindmapPlugin extends Plugin {
       (message) => this.appendLog(message),
       () => this.updateStatusBar(),
     );
+
+    this.addCommand({
+      id: "mindmap-open-view",
+      name: "Open Mindmap",
+      callback: () => {
+        void this.openMindmapView();
+      },
+    });
 
     this.addCommand({
       id: "mindmap-run-now",
@@ -259,6 +272,21 @@ export default class MindmapPlugin extends Plugin {
 
   getRecentLogLines(): string[] {
     return [...this.recentLog];
+  }
+
+  async openMindmapView(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(MINDMAP_VIEW_TYPE)[0];
+    if (existing) {
+      this.app.workspace.revealLeaf(existing);
+      return;
+    }
+
+    const leaf = this.app.workspace.getLeaf(true);
+    await leaf.setViewState({
+      type: MINDMAP_VIEW_TYPE,
+      active: true,
+    });
+    this.app.workspace.revealLeaf(leaf);
   }
 
   getPendingSnapshot(): PendingSnapshot {
@@ -827,7 +855,7 @@ export default class MindmapPlugin extends Plugin {
     this.scheduleNextTick(Date.now());
   }
 
-  private async runMindmap(trigger: RunTrigger, scope: RunScope = "current"): Promise<void> {
+  async runMindmap(trigger: RunTrigger, scope: RunScope = "current"): Promise<void> {
     if (this.currentProcess) {
       const message = "Mindmap is already running. Skipping the new request.";
       this.appendLog(message);

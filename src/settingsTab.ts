@@ -1,6 +1,5 @@
 import { FileSystemAdapter, Notice, PluginSettingTab, Setting } from "obsidian";
 
-import type { ScopeSelection } from "./onboarding";
 import { formatCommandPreview, type ResolvedRuntime } from "./pathResolver";
 import { getRunProfile } from "./runProfiles";
 import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
@@ -32,8 +31,6 @@ function getPluginRuntimeRelativePath(configDir: string): string {
 }
 
 export class MindmapSettingTab extends PluginSettingTab {
-  private onboardingDraft: ScopeSelection | null = null;
-
   constructor(app: MindmapPlugin["app"], private readonly plugin: MindmapPlugin) {
     super(app, plugin);
   }
@@ -82,10 +79,8 @@ export class MindmapSettingTab extends PluginSettingTab {
 
   private renderScopeSetupSettings(): void {
     const status = this.plugin.getScopeSetupStatus();
-    const options = this.plugin.getVaultFolderOptions();
-    const draft = this.getOnboardingDraft(status);
 
-    this.renderSection("Scope setup", "Choose folders used for current-scope and all-scope runs.");
+    this.renderSection("Scope setup", "Review configured folders here. Use the Mindmap tab for full scope management.");
 
     new Setting(this.containerEl)
       .setName("Scope status")
@@ -95,62 +90,14 @@ export class MindmapSettingTab extends PluginSettingTab {
       return;
     }
 
-    new Setting(this.containerEl).setName("Current scope (--current)").setHeading();
-    for (const option of options) {
-      new Setting(this.containerEl)
-        .setName(option.label)
-        .setDesc("Used by run mindmap (current scope).")
-        .addToggle((toggle) => {
-          toggle
-            .setValue(draft.currentPaths.includes(option.value))
-            .onChange((value) => {
-              this.toggleDraftValue("currentPaths", option.value, value);
-            });
-        });
-    }
-
-    new Setting(this.containerEl).setName("All scope (--all)").setHeading();
-    for (const option of options) {
-      new Setting(this.containerEl)
-        .setName(option.label)
-        .setDesc("Used by run mindmap (all scopes).")
-        .addToggle((toggle) => {
-          toggle
-            .setValue(draft.allPaths.includes(option.value))
-            .onChange((value) => {
-              this.toggleDraftValue("allPaths", option.value, value);
-            });
-        });
-    }
-
     new Setting(this.containerEl)
-      .setName("Save scope setup")
-      .setDesc("Save selected folders to the bundled config file.")
+      .setName("Manage scope")
+      .setDesc("Open the dedicated Mindmap tab to search folders, select current/all scope, and save setup.")
       .addButton((button) =>
-        button.setButtonText("Save setup").setCta().onClick(async () => {
-          try {
-            this.plugin.saveScopeSetup(this.getOnboardingDraft(status));
-            this.onboardingDraft = null;
-            await this.plugin.runPreflight("manual");
-            new Notice("Scope setup saved.");
-            this.display();
-          } catch (error) {
-            new Notice(error instanceof Error ? error.message : "Failed to save scope setup.", 12000);
-          }
+        button.setButtonText("Open Mindmap").setCta().onClick(() => {
+          void this.plugin.openMindmapView();
         }),
-      )
-      .addExtraButton((button) => {
-        button
-          .setIcon("reset")
-          .setTooltip("Reset unsaved changes")
-          .onClick(() => {
-            this.onboardingDraft = {
-              currentPaths: [...status.currentPaths],
-              allPaths: [...status.allPaths],
-            };
-            this.display();
-          });
-      });
+      );
   }
 
   private renderSchedulerSettings(): void {
@@ -363,24 +310,4 @@ export class MindmapSettingTab extends PluginSettingTab {
       .setDesc(this.plugin.getDiagnosticsSummary());
   }
 
-  private getOnboardingDraft(status = this.plugin.getScopeSetupStatus()): ScopeSelection {
-    if (!this.onboardingDraft) {
-      this.onboardingDraft = {
-        currentPaths: [...status.currentPaths],
-        allPaths: [...status.allPaths],
-      };
-    }
-    return this.onboardingDraft;
-  }
-
-  private toggleDraftValue(field: keyof ScopeSelection, value: string, enabled: boolean): void {
-    const draft = this.getOnboardingDraft();
-    const nextValues = enabled
-      ? [...draft[field], value]
-      : draft[field].filter((entry) => entry !== value);
-    this.onboardingDraft = {
-      ...draft,
-      [field]: nextValues,
-    };
-  }
 }

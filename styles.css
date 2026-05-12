@@ -47,3 +47,272 @@
 .callout[data-callout="mindmap"] a[href^="obsidian://command?name=graph:open-local-graph"] {
   display: none;
 }
+
+.mindmap-view {
+  color: var(--text-normal);
+  height: 100%;
+  overflow-y: auto;
+  font-size: var(--font-ui-small);
+}
+
+.mindmap-view-shell {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 20px 24px 28px;
+}
+
+.mindmap-view-header {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.mindmap-view-header h2 {
+  margin: 0 0 4px;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.mindmap-view-header p,
+.mindmap-view-section-heading p,
+.mindmap-muted {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.mindmap-view-actions,
+.mindmap-scope-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.mindmap-view-panel {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary);
+}
+
+.mindmap-view-panel h3,
+.mindmap-view-section h3,
+.mindmap-view-section-heading h3 {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.mindmap-view-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.mindmap-view-metric {
+  padding: 9px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+
+.mindmap-view-metric-value {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.mindmap-view-metric-label,
+.mindmap-scope-summary-label,
+.mindmap-folder-path,
+.mindmap-scope-guidance {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.mindmap-view-section {
+  margin-top: 10px;
+}
+
+.mindmap-view-fragment {
+  color: var(--text-muted);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.mindmap-view-log {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+.mindmap-scope-manager {
+  margin-top: 12px;
+}
+
+.mindmap-scope-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.mindmap-scope-summary {
+  padding: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+
+.mindmap-scope-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.mindmap-scope-chip {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  max-width: 100%;
+  min-height: 20px;
+  padding: 1px 7px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.35;
+}
+
+.mindmap-scope-chip-remove {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--background-modifier-border);
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+}
+
+.mindmap-scope-chip.is-removable:hover .mindmap-scope-chip-remove,
+.mindmap-scope-chip-remove:focus-visible {
+  opacity: 1;
+}
+
+.mindmap-scope-chip-remove:hover {
+  background: var(--background-modifier-error);
+  color: var(--text-on-accent);
+}
+
+.mindmap-scope-guidance {
+  margin-top: 8px;
+}
+
+.mindmap-scope-toolbar {
+  margin: 12px 0 8px;
+}
+
+.mindmap-scope-search {
+  min-width: 220px;
+  flex: 1 1 260px;
+}
+
+.mindmap-folder-tree {
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+}
+
+.mindmap-folder-tree-header,
+.mindmap-folder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 86px 86px;
+  gap: 8px;
+  align-items: center;
+}
+
+.mindmap-folder-tree-header {
+  padding: 8px 12px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.mindmap-folder-row {
+  min-height: 34px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.mindmap-folder-label {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+  align-items: center;
+  padding-left: calc(var(--mindmap-folder-depth, 0) * 18px);
+}
+
+.mindmap-folder-label > span:last-child,
+.mindmap-folder-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mindmap-folder-expand {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+
+.mindmap-folder-spacer {
+  width: 22px;
+  flex: 0 0 22px;
+}
+
+.mindmap-folder-checkbox {
+  display: flex;
+  justify-content: center;
+}
+
+@media (max-width: 760px) {
+  .mindmap-view-shell {
+    padding: 14px;
+  }
+
+  .mindmap-view-header {
+    display: block;
+  }
+
+  .mindmap-view-actions {
+    margin-top: 12px;
+  }
+
+  .mindmap-folder-tree-header,
+  .mindmap-folder-row {
+    grid-template-columns: minmax(0, 1fr) 64px 64px;
+  }
+}
