@@ -66,6 +66,7 @@ void test("resolveRuntime accepts vault-relative overrides inside the vault", ()
 
   const runtime = resolveRuntime(
     {
+      ...DEFAULT_SETTINGS,
       pythonCommand: "tools/python/bin/python",
       scriptPath: "custom/mindmap.py",
       configPath: "custom/config.json",
@@ -87,6 +88,7 @@ void test("resolveRuntime rejects traversal outside the vault", () => {
 
   const runtime = resolveRuntime(
     {
+      ...DEFAULT_SETTINGS,
       pythonCommand: "python3",
       scriptPath: "../../outside.py",
       configPath: "../outside-config.json",
@@ -106,6 +108,7 @@ void test("resolveRuntime rejects absolute script and config paths", () => {
 
   const runtime = resolveRuntime(
     {
+      ...DEFAULT_SETTINGS,
       pythonCommand: "/opt/python3",
       scriptPath: "/tmp/mindmap.py",
       configPath: "/tmp/config.json",
@@ -130,6 +133,7 @@ void test("resolveRuntime rejects python commands with shell metacharacters", ()
 
   const runtime = resolveRuntime(
     {
+      ...DEFAULT_SETTINGS,
       pythonCommand: "python3; rm -rf /",
       scriptPath: "",
       configPath: "",
@@ -153,6 +157,7 @@ void test("resolveRuntime rejects compound python commands with spaces", () => {
 
   const runtime = resolveRuntime(
     {
+      ...DEFAULT_SETTINGS,
       pythonCommand: "python3 -c",
       scriptPath: "",
       configPath: "",

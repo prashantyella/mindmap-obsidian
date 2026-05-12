@@ -50,6 +50,26 @@ ollama pull llama3.1:8b
 - `Run Mindmap (current scope)`
 - `Run Mindmap (all scopes)`
 - `Show Mindmap status`
+- `Enable Mindmap LaunchAgent scheduler`
+- `Disable Mindmap schedulers`
+
+## Scheduling
+
+Mindmap supports three scheduler modes:
+
+- `Manual`: runs only from commands.
+- `Interval`: runs current scope while Obsidian is open.
+- `LaunchAgent`: writes plugin-managed macOS LaunchAgents so scheduled runs continue when Obsidian is closed.
+
+LaunchAgent mode uses the plugin runtime resolved in settings. With default paths, scheduled runs use:
+
+- `.obsidian/plugins/mindmap-ai/python/mindmap.py`
+- `.obsidian/plugins/mindmap-ai/python/config.json`
+
+Default LaunchAgent schedules:
+
+- Daily Mon-Sat 02:30: `--all --apply`
+- Weekly Sunday 03:00: `--all --refresh-all --apply`
 
 ## Vault Path Safety
 

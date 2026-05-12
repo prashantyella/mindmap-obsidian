@@ -9,7 +9,7 @@ export interface VaultFolderOption {
 }
 
 function normalizeFolderPath(rawPath: string): string | null {
-  const trimmed = rawPath.trim().replaceAll("\\", "/");
+  const trimmed = rawPath.trim().replace(/\\/g, "/");
   if (!trimmed || trimmed === "/" || trimmed === ".") {
     return ".";
   }
