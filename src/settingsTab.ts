@@ -4,6 +4,7 @@ import type { ScopeSelection } from "./onboarding";
 import { formatCommandPreview, type ResolvedRuntime } from "./pathResolver";
 import { getRunProfile } from "./runProfiles";
 import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
+import { normalizeHour, normalizeMinute } from "./launchAgent";
 import type MindmapPlugin from "./main";
 import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
 
@@ -153,18 +154,23 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderSchedulerSettings(): void {
-    this.renderSection("Scheduler", "Use manual runs or enable interval scheduling for current-scope runs.");
+    this.renderSection("Scheduler", "Use manual runs, in-app interval scheduling, or plugin-managed macOS LaunchAgents.");
 
     new Setting(this.containerEl)
       .setName("Mode")
-      .setDesc("Manual runs on demand. Interval runs on a repeating timer.")
+      .setDesc("Manual runs on demand. Interval runs while Obsidian is open. LaunchAgent runs continue when Obsidian is closed.")
       .addDropdown((dropdown) => {
         dropdown
           .addOption("manual", "Manual")
           .addOption("interval", "Interval")
+          .addOption("launchAgent", "LaunchAgent")
           .setValue(this.plugin.settings.schedulerMode)
           .onChange(async (value) => {
-            this.plugin.settings.schedulerMode = value === "interval" ? "interval" : "manual";
+            this.plugin.settings.schedulerMode = value === "launchAgent"
+              ? "launchAgent"
+              : value === "interval"
+                ? "interval"
+                : "manual";
             await this.plugin.saveSettings();
             this.display();
           });
@@ -205,6 +211,67 @@ export class MindmapSettingTab extends PluginSettingTab {
             this.plugin.settings.schedulerIntervalMinutes = DEFAULT_SETTINGS.schedulerIntervalMinutes;
             await this.plugin.saveSettings();
             new Notice("Scheduler interval reset.");
+            this.display();
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Daily LaunchAgent time")
+      .setDesc("Runs all-scope apply Monday through Saturday in LaunchAgent mode.")
+      .addText((text) => {
+        text
+          .setPlaceholder(String(DEFAULT_SETTINGS.launchAgentDailyHour))
+          .setValue(String(this.plugin.settings.launchAgentDailyHour))
+          .onChange(async (value) => {
+            this.plugin.settings.launchAgentDailyHour = normalizeHour(Number.parseInt(value.trim(), 10));
+            await this.plugin.saveSettings();
+            this.display();
+          });
+      })
+      .addText((text) => {
+        text
+          .setPlaceholder(String(DEFAULT_SETTINGS.launchAgentDailyMinute).padStart(2, "0"))
+          .setValue(String(this.plugin.settings.launchAgentDailyMinute).padStart(2, "0"))
+          .onChange(async (value) => {
+            this.plugin.settings.launchAgentDailyMinute = normalizeMinute(Number.parseInt(value.trim(), 10));
+            await this.plugin.saveSettings();
+            this.display();
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Weekly refresh LaunchAgent")
+      .setDesc("Runs all-scope refresh and apply on Sunday in LaunchAgent mode.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.launchAgentWeeklyEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.launchAgentWeeklyEnabled = value;
+            await this.plugin.saveSettings();
+            this.display();
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Weekly LaunchAgent time")
+      .setDesc("Used only when the weekly refresh LaunchAgent is enabled.")
+      .addText((text) => {
+        text
+          .setPlaceholder(String(DEFAULT_SETTINGS.launchAgentWeeklyHour))
+          .setValue(String(this.plugin.settings.launchAgentWeeklyHour))
+          .onChange(async (value) => {
+            this.plugin.settings.launchAgentWeeklyHour = normalizeHour(Number.parseInt(value.trim(), 10));
+            await this.plugin.saveSettings();
+            this.display();
+          });
+      })
+      .addText((text) => {
+        text
+          .setPlaceholder(String(DEFAULT_SETTINGS.launchAgentWeeklyMinute).padStart(2, "0"))
+          .setValue(String(this.plugin.settings.launchAgentWeeklyMinute).padStart(2, "0"))
+          .onChange(async (value) => {
+            this.plugin.settings.launchAgentWeeklyMinute = normalizeMinute(Number.parseInt(value.trim(), 10));
+            await this.plugin.saveSettings();
             this.display();
           });
       });

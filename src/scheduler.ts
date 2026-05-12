@@ -27,6 +27,10 @@ export function isSchedulerEnabled(mode: SchedulerMode): boolean {
   return mode === "interval";
 }
 
+export function isLaunchAgentSchedulerEnabled(mode: SchedulerMode): boolean {
+  return mode === "launchAgent";
+}
+
 export function computeNextRunAt(config: SchedulerConfig, now: number): number | null {
   if (!isSchedulerEnabled(config.mode)) {
     return null;

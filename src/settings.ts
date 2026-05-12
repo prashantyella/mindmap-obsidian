@@ -1,4 +1,4 @@
-export type SchedulerMode = "manual" | "interval";
+export type SchedulerMode = "manual" | "interval" | "launchAgent";
 
 export interface MindmapSettings {
   pythonCommand: string;
@@ -6,6 +6,11 @@ export interface MindmapSettings {
   configPath: string;
   schedulerMode: SchedulerMode;
   schedulerIntervalMinutes: number;
+  launchAgentDailyHour: number;
+  launchAgentDailyMinute: number;
+  launchAgentWeeklyEnabled: boolean;
+  launchAgentWeeklyHour: number;
+  launchAgentWeeklyMinute: number;
 }
 
 export const DEFAULT_SETTINGS: MindmapSettings = {
@@ -14,6 +19,11 @@ export const DEFAULT_SETTINGS: MindmapSettings = {
   configPath: "",
   schedulerMode: "manual",
   schedulerIntervalMinutes: 60,
+  launchAgentDailyHour: 2,
+  launchAgentDailyMinute: 30,
+  launchAgentWeeklyEnabled: true,
+  launchAgentWeeklyHour: 3,
+  launchAgentWeeklyMinute: 0,
 };
 
 export type RuntimeField = "pythonCommand" | "scriptPath" | "configPath";

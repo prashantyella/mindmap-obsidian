@@ -5,6 +5,8 @@ import {
   buildSchedulerStatus,
   computeNextRunAt,
   getSchedulerAction,
+  isLaunchAgentSchedulerEnabled,
+  isSchedulerEnabled,
   MIN_SCHEDULER_INTERVAL_MINUTES,
   normalizeSchedulerInterval,
 } from "./scheduler";
@@ -29,4 +31,10 @@ void test("buildSchedulerStatus clears next run when disabled", () => {
   const status = buildSchedulerStatus({ mode: "manual", intervalMinutes: 60 }, 999_999);
   assert.equal(status.enabled, false);
   assert.equal(status.nextRunAt, null);
+});
+
+void test("LaunchAgent mode does not enable the internal interval scheduler", () => {
+  assert.equal(isSchedulerEnabled("launchAgent"), false);
+  assert.equal(isLaunchAgentSchedulerEnabled("launchAgent"), true);
+  assert.equal(computeNextRunAt({ mode: "launchAgent", intervalMinutes: 60 }, 1_000), null);
 });
