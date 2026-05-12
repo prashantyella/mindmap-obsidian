@@ -5,6 +5,7 @@ import { getRunProfile } from "./runProfiles";
 import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
 import { normalizeHour, normalizeMinute } from "./launchAgent";
 import type MindmapPlugin from "./main";
+import type { LlmProviderConfig } from "./main";
 import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
 
 const FIELD_META: Record<RuntimeField, { name: string; description: string }> = {
@@ -50,6 +51,7 @@ export class MindmapSettingTab extends PluginSettingTab {
     this.renderPathSetting("pythonCommand");
     this.renderPathSetting("scriptPath");
     this.renderPathSetting("configPath");
+    this.renderProviderSettings();
     this.renderScopeSetupSettings();
     this.renderSchedulerSettings();
     this.renderDiagnosticsSettings();
@@ -98,6 +100,132 @@ export class MindmapSettingTab extends PluginSettingTab {
           void this.plugin.openMindmapView();
         }),
       );
+  }
+
+  private renderProviderSettings(): void {
+    this.renderSection("LLM provider", "Configure the local model service used for summary, tag, and concept extraction.");
+
+    const status = this.plugin.getLlmProviderConfigStatus();
+    if (!status.canManage) {
+      new Setting(this.containerEl)
+        .setName("Provider config")
+        .setDesc(status.guidance);
+      return;
+    }
+
+    new Setting(this.containerEl)
+      .setName("Provider")
+      .setDesc(`Config: ${status.configPath ?? "Unavailable"}`)
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("ollama", "Ollama")
+          .addOption("openai_compatible", "OpenAI compatible")
+          .setValue(status.provider)
+          .onChange((value) => {
+            this.saveProviderConfig({
+              provider: value === "openai_compatible" ? "openai_compatible" : "ollama",
+            });
+            this.display();
+          });
+      })
+      .addButton((button) => {
+        button
+          .setButtonText("Use OMLX")
+          .onClick(() => {
+            this.saveProviderConfig({
+              provider: "openai_compatible",
+              baseUrl: "http://localhost:8000/v1",
+              model: "Qwen3.5-9B-MLX-4bit",
+              maxTokens: 1024,
+              enableThinking: false,
+            });
+            this.display();
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Base URL")
+      .setDesc("OpenAI-compatible providers should include the /v1 suffix.")
+      .addText((text) => {
+        text
+          .setPlaceholder(status.provider === "openai_compatible" ? "http://localhost:8000/v1" : "http://localhost:11434")
+          .setValue(status.baseUrl)
+          .onChange((value) => {
+            this.saveProviderConfig({ baseUrl: value });
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Model")
+      .setDesc("Model used for metadata extraction.")
+      .addText((text) => {
+        text
+          .setPlaceholder(status.provider === "openai_compatible" ? "Qwen3.5-9B-MLX-4bit" : "llama3.1:8b")
+          .setValue(status.model)
+          .onChange((value) => {
+            this.saveProviderConfig({ model: value });
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Local API key")
+      .setDesc("Stored in the plugin runtime config for local OpenAI-compatible servers.")
+      .addText((text) => {
+        text.inputEl.type = "password";
+        text
+          .setPlaceholder("Optional")
+          .setValue(status.apiKey)
+          .onChange((value) => {
+            this.saveProviderConfig({ apiKey: value });
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Max output tokens")
+      .setDesc("Caps only the metadata response, not the note text sent to the model.")
+      .addText((text) => {
+        text
+          .setPlaceholder("1024")
+          .setValue(String(status.maxTokens))
+          .onChange((value) => {
+            const parsed = Number.parseInt(value.trim(), 10);
+            this.saveProviderConfig({ maxTokens: Number.isFinite(parsed) ? parsed : 1024 });
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Model thinking")
+      .setDesc("Disable for Qwen/OMLX JSON extraction.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(status.enableThinking)
+          .onChange((value) => {
+            this.saveProviderConfig({ enableThinking: value });
+            this.display();
+          });
+      });
+  }
+
+  private saveProviderConfig(patch: Partial<LlmProviderConfig>): void {
+    const status = this.plugin.getLlmProviderConfigStatus();
+    if (!status.canManage) {
+      new Notice(status.guidance, 8000);
+      return;
+    }
+
+    try {
+      this.plugin.saveLlmProviderConfig({
+        provider: status.provider,
+        baseUrl: status.baseUrl,
+        model: status.model,
+        apiKey: status.apiKey,
+        maxTokens: status.maxTokens,
+        enableThinking: status.enableThinking,
+        ...patch,
+      });
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : "Mindmap provider config could not be saved.", 8000);
+    }
   }
 
   private renderSchedulerSettings(): void {

@@ -11,6 +11,7 @@
   "llm_provider": "ollama",
   "llm_base_url": "http://localhost:11434",
   "llm_model": "llama3.1:8b",
+  "llm_api_key": "",
   "llm_api_key_env": "",
   "llm_max_tokens": 1024,
   "llm_chat_template_kwargs": {},
