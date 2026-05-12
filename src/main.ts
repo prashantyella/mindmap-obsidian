@@ -702,11 +702,11 @@ export default class MindmapPlugin extends Plugin {
 
   private async writeLaunchAgentPlist(spec: LaunchAgentSpec): Promise<void> {
     const content = buildLaunchAgentPlist(spec);
-    let existing = "";
+    let existing: string | null;
     try {
       existing = await fs.promises.readFile(spec.plistPath, "utf8");
     } catch {
-      existing = "";
+      existing = null;
     }
 
     if (existing !== content) {
