@@ -495,6 +495,55 @@ def ollama_request(
     )
 
 
+def provider_request(
+    provider_label: str,
+    url: str,
+    payload: dict,
+    timeout: int = 120,
+    retries: int = 1,
+    backoff_seconds: float = 2.0,
+    log_fn: Optional[Callable[[str], None]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    guidance: Optional[str] = None,
+) -> dict:
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
+    data = json.dumps(payload).encode("utf-8")
+    req = request.Request(url, data=data, headers=request_headers)
+    model = payload.get("model", "unknown")
+
+    last_err = None
+    attempts = max(1, retries + 1)
+    for attempt in range(1, attempts + 1):
+        try:
+            with request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            last_err = exc
+            if log_fn:
+                log_fn(
+                    diagnostic_line(
+                        "warn",
+                        "PROVIDER_REQUEST_FAILED",
+                        f"{provider_label} request failed on attempt {attempt}/{attempts}: {exc}",
+                        context={"provider": provider_label, "model": model, "url": url},
+                    )
+                )
+            if attempt < attempts:
+                time.sleep(backoff_seconds * attempt)
+
+    raise RuntimeError(
+        diagnostic_line(
+            "error",
+            "PROVIDER_REQUEST_FAILED",
+            f"{provider_label} request failed after {attempts} attempts: {last_err}",
+            guidance=guidance or "Check that the provider server is running and that the configured model exists.",
+            context={"provider": provider_label, "model": model, "url": url},
+        )
+    )
+
+
 def embed_texts(
     base_url: str,
     model: str,
@@ -522,6 +571,144 @@ def embed_texts(
     raise RuntimeError("Unexpected embed response")
 
 
+def build_metadata_messages(
+    text: str,
+    tag_limit: int,
+    concept_limit: int,
+    controlled_tags: List[str],
+    allow_free_tags: bool,
+) -> List[Dict[str, str]]:
+    system = (
+        "You label personal reflection notes. Return exactly one JSON object, not an array. "
+        "Use concise, grounded language."
+    )
+    tag_rule = "Tags must be short, broad themes derived from the note (avoid overly specific phrases)."
+    if controlled_tags:
+        tag_rule += " Use only tags from this list:\n" + ", ".join(controlled_tags)
+        if not allow_free_tags:
+            tag_rule += "\nReturn only tags from the list."
+    user = (
+        "Extract metadata from the note.\n"
+        "Return a single JSON object shaped like "
+        "{\"summary\":\"...\",\"tags\":[\"tag-one\"],\"concepts\":[\"concept one\"]}.\n"
+        f"Required keys: summary (1-2 sentences), tags (3-{tag_limit} kebab-case), "
+        f"concepts (3-{concept_limit} core noun phrases).\n"
+        "Rules:\n"
+        f"- {tag_rule}\n"
+        "- Tags must be lowercase kebab-case, no single letters, 1-3 words.\n"
+        "- Concepts should be the core ideas only (no fluff).\n\n"
+        "Note:\n" + text.strip()
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_llm_metadata_json(content: str, model: str, provider: str) -> Dict:
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            parsed = json.loads(content[start : end + 1])
+        else:
+            raise RuntimeError(
+                diagnostic_line(
+                    "error",
+                    "LLM_INVALID_RESPONSE",
+                    "LLM response did not contain valid JSON.",
+                    guidance="Retry the run or switch to a model that follows JSON output more reliably.",
+                    context={"model": model, "provider": provider},
+                )
+            )
+    if isinstance(parsed, dict):
+        return parsed
+    raise RuntimeError(
+        diagnostic_line(
+            "error",
+            "LLM_INVALID_RESPONSE",
+            "LLM response JSON was not an object.",
+            guidance="Retry the run or switch to a model that follows object-shaped JSON output more reliably.",
+            context={"model": model, "provider": provider, "response_type": type(parsed).__name__},
+        )
+    )
+
+
+def build_openai_compatible_chat_payload(
+    model: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    chat_template_kwargs: Optional[Dict] = None,
+) -> Dict:
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+    if chat_template_kwargs:
+        payload["chat_template_kwargs"] = chat_template_kwargs
+    return payload
+
+
+def parse_openai_compatible_chat_response(resp: Dict) -> str:
+    choices = resp.get("choices", [])
+    if not choices:
+        return ""
+    message = choices[0].get("message", {})
+    content = message.get("content", "")
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("text"):
+                parts.append(str(item["text"]))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    return str(content)
+
+
+def normalize_provider_name(provider: str) -> str:
+    return provider.strip().lower().replace("-", "_")
+
+
+def resolve_llm_api_key(config: Dict) -> str:
+    env_name = str(config.get("llm_api_key_env", "")).strip()
+    if env_name:
+        return os.environ.get(env_name, "")
+    return str(config.get("llm_api_key", "")).strip()
+
+
+def get_embed_settings(config: Dict) -> Dict[str, str]:
+    provider = normalize_provider_name(str(config.get("embed_provider", "ollama")))
+    base_url = str(config.get("embed_base_url", config.get("ollama_base_url", ""))).strip()
+    model = str(config.get("embed_model", "")).strip()
+    return {"provider": provider, "base_url": base_url, "model": model}
+
+
+def get_llm_settings(config: Dict) -> Dict:
+    provider = normalize_provider_name(str(config.get("llm_provider", "ollama")))
+    base_url = str(config.get("llm_base_url", config.get("ollama_base_url", ""))).strip()
+    model = str(config.get("llm_model", "")).strip()
+    max_tokens = int(config.get("llm_max_tokens", 1024))
+    chat_template_kwargs = config.get("llm_chat_template_kwargs", {})
+    if not isinstance(chat_template_kwargs, dict):
+        chat_template_kwargs = {}
+    return {
+        "provider": provider,
+        "base_url": base_url,
+        "model": model,
+        "api_key": resolve_llm_api_key(config),
+        "api_key_env": str(config.get("llm_api_key_env", "")).strip(),
+        "max_tokens": max_tokens,
+        "chat_template_kwargs": chat_template_kwargs,
+    }
+
+
 def llm_extract(
     base_url: str,
     model: str,
@@ -534,62 +721,56 @@ def llm_extract(
     retries: int = 1,
     backoff_seconds: float = 2.0,
     log_fn: Optional[Callable[[str], None]] = None,
+    provider: str = "ollama",
+    api_key: str = "",
+    max_tokens: int = 1024,
+    chat_template_kwargs: Optional[Dict] = None,
 ) -> Dict:
-    system = (
-        "You label personal reflection notes. Return only JSON. "
-        "Use concise, grounded language."
-    )
-    tag_rule = "Tags must be short, broad themes derived from the note (avoid overly specific phrases)."
-    if controlled_tags:
-        tag_rule += " Use only tags from this list:\n" + ", ".join(controlled_tags)
-        if not allow_free_tags:
-            tag_rule += "\nReturn only tags from the list."
-    user = (
-        "Extract metadata from the note.\n"
-        f"Return JSON with keys: summary (1-2 sentences), tags (3-{tag_limit} kebab-case), "
-        f"concepts (3-{concept_limit} core noun phrases).\n"
-        "Rules:\n"
-        f"- {tag_rule}\n"
-        "- Tags must be lowercase kebab-case, no single letters, 1–3 words.\n"
-        "- Concepts should be the core ideas only (no fluff).\n\n"
-        "Note:\n" + text.strip()
-    )
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "format": "json",
-        "stream": False,
-    }
-    resp = ollama_request(
-        base_url,
-        "/api/chat",
-        payload,
-        timeout=timeout,
-        retries=retries,
-        backoff_seconds=backoff_seconds,
-        log_fn=log_fn,
-    )
-    content = resp.get("message", {}).get("content", "")
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        # Try to salvage JSON from response
-        start = content.find("{")
-        end = content.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return json.loads(content[start : end + 1])
-        raise RuntimeError(
-            diagnostic_line(
-                "error",
-                "OLLAMA_INVALID_RESPONSE",
-                "LLM response did not contain valid JSON.",
-                guidance="Retry the run or switch to a model that follows JSON output more reliably.",
-                context={"model": model},
-            )
+    messages = build_metadata_messages(text, tag_limit, concept_limit, controlled_tags, allow_free_tags)
+    provider = normalize_provider_name(provider)
+
+    if provider == "ollama":
+        payload = {
+            "model": model,
+            "messages": messages,
+            "format": "json",
+            "stream": False,
+        }
+        resp = ollama_request(
+            base_url,
+            "/api/chat",
+            payload,
+            timeout=timeout,
+            retries=retries,
+            backoff_seconds=backoff_seconds,
+            log_fn=log_fn,
         )
+        return parse_llm_metadata_json(resp.get("message", {}).get("content", ""), model, provider)
+
+    if provider == "openai_compatible":
+        payload = build_openai_compatible_chat_payload(
+            model,
+            messages,
+            max_tokens=max_tokens,
+            chat_template_kwargs=chat_template_kwargs,
+        )
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        resp = provider_request(
+            "OpenAI-compatible LLM",
+            base_url.rstrip("/") + "/chat/completions",
+            payload,
+            timeout=timeout,
+            retries=retries,
+            backoff_seconds=backoff_seconds,
+            log_fn=log_fn,
+            headers=headers,
+            guidance="Check that the OpenAI-compatible server is running and accepts the configured model/API key.",
+        )
+        return parse_llm_metadata_json(parse_openai_compatible_chat_response(resp), model, provider)
+
+    raise ValueError(f"Unsupported llm_provider: {provider}")
 
 
 def list_notes(vault_root: Path, notes_paths: List[str], min_words: int, related_heading: str) -> List[Note]:
@@ -859,6 +1040,22 @@ def fetch_ollama_models(base_url: str, timeout: int) -> List[str]:
     return models
 
 
+def fetch_openai_compatible_models(base_url: str, api_key: str, timeout: int) -> List[str]:
+    url = base_url.rstrip("/") + "/models"
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = request.Request(url, headers=headers, method="GET")
+    with request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+
+    models = []
+    for item in payload.get("data", []):
+        if isinstance(item, dict) and item.get("id"):
+            models.append(str(item["id"]))
+    return models
+
+
 def find_missing_models(required_models: List[str], available_models: List[str]) -> List[str]:
     available = set(available_models)
     available_bases = {model.split(":", 1)[0] for model in available_models}
@@ -938,12 +1135,23 @@ def run_preflight(config_path: Path) -> Dict:
             "config_path": str(config_path),
         }
 
-    base_url = str(config.get("ollama_base_url", "")).strip()
-    embed_model = str(config.get("embed_model", "")).strip()
-    llm_model = str(config.get("llm_model", "")).strip()
+    embed_settings = get_embed_settings(config)
+    llm_settings = get_llm_settings(config)
     timeout = int(config.get("ollama_timeout_seconds", 120))
 
-    missing_fields = [field for field, value in [("ollama_base_url", base_url), ("embed_model", embed_model), ("llm_model", llm_model)] if not value]
+    missing_fields = [
+        field
+        for field, value in [
+            ("embed_base_url", embed_settings["base_url"]),
+            ("embed_model", embed_settings["model"]),
+            ("llm_base_url", llm_settings["base_url"]),
+            ("llm_model", llm_settings["model"]),
+        ]
+        if not value
+    ]
+    if llm_settings["api_key_env"] and not llm_settings["api_key"]:
+        missing_fields.append(f"environment variable {llm_settings['api_key_env']}")
+
     if missing_fields:
         checks.append(
             build_preflight_check(
@@ -951,28 +1159,50 @@ def run_preflight(config_path: Path) -> Dict:
                 "Config values",
                 "error",
                 f"Config is missing required values: {', '.join(missing_fields)}",
-                guidance="Add the missing Ollama URL and model names to the config file.",
+                guidance="Add the missing provider URLs, model names, or API key environment variable.",
                 context={"config_path": str(config_path)},
+            )
+        )
+    elif embed_settings["provider"] != "ollama":
+        checks.append(
+            build_preflight_check(
+                "EMBED_PROVIDER_UNSUPPORTED",
+                "Embedding provider",
+                "error",
+                f"Unsupported embed_provider: {embed_settings['provider']}",
+                guidance="Use embed_provider `ollama`; non-Ollama embedding providers are not supported yet.",
+                context={"embed_provider": embed_settings["provider"]},
+            )
+        )
+    elif llm_settings["provider"] not in {"ollama", "openai_compatible"}:
+        checks.append(
+            build_preflight_check(
+                "LLM_PROVIDER_UNSUPPORTED",
+                "LLM provider",
+                "error",
+                f"Unsupported llm_provider: {llm_settings['provider']}",
+                guidance="Use llm_provider `ollama` or `openai_compatible`.",
+                context={"llm_provider": llm_settings["provider"]},
             )
         )
     else:
         try:
-            available_models = fetch_ollama_models(base_url, timeout=timeout)
+            available_models = fetch_ollama_models(embed_settings["base_url"], timeout=timeout)
             checks.append(
                 build_preflight_check(
-                    "OLLAMA_REACHABLE",
-                    "Ollama server",
+                    "EMBED_PROVIDER_REACHABLE",
+                    "Embedding provider",
                     "ok",
-                    f"Ollama is reachable at {base_url}.",
-                    context={"ollama_base_url": base_url},
+                    f"Ollama embedding provider is reachable at {embed_settings['base_url']}.",
+                    context={"provider": embed_settings["provider"], "base_url": embed_settings["base_url"]},
                 )
             )
-            missing_models = find_missing_models([embed_model, llm_model], available_models)
+            missing_models = find_missing_models([embed_settings["model"]], available_models)
             if missing_models:
                 checks.append(
                     build_preflight_check(
-                        "OLLAMA_MODELS_MISSING",
-                        "Ollama models",
+                        "EMBED_MODELS_MISSING",
+                        "Embedding models",
                         "error",
                         f"Required models are missing: {', '.join(missing_models)}",
                         guidance="Pull the missing models with `ollama pull <model>` and re-run preflight.",
@@ -982,27 +1212,82 @@ def run_preflight(config_path: Path) -> Dict:
             else:
                 checks.append(
                     build_preflight_check(
-                        "OLLAMA_MODELS_OK",
-                        "Ollama models",
+                        "EMBED_MODELS_OK",
+                        "Embedding models",
                         "ok",
-                        f"Required models are available: {embed_model}, {llm_model}",
+                        f"Required embedding model is available: {embed_settings['model']}",
                     )
                 )
         except Exception as exc:
             checks.append(
                 build_preflight_check(
-                    "OLLAMA_UNREACHABLE",
-                    "Ollama server",
+                    "EMBED_PROVIDER_UNREACHABLE",
+                    "Embedding provider",
                     "error",
-                    f"Failed to reach Ollama at {base_url}: {exc}",
-                    guidance="Start Ollama locally or update ollama_base_url in the config.",
-                    context={"ollama_base_url": base_url},
+                    f"Failed to reach Ollama embedding provider at {embed_settings['base_url']}: {exc}",
+                    guidance="Start Ollama locally or update embed_base_url/ollama_base_url in the config.",
+                    context={"provider": embed_settings["provider"], "base_url": embed_settings["base_url"]},
+                )
+            )
+
+        try:
+            if llm_settings["provider"] == "ollama":
+                available_models = fetch_ollama_models(llm_settings["base_url"], timeout=timeout)
+                provider_label = "Ollama LLM provider"
+                guidance = "Pull the missing model with `ollama pull <model>` and re-run preflight."
+            else:
+                available_models = fetch_openai_compatible_models(
+                    llm_settings["base_url"],
+                    llm_settings["api_key"],
+                    timeout=timeout,
+                )
+                provider_label = "OpenAI-compatible LLM provider"
+                guidance = "Update llm_model or confirm the provider exposes the model from /models."
+            checks.append(
+                build_preflight_check(
+                    "LLM_PROVIDER_REACHABLE",
+                    "LLM provider",
+                    "ok",
+                    f"{provider_label} is reachable at {llm_settings['base_url']}.",
+                    context={"provider": llm_settings["provider"], "base_url": llm_settings["base_url"]},
+                )
+            )
+            missing_models = find_missing_models([llm_settings["model"]], available_models)
+            if missing_models:
+                checks.append(
+                    build_preflight_check(
+                        "LLM_MODELS_MISSING",
+                        "LLM models",
+                        "error",
+                        f"Required models are missing: {', '.join(missing_models)}",
+                        guidance=guidance,
+                        context={"available_models": ", ".join(available_models) or "none"},
+                    )
+                )
+            else:
+                checks.append(
+                    build_preflight_check(
+                        "LLM_MODELS_OK",
+                        "LLM models",
+                        "ok",
+                        f"Required LLM model is available: {llm_settings['model']}",
+                    )
+                )
+        except Exception as exc:
+            checks.append(
+                build_preflight_check(
+                    "LLM_PROVIDER_UNREACHABLE",
+                    "LLM provider",
+                    "error",
+                    f"Failed to reach {llm_settings['provider']} at {llm_settings['base_url']}: {exc}",
+                    guidance="Start the configured LLM provider or update llm_base_url in the config.",
+                    context={"provider": llm_settings["provider"], "base_url": llm_settings["base_url"]},
                 )
             )
 
     ok = not any(check["status"] == "error" for check in checks)
     if ok:
-        summary = "Preflight passed: Python, dependencies, Ollama, and required models are ready."
+        summary = "Preflight passed: Python, dependencies, providers, and required models are ready."
     else:
         first_error = next(check for check in checks if check["status"] == "error")
         summary = f"Preflight failed: {first_error['message']}"
@@ -1068,8 +1353,28 @@ def main():
     log_path = vault_root / config["log_path"]
     preview_path = vault_root / config.get("preview_log_path", "Scripts/_Mindmap/_logs/preview.jsonl")
 
-    embed_model = config["embed_model"]
-    llm_model = config["llm_model"]
+    embed_settings = get_embed_settings(config)
+    llm_settings = get_llm_settings(config)
+    if embed_settings["provider"] != "ollama":
+        emit_stderr(
+            "error",
+            "EMBED_PROVIDER_UNSUPPORTED",
+            f"Unsupported embed_provider: {embed_settings['provider']}",
+            guidance="Use embed_provider `ollama`; non-Ollama embedding providers are not supported yet.",
+            context={"embed_provider": embed_settings["provider"]},
+        )
+        return 1
+    if llm_settings["provider"] not in {"ollama", "openai_compatible"}:
+        emit_stderr(
+            "error",
+            "LLM_PROVIDER_UNSUPPORTED",
+            f"Unsupported llm_provider: {llm_settings['provider']}",
+            guidance="Use llm_provider `ollama` or `openai_compatible`.",
+            context={"llm_provider": llm_settings["provider"]},
+        )
+        return 1
+    embed_model = embed_settings["model"]
+    llm_model = llm_settings["model"]
     mindmap_heading = config.get("mindmap_heading", config.get("related_heading", "## Mindmap"))
     write_mindmap_section = config.get("write_mindmap_section", config.get("write_related_section", True))
     controlled_tags_path = config.get("controlled_tags_path")
@@ -1360,7 +1665,7 @@ def main():
                 batch = note_chunks[i : i + batch_size]
                 try:
                     batch_embeddings = embed_texts(
-                        config["ollama_base_url"],
+                        embed_settings["base_url"],
                         embed_model,
                         batch,
                         timeout=ollama_embed_timeout,
@@ -1428,7 +1733,7 @@ def main():
                     if embeddings is None or (hasattr(embeddings, "size") and embeddings.size == 0) or len(embeddings) == 0:
                         # Embed on the fly if missing
                         embedded = embed_texts(
-                            config["ollama_base_url"],
+                            embed_settings["base_url"],
                             embed_model,
                             [note.body[:4000]],
                             timeout=ollama_embed_timeout,
@@ -1479,7 +1784,7 @@ def main():
             # LLM metadata
             try:
                 metadata = llm_extract(
-                    config["ollama_base_url"],
+                    llm_settings["base_url"],
                     llm_model,
                     note.body,
                     config["tag_limit"],
@@ -1490,6 +1795,10 @@ def main():
                     retries=ollama_retries,
                     backoff_seconds=ollama_backoff,
                     log_fn=log_event,
+                    provider=llm_settings["provider"],
+                    api_key=llm_settings["api_key"],
+                    max_tokens=llm_settings["max_tokens"],
+                    chat_template_kwargs=llm_settings["chat_template_kwargs"],
                 )
             except Exception as exc:
                 log_event(f"[error] Metadata extraction failed for {note.relpath}: {exc}", to_stderr=True)
