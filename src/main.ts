@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 
 import { FileSystemAdapter, Notice, Plugin, TAbstractFile, TFile, TFolder } from "obsidian";
 
@@ -41,6 +41,13 @@ import { BUNDLED_RUNTIME_ASSETS } from "virtual:runtime-assets";
 
 const LOG_LIMIT = 50;
 
+function splitLogLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 type RunTrigger = "manual" | "scheduled";
 
 interface SchedulerState {
@@ -71,7 +78,7 @@ export interface ScopeSetupStatus {
 export default class MindmapPlugin extends Plugin {
   settings: MindmapSettings = DEFAULT_SETTINGS;
 
-  private currentProcess: ChildProcessWithoutNullStreams | null = null;
+  private currentProcess: ChildProcess | null = null;
   private schedulerTimer: ReturnType<typeof setTimeout> | null = null;
   private launchAgentManagedThisSession = false;
   private launchAgentSyncId = 0;
@@ -556,7 +563,7 @@ export default class MindmapPlugin extends Plugin {
       child.stderr.on("data", (chunk) => {
         const text = chunk.toString();
         stderr += text;
-        for (const line of text.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)) {
+        for (const line of splitLogLines(text)) {
           this.appendLog(`[preflight][stderr] ${line}`);
         }
       });
@@ -884,14 +891,14 @@ export default class MindmapPlugin extends Plugin {
       const stderrLines: string[] = [];
 
       child.stdout.on("data", (chunk) => {
-        for (const line of chunk.toString().split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)) {
+        for (const line of splitLogLines(chunk.toString())) {
           stdoutLines.push(line);
           this.appendLog(`[stdout] ${line}`);
         }
       });
 
       child.stderr.on("data", (chunk) => {
-        for (const line of chunk.toString().split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)) {
+        for (const line of splitLogLines(chunk.toString())) {
           stderrLines.push(line);
           this.appendLog(`[stderr] ${line}`);
         }
@@ -913,7 +920,7 @@ export default class MindmapPlugin extends Plugin {
         this.currentProcess = null;
         this.schedulerState.lastRunAt = Date.now();
         this.schedulerState.lastExitCode = code;
-        const failureContext = stderrLines.at(-1) ?? stdoutLines.at(-1);
+        const failureContext = stderrLines[stderrLines.length - 1] ?? stdoutLines[stdoutLines.length - 1];
         this.schedulerState.lastMessage = code === 0
           ? `Last ${trigger} ${profile.label} run finished successfully.`
           : `Last ${trigger} ${profile.label} run exited with code ${code}.${failureContext ? ` ${failureContext}` : ""}`;
@@ -1003,7 +1010,9 @@ export default class MindmapPlugin extends Plugin {
       BUNDLED_RUNTIME_ASSETS,
       {
         existsSync: fs.existsSync,
-        mkdir: (targetPath, options) => fs.promises.mkdir(targetPath, options),
+        mkdir: async (targetPath, options) => {
+          await fs.promises.mkdir(targetPath, options);
+        },
         writeFile: (targetPath, content, encoding) => fs.promises.writeFile(targetPath, content, encoding),
       },
     );

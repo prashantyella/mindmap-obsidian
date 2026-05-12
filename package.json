@@ -8,8 +8,9 @@
     "build": "node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
     "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
     "test": "tsx --test $(find src -name '*.test.ts' -print)",
-    "check": "npm run lint && npm test && npm run build && npm run validate",
+    "check": "npm run lint && npm run typecheck && npm test && npm run build && npm run validate",
     "validate": "node scripts/validate-release.mjs",
     "release:prepare": "npm run build && npm run validate && node scripts/prepare-release.mjs"
   },
