@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 
-import { FileSystemAdapter, Notice, Plugin, TAbstractFile, TFile, TFolder } from "obsidian";
+import { FileSystemAdapter, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 
 import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput, type PreflightResult } from "./diagnostics";
 import { isScopeSetupComplete, listVaultFolderOptions, readScopeSelection, updateScopeSelection, type ScopeSelection, type VaultFolderOption } from "./onboarding";
@@ -37,6 +37,7 @@ import {
 } from "./scheduler";
 import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./settings";
 import { MindmapSettingTab } from "./settingsTab";
+import { MindmapWorkspaceView, MINDMAP_VIEW_TYPE } from "./workspaceView";
 import { BUNDLED_RUNTIME_ASSETS } from "virtual:runtime-assets";
 
 const LOG_LIMIT = 50;
@@ -75,6 +76,21 @@ export interface ScopeSetupStatus {
   guidance: string;
 }
 
+export interface LlmProviderConfig {
+  provider: "ollama" | "openai_compatible";
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  maxTokens: number;
+  enableThinking: boolean;
+}
+
+export interface LlmProviderConfigStatus extends LlmProviderConfig {
+  canManage: boolean;
+  configPath: string | null;
+  guidance: string;
+}
+
 export default class MindmapPlugin extends Plugin {
   settings: MindmapSettings = DEFAULT_SETTINGS;
 
@@ -94,6 +110,8 @@ export default class MindmapPlugin extends Plugin {
   private readonly recentLog: string[] = [];
   private statusBarEl: HTMLElement | null = null;
   private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
+  private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
+  private mindmapLocalGraphPath: string | null = null;
   private diagnosticsState: DiagnosticsState = {
     inProgress: false,
     lastRunAt: null,
@@ -105,6 +123,14 @@ export default class MindmapPlugin extends Plugin {
     await this.ensureBundledRuntime();
 
     this.statusBarEl = this.addStatusBarItem();
+    this.registerView(MINDMAP_VIEW_TYPE, (leaf) => new MindmapWorkspaceView(leaf, this));
+    this.registerHoverLinkSource(MINDMAP_VIEW_TYPE, {
+      display: "Mindmap AI",
+      defaultMod: false,
+    });
+    this.addRibbonIcon("orbit", "Open Mindmap", () => {
+      void this.openMindmapView();
+    });
     this.addSettingTab(new MindmapSettingTab(this.app, this));
     this.pendingScanService = createPendingScanService(
       this.app.vault,
@@ -113,6 +139,14 @@ export default class MindmapPlugin extends Plugin {
       (message) => this.appendLog(message),
       () => this.updateStatusBar(),
     );
+
+    this.addCommand({
+      id: "mindmap-open-view",
+      name: "Open Mindmap",
+      callback: () => {
+        void this.openMindmapView();
+      },
+    });
 
     this.addCommand({
       id: "mindmap-run-now",
@@ -261,6 +295,99 @@ export default class MindmapPlugin extends Plugin {
     return [...this.recentLog];
   }
 
+  async openMindmapView(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(MINDMAP_VIEW_TYPE);
+    for (const leaf of existing) {
+      leaf.detach();
+    }
+    this.mindmapLocalGraphLeaf = null;
+    this.mindmapLocalGraphPath = null;
+
+    const leaf = await this.app.workspace.ensureSideLeaf(MINDMAP_VIEW_TYPE, "right", {
+      active: true,
+      split: true,
+      reveal: true,
+    });
+    await leaf.setViewState({
+      type: MINDMAP_VIEW_TYPE,
+      active: true,
+    });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  async syncMindmapLocalGraph(file: TFile | null): Promise<void> {
+    if (file === null) {
+      return;
+    }
+    if (this.mindmapLocalGraphPath === file.path && this.mindmapLocalGraphLeaf !== null) {
+      return;
+    }
+    if (this.mindmapLocalGraphLeaf === null) {
+      for (const leaf of this.app.workspace.getLeavesOfType("localgraph")) {
+        if (this.isMindmapLocalGraphLeaf(leaf)) {
+          this.mindmapLocalGraphLeaf = leaf;
+          break;
+        }
+      }
+    }
+
+    this.mindmapLocalGraphLeaf = await this.app.workspace.ensureSideLeaf("localgraph", "right", {
+      active: false,
+      split: true,
+      reveal: true,
+      state: this.getMindmapLocalGraphState(file.path),
+    });
+    await this.mindmapLocalGraphLeaf.setViewState({
+      type: "localgraph",
+      state: this.getMindmapLocalGraphState(file.path),
+      active: false,
+    });
+    this.mindmapLocalGraphPath = file.path;
+  }
+
+  private getMindmapLocalGraphState(filePath: string): Record<string, unknown> {
+    return {
+      pluginId: this.manifest.id,
+      file: filePath,
+      options: {
+        "collapse-filter": true,
+        search: "",
+        localJumps: 1,
+        localBacklinks: true,
+        localForelinks: true,
+        localInterlinks: false,
+        showTags: false,
+        showAttachments: false,
+        hideUnresolved: false,
+        "collapse-color-groups": true,
+        colorGroups: [],
+        "collapse-display": true,
+        showArrow: false,
+        textFadeMultiplier: 0,
+        nodeSizeMultiplier: 1,
+        lineSizeMultiplier: 1,
+        "collapse-forces": true,
+        centerStrength: 0.52,
+        repelStrength: 10,
+        linkStrength: 1,
+        linkDistance: 250,
+        scale: 1,
+        close: false,
+      },
+    };
+  }
+
+  private isMindmapLocalGraphLeaf(leaf: WorkspaceLeaf): boolean {
+    if (leaf === this.mindmapLocalGraphLeaf) {
+      return true;
+    }
+
+    const state = leaf.getViewState().state;
+    return typeof state === "object"
+      && state !== null
+      && (state as Record<string, unknown>).pluginId === this.manifest.id;
+  }
+
   getPendingSnapshot(): PendingSnapshot {
     return this.pendingScanService?.getSnapshot() ?? {
       available: false,
@@ -375,6 +502,100 @@ export default class MindmapPlugin extends Plugin {
     this.appendLog(`[setup] Updated scope folders in ${status.configPath}`);
     this.pendingScanService?.requestRefresh("scope setup updated");
     this.updateStatusBar();
+  }
+
+  getLlmProviderConfigStatus(): LlmProviderConfigStatus {
+    const runtime = this.getResolvedRuntime();
+    const fallback: LlmProviderConfig = {
+      provider: "ollama",
+      baseUrl: "http://localhost:11434",
+      model: "llama3.1:8b",
+      apiKey: "",
+      maxTokens: 1024,
+      enableThinking: true,
+    };
+
+    if (!runtime.valid) {
+      const error = runtime.messages.find((message) => message.level === "error");
+      return {
+        ...fallback,
+        canManage: false,
+        configPath: null,
+        guidance: error?.message ?? "Mindmap runtime is not ready.",
+      };
+    }
+
+    if (!this.canManageConfig(runtime)) {
+      return {
+        ...fallback,
+        canManage: false,
+        configPath: runtime.configPath,
+        guidance: "Provider setup controls only the bundled plugin config. Reset config path to default or update your custom config manually.",
+      };
+    }
+
+    try {
+      const config = this.readRuntimeConfig(runtime.configPath);
+      const provider = config.llm_provider === "openai_compatible" ? "openai_compatible" : "ollama";
+      const templateKwargs = typeof config.llm_chat_template_kwargs === "object" && config.llm_chat_template_kwargs !== null && !Array.isArray(config.llm_chat_template_kwargs)
+        ? config.llm_chat_template_kwargs as Record<string, unknown>
+        : {};
+      const maxTokens = Number.parseInt(String(config.llm_max_tokens ?? fallback.maxTokens), 10);
+      return {
+        provider,
+        baseUrl: String(config.llm_base_url ?? config.ollama_base_url ?? fallback.baseUrl),
+        model: String(config.llm_model ?? fallback.model),
+        apiKey: String(config.llm_api_key ?? ""),
+        maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : fallback.maxTokens,
+        enableThinking: templateKwargs.enable_thinking === false ? false : true,
+        canManage: true,
+        configPath: runtime.configPath,
+        guidance: "LLM provider config is editable.",
+      };
+    } catch (error) {
+      return {
+        ...fallback,
+        canManage: true,
+        configPath: runtime.configPath,
+        guidance: error instanceof Error
+          ? `Mindmap config could not be read: ${error.message}`
+          : "Mindmap config could not be read.",
+      };
+    }
+  }
+
+  saveLlmProviderConfig(providerConfig: LlmProviderConfig): void {
+    const status = this.getLlmProviderConfigStatus();
+    if (!status.canManage || !status.configPath) {
+      throw new Error(status.guidance);
+    }
+
+    const config = this.readRuntimeConfig(status.configPath);
+    config.llm_provider = providerConfig.provider;
+    config.llm_base_url = providerConfig.baseUrl.trim();
+    config.llm_model = providerConfig.model.trim();
+    config.llm_api_key = providerConfig.apiKey;
+    config.llm_api_key_env = "";
+    config.llm_max_tokens = Number.isFinite(providerConfig.maxTokens) && providerConfig.maxTokens > 0
+      ? Math.trunc(providerConfig.maxTokens)
+      : 1024;
+
+    const templateKwargs = typeof config.llm_chat_template_kwargs === "object" && config.llm_chat_template_kwargs !== null && !Array.isArray(config.llm_chat_template_kwargs)
+      ? config.llm_chat_template_kwargs as Record<string, unknown>
+      : {};
+    templateKwargs.enable_thinking = providerConfig.enableThinking;
+    config.llm_chat_template_kwargs = templateKwargs;
+
+    fs.writeFileSync(status.configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+    this.appendLog(`[setup] Updated LLM provider config in ${status.configPath}`);
+  }
+
+  private readRuntimeConfig(configPath: string): Record<string, unknown> {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8")) as unknown;
+    if (typeof config !== "object" || config === null || Array.isArray(config)) {
+      throw new Error("Mindmap config must be a JSON object.");
+    }
+    return config as Record<string, unknown>;
   }
 
   getScopeSetupSummary(): DocumentFragment {
@@ -827,7 +1048,7 @@ export default class MindmapPlugin extends Plugin {
     this.scheduleNextTick(Date.now());
   }
 
-  private async runMindmap(trigger: RunTrigger, scope: RunScope = "current"): Promise<void> {
+  async runMindmap(trigger: RunTrigger, scope: RunScope = "current"): Promise<void> {
     if (this.currentProcess) {
       const message = "Mindmap is already running. Skipping the new request.";
       this.appendLog(message);

@@ -7,9 +7,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from mindmap import (  # noqa: E402
+    build_metadata_messages,
+    build_openai_compatible_chat_payload,
     dependency_install_guidance,
     find_missing_models,
+    get_embed_settings,
+    get_llm_settings,
     load_config_with_diagnostics,
+    parse_llm_metadata_json,
+    parse_openai_compatible_chat_response,
 )
 
 
@@ -48,6 +54,72 @@ class PreflightHelperTests(unittest.TestCase):
             dependency_install_guidance(),
             "Install dependencies with `python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt`.",
         )
+
+    def test_provider_settings_fall_back_to_legacy_ollama_base_url(self):
+        config = {
+            "ollama_base_url": "http://localhost:11434",
+            "embed_model": "mxbai-embed-large",
+            "llm_model": "llama3.1:8b",
+        }
+
+        self.assertEqual(
+            get_embed_settings(config),
+            {
+                "provider": "ollama",
+                "base_url": "http://localhost:11434",
+                "model": "mxbai-embed-large",
+            },
+        )
+        llm_settings = get_llm_settings(config)
+        self.assertEqual(llm_settings["provider"], "ollama")
+        self.assertEqual(llm_settings["base_url"], "http://localhost:11434")
+        self.assertEqual(llm_settings["model"], "llama3.1:8b")
+        self.assertEqual(llm_settings["max_tokens"], 1024)
+
+    def test_openai_compatible_payload_includes_json_limits_and_template_kwargs(self):
+        messages = build_metadata_messages(
+            "A note about deliberate practice.",
+            tag_limit=3,
+            concept_limit=4,
+            controlled_tags=[],
+            allow_free_tags=True,
+        )
+
+        payload = build_openai_compatible_chat_payload(
+            "Qwen3.5-9B-MLX-4bit",
+            messages,
+            max_tokens=1024,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+
+        self.assertEqual(payload["model"], "Qwen3.5-9B-MLX-4bit")
+        self.assertEqual(payload["max_tokens"], 1024)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
+
+    def test_openai_compatible_response_content_is_parsed_as_metadata_json(self):
+        resp = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"summary":"Short.","tags":["practice"],"concepts":["deliberate practice"]}'
+                    }
+                }
+            ]
+        }
+
+        content = parse_openai_compatible_chat_response(resp)
+        metadata = parse_llm_metadata_json(content, "Qwen3.5-9B-MLX-4bit", "openai_compatible")
+
+        self.assertEqual(metadata["summary"], "Short.")
+        self.assertEqual(metadata["tags"], ["practice"])
+        self.assertEqual(metadata["concepts"], ["deliberate practice"])
+
+    def test_llm_metadata_parser_rejects_non_object_json(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            parse_llm_metadata_json('["practice"]', "Qwen3.5-9B-MLX-4bit", "openai_compatible")
+
+        self.assertIn("JSON was not an object", str(ctx.exception))
 
 
 if __name__ == "__main__":
