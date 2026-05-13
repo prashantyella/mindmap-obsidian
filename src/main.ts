@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 
-import { FileSystemAdapter, Notice, Plugin, TAbstractFile, TFile, TFolder } from "obsidian";
+import { FileSystemAdapter, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 
 import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput, type PreflightResult } from "./diagnostics";
 import { isScopeSetupComplete, listVaultFolderOptions, readScopeSelection, updateScopeSelection, type ScopeSelection, type VaultFolderOption } from "./onboarding";
@@ -110,6 +110,8 @@ export default class MindmapPlugin extends Plugin {
   private readonly recentLog: string[] = [];
   private statusBarEl: HTMLElement | null = null;
   private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
+  private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
+  private mindmapLocalGraphPath: string | null = null;
   private diagnosticsState: DiagnosticsState = {
     inProgress: false,
     lastRunAt: null,
@@ -122,6 +124,10 @@ export default class MindmapPlugin extends Plugin {
 
     this.statusBarEl = this.addStatusBarItem();
     this.registerView(MINDMAP_VIEW_TYPE, (leaf) => new MindmapWorkspaceView(leaf, this));
+    this.registerHoverLinkSource(MINDMAP_VIEW_TYPE, {
+      display: "Mindmap AI",
+      defaultMod: false,
+    });
     this.addRibbonIcon("orbit", "Open Mindmap", () => {
       void this.openMindmapView();
     });
@@ -290,18 +296,89 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async openMindmapView(): Promise<void> {
-    const existing = this.app.workspace.getLeavesOfType(MINDMAP_VIEW_TYPE)[0];
-    if (existing) {
-      this.app.workspace.revealLeaf(existing);
-      return;
+    const existing = this.app.workspace.getLeavesOfType(MINDMAP_VIEW_TYPE);
+    for (const leaf of existing) {
+      leaf.detach();
     }
+    for (const leaf of this.app.workspace.getLeavesOfType("localgraph")) {
+      leaf.detach();
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType("outline")) {
+      leaf.detach();
+    }
+    this.mindmapLocalGraphLeaf = null;
+    this.mindmapLocalGraphPath = null;
 
-    const leaf = this.app.workspace.getLeaf(true);
+    await this.syncMindmapLocalGraph(this.app.workspace.getActiveFile());
+
+    const leaf = await this.app.workspace.ensureSideLeaf(MINDMAP_VIEW_TYPE, "right", {
+      active: true,
+      split: true,
+      reveal: true,
+    });
     await leaf.setViewState({
       type: MINDMAP_VIEW_TYPE,
       active: true,
     });
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  async syncMindmapLocalGraph(file: TFile | null): Promise<void> {
+    if (file === null) {
+      return;
+    }
+    if (this.mindmapLocalGraphPath === file.path && this.mindmapLocalGraphLeaf !== null) {
+      return;
+    }
+    if (this.mindmapLocalGraphLeaf === null) {
+      for (const leaf of this.app.workspace.getLeavesOfType("localgraph")) {
+        leaf.detach();
+      }
+    }
+
+    this.mindmapLocalGraphLeaf = await this.app.workspace.ensureSideLeaf("localgraph", "right", {
+      active: false,
+      split: true,
+      reveal: true,
+      state: this.getMindmapLocalGraphState(file.path),
+    });
+    await this.mindmapLocalGraphLeaf.setViewState({
+      type: "localgraph",
+      state: this.getMindmapLocalGraphState(file.path),
+      active: false,
+    });
+    this.mindmapLocalGraphPath = file.path;
+  }
+
+  private getMindmapLocalGraphState(filePath: string): Record<string, unknown> {
+    return {
+      file: filePath,
+      options: {
+        "collapse-filter": true,
+        search: "",
+        localJumps: 1,
+        localBacklinks: true,
+        localForelinks: true,
+        localInterlinks: false,
+        showTags: false,
+        showAttachments: false,
+        hideUnresolved: false,
+        "collapse-color-groups": true,
+        colorGroups: [],
+        "collapse-display": true,
+        showArrow: false,
+        textFadeMultiplier: 0,
+        nodeSizeMultiplier: 1,
+        lineSizeMultiplier: 1,
+        "collapse-forces": true,
+        centerStrength: 0.52,
+        repelStrength: 10,
+        linkStrength: 1,
+        linkDistance: 250,
+        scale: 1,
+        close: false,
+      },
+    };
   }
 
   getPendingSnapshot(): PendingSnapshot {

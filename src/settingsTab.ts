@@ -6,6 +6,7 @@ import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
 import { normalizeHour, normalizeMinute } from "./launchAgent";
 import type MindmapPlugin from "./main";
 import type { LlmProviderConfig } from "./main";
+import { ScopeManager } from "./scopeManager";
 import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
 
 const FIELD_META: Record<RuntimeField, { name: string; description: string }> = {
@@ -40,36 +41,24 @@ export class MindmapSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    this.renderSection(
-      "Runtime",
-      "Use bundled defaults unless you need vault-relative overrides.",
-    );
-    containerEl.createEl("p", {
-      text: "This plugin runs a local runtime process and reads local files. Review custom executable, script, and config paths before running.",
-    });
-
-    this.renderPathSetting("pythonCommand");
-    this.renderPathSetting("scriptPath");
-    this.renderPathSetting("configPath");
-    this.renderProviderSettings();
     this.renderScopeSetupSettings();
+    this.renderProviderSettings();
     this.renderSchedulerSettings();
     this.renderDiagnosticsSettings();
+    this.renderAdvancedRuntimeSettings();
     this.renderSummary(this.plugin.getResolvedRuntime());
   }
 
   private renderSection(title: string, description: string): void {
-    new Setting(this.containerEl).setName(title).setHeading();
-    this.containerEl.createEl("p", { text: description });
+    new Setting(this.containerEl).setName(title).setHeading().setClass("mindmap-settings-heading");
+    this.containerEl.createEl("p", { cls: "mindmap-settings-section-desc", text: description });
   }
 
   private renderDiagnosticsSettings(): void {
-    this.renderSection("Diagnostics", "Run preflight checks and review runtime status.");
+    this.renderSection("Diagnostics", "Check runtime readiness.");
     new Setting(this.containerEl)
-      .setName("Preflight checks")
-      .setDesc(
-        "Checks the local runtime, dependencies, model service, and required models.",
-      )
+      .setName("Preflight")
+      .setDesc("Python, dependencies, model service, and required models.")
       .addButton((button) =>
         button.setButtonText("Run checks").onClick(() => {
           void this.plugin.runPreflight("manual").then(() => {
@@ -82,7 +71,7 @@ export class MindmapSettingTab extends PluginSettingTab {
   private renderScopeSetupSettings(): void {
     const status = this.plugin.getScopeSetupStatus();
 
-    this.renderSection("Scope setup", "Review configured folders here. Use the Mindmap tab for full scope management.");
+    this.renderSection("Scope", "Choose folders for current-note runs and full-vault runs.");
 
     new Setting(this.containerEl)
       .setName("Scope status")
@@ -92,9 +81,12 @@ export class MindmapSettingTab extends PluginSettingTab {
       return;
     }
 
+    const scopeManager = this.containerEl.createDiv();
+    new ScopeManager(this.plugin, scopeManager).render();
+
     new Setting(this.containerEl)
-      .setName("Manage scope")
-      .setDesc("Open the dedicated Mindmap tab to search folders, select current/all scope, and save setup.")
+      .setName("Mindmap sidebar")
+      .setDesc("Open the active note graph panel.")
       .addButton((button) =>
         button.setButtonText("Open Mindmap").setCta().onClick(() => {
           void this.plugin.openMindmapView();
@@ -103,7 +95,7 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderProviderSettings(): void {
-    this.renderSection("LLM provider", "Configure the local model service used for summary, tag, and concept extraction.");
+    this.renderSection("Provider", "Local model service for summaries, tags, concepts, and links.");
 
     const status = this.plugin.getLlmProviderConfigStatus();
     if (!status.canManage) {
@@ -145,7 +137,7 @@ export class MindmapSettingTab extends PluginSettingTab {
 
     new Setting(this.containerEl)
       .setName("Base URL")
-      .setDesc("OpenAI-compatible providers should include the /v1 suffix.")
+      .setDesc(status.provider === "openai_compatible" ? "Include the /v1 suffix." : "Ollama server URL.")
       .addText((text) => {
         text
           .setPlaceholder(status.provider === "openai_compatible" ? "http://localhost:8000/v1" : "http://localhost:11434")
@@ -169,7 +161,7 @@ export class MindmapSettingTab extends PluginSettingTab {
 
     new Setting(this.containerEl)
       .setName("Local API key")
-      .setDesc("Stored in the plugin runtime config for local OpenAI-compatible servers.")
+      .setDesc("Stored in the local plugin runtime config.")
       .addText((text) => {
         text.inputEl.type = "password";
         text
@@ -229,11 +221,11 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderSchedulerSettings(): void {
-    this.renderSection("Scheduler", "Use manual runs, in-app interval scheduling, or plugin-managed macOS LaunchAgents.");
+    this.renderSection("Scheduler", "Manual, interval, or macOS LaunchAgent runs.");
 
     new Setting(this.containerEl)
       .setName("Mode")
-      .setDesc("Manual runs on demand. Interval runs while Obsidian is open. LaunchAgent runs continue when Obsidian is closed.")
+      .setDesc("LaunchAgent continues when Obsidian is closed.")
       .addDropdown((dropdown) => {
         dropdown
           .addOption("manual", "Manual")
@@ -385,6 +377,13 @@ export class MindmapSettingTab extends PluginSettingTab {
             this.display();
           });
       });
+  }
+
+  private renderAdvancedRuntimeSettings(): void {
+    this.renderSection("Advanced", "Runtime overrides. Leave these blank unless you need a custom local setup.");
+    this.renderPathSetting("pythonCommand");
+    this.renderPathSetting("scriptPath");
+    this.renderPathSetting("configPath");
   }
 
   private renderSummary(runtime: ResolvedRuntime): void {
