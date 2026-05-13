@@ -193,12 +193,6 @@
   font-family: "Geist", var(--font-interface);
 }
 
-.mindmap-sidebar-selected {
-  flex: 0 0 auto;
-  padding: 18px 25px 14px;
-  border-bottom: 1px solid var(--background-modifier-border);
-}
-
 .mindmap-sidebar-folder {
   color: var(--text-muted);
   font-family: "Geist Mono", var(--font-monospace);
@@ -215,15 +209,16 @@
 }
 
 .mindmap-heatmap {
+  position: relative;
   flex: 0 0 auto;
-  padding: 14px 25px 18px;
+  padding: 25px 25px 18px;
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
 .mindmap-heatmap-chart {
   display: block;
   width: 100%;
-  height: 232px;
+  height: 300px;
   overflow: visible;
 }
 
@@ -308,6 +303,63 @@
   opacity: 1;
 }
 
+.mindmap-heatmap-tooltip {
+  position: absolute;
+  z-index: 2;
+  display: none;
+  width: min(220px, calc(100% - 24px));
+  padding: 10px 11px 11px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--background-primary) 94%, var(--interactive-accent));
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+  color: var(--text-normal);
+  font-family: "Geist Pixel", "Geist Mono", var(--font-monospace);
+  font-size: 11px;
+  line-height: 1.35;
+  pointer-events: none;
+}
+
+.mindmap-heatmap-tooltip.is-visible {
+  display: block;
+}
+
+.mindmap-heatmap-tooltip-title {
+  margin-bottom: 8px;
+  color: var(--text-normal);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.mindmap-heatmap-tooltip-metrics {
+  display: grid;
+  gap: 5px;
+}
+
+.mindmap-heatmap-tooltip-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 7px;
+}
+
+.mindmap-heatmap-tooltip-key {
+  color: var(--text-muted);
+}
+
+.mindmap-heatmap-tooltip-key.is-links {
+  color: var(--text-accent);
+}
+
+.mindmap-heatmap-tooltip-key.is-time {
+  color: var(--interactive-accent);
+}
+
+.mindmap-heatmap-tooltip-detail {
+  min-width: 0;
+  color: var(--text-muted);
+}
+
 .mindmap-sidebar-list {
   flex: 1 1 auto;
   overflow-y: auto;
@@ -360,9 +412,10 @@
 .mindmap-sidebar-title {
   display: block;
   color: var(--text-normal);
-  font-size: 20px;
+  font-family: "Geist Pixel", "Geist Mono", var(--font-monospace);
+  font-size: 19px;
   font-weight: 400;
-  line-height: 29px;
+  line-height: 28px;
   overflow-wrap: anywhere;
   text-decoration: none;
 }

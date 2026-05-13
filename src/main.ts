@@ -300,16 +300,8 @@ export default class MindmapPlugin extends Plugin {
     for (const leaf of existing) {
       leaf.detach();
     }
-    for (const leaf of this.app.workspace.getLeavesOfType("localgraph")) {
-      leaf.detach();
-    }
-    for (const leaf of this.app.workspace.getLeavesOfType("outline")) {
-      leaf.detach();
-    }
     this.mindmapLocalGraphLeaf = null;
     this.mindmapLocalGraphPath = null;
-
-    await this.syncMindmapLocalGraph(this.app.workspace.getActiveFile());
 
     const leaf = await this.app.workspace.ensureSideLeaf(MINDMAP_VIEW_TYPE, "right", {
       active: true,

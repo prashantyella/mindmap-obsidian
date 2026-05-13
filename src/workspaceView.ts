@@ -212,8 +212,6 @@ export class MindmapWorkspaceView extends ItemView {
       return;
     }
 
-    const selectedCandidate = candidates.find((candidate) => candidate.path === this.expandedPath) ?? candidates[0];
-    this.renderSelectedCandidate(shell, selectedCandidate);
     this.renderHeatmap(shell, candidates);
 
     const list = shell.createDiv({ cls: "mindmap-sidebar-list" });
@@ -224,33 +222,63 @@ export class MindmapWorkspaceView extends ItemView {
     this.animateSidebar(shell);
   }
 
-  private renderSelectedCandidate(container: HTMLElement, candidate: RelatedCandidate): void {
-    const selected = container.createDiv({ cls: "mindmap-sidebar-selected" });
-    selected.createDiv({ cls: "mindmap-sidebar-folder", text: candidate.folderPath });
-  }
-
   private renderHeatmap(container: HTMLElement, candidates: RelatedCandidate[]): void {
     const heatmap = container.createDiv({ cls: "mindmap-heatmap" });
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("class", "mindmap-heatmap-chart");
-    svg.setAttribute("viewBox", "0 0 320 232");
+    svg.setAttribute("viewBox", "0 0 320 300");
     svg.setAttribute("role", "img");
     svg.setAttribute("aria-label", "Mindmap relevance signals for related notes");
     heatmap.appendChild(svg);
+    const tooltip = heatmap.createDiv({ cls: "mindmap-heatmap-tooltip" });
 
     const chart = {
       left: 10,
       right: 10,
-      top: 10,
-      bottom: 16,
+      top: 14,
+      bottom: 22,
       width: 320,
-      height: 232,
+      height: 300,
       maxLevel: 4,
     };
     const plotWidth = chart.width - chart.left - chart.right;
     const plotHeight = chart.height - chart.top - chart.bottom;
     const xFor = (index: number): number => chart.left + (candidates.length <= 1 ? plotWidth / 2 : (plotWidth * index) / (candidates.length - 1));
     const yFor = (level: number): number => chart.top + plotHeight - (plotHeight * level) / chart.maxLevel;
+    const hideTooltip = (): void => {
+      tooltip.removeClass("is-visible");
+    };
+    const showTooltip = (candidate: RelatedCandidate, clientX: number, clientY: number): void => {
+      tooltip.empty();
+      tooltip.createDiv({ cls: "mindmap-heatmap-tooltip-title", text: candidate.title });
+      const metrics = tooltip.createDiv({ cls: "mindmap-heatmap-tooltip-metrics" });
+      for (const metric of candidate.heatmap) {
+        const row = metrics.createDiv({ cls: "mindmap-heatmap-tooltip-row" });
+        row.createSpan({ cls: `mindmap-heatmap-tooltip-key is-${metric.key}`, text: metric.label });
+        row.createSpan({ cls: "mindmap-heatmap-tooltip-detail", text: `${metric.detail} (${metric.level}/4)` });
+      }
+
+      const bounds = heatmap.getBoundingClientRect();
+      const x = Math.min(Math.max(clientX - bounds.left + 12, 12), bounds.width - 208);
+      const y = Math.min(Math.max(clientY - bounds.top + 12, 12), bounds.height - 148);
+      tooltip.style.left = `${x}px`;
+      tooltip.style.top = `${y}px`;
+      tooltip.addClass("is-visible");
+    };
+    const bindTooltip = (element: SVGElement, candidate: RelatedCandidate): void => {
+      element.addEventListener("mouseenter", (event) => {
+        showTooltip(candidate, event.clientX, event.clientY);
+      });
+      element.addEventListener("mousemove", (event) => {
+        showTooltip(candidate, event.clientX, event.clientY);
+      });
+      element.addEventListener("mouseleave", hideTooltip);
+      element.addEventListener("focus", () => {
+        const bounds = element.getBoundingClientRect();
+        showTooltip(candidate, bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+      });
+      element.addEventListener("blur", hideTooltip);
+    };
 
     for (let level = 0; level <= chart.maxLevel; level += 1) {
       const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
@@ -284,6 +312,7 @@ export class MindmapWorkspaceView extends ItemView {
           this.render();
         }
       });
+      bindTooltip(marker, candidate);
       svg.appendChild(marker);
     }
 
@@ -311,9 +340,7 @@ export class MindmapWorkspaceView extends ItemView {
           this.expandedPath = candidate.path;
           this.render();
         });
-        const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-        title.textContent = `${candidate.title}: ${metric.detail}`;
-        point.appendChild(title);
+        bindTooltip(point, candidate);
         svg.appendChild(point);
       }
     }
@@ -393,11 +420,6 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   private animateSidebar(container: HTMLElement): void {
-    const selected = container.querySelector(".mindmap-sidebar-selected");
-    if (selected instanceof HTMLElement) {
-      animate(selected, { opacity: [0.88, 1], y: [-4, 0] }, { duration: 0.18, ease: "easeOut" });
-    }
-
     const rows = Array.from(container.querySelectorAll(".mindmap-sidebar-card"));
     if (rows.length > 0) {
       animate(rows, { opacity: [0.82, 1], y: [8, 0] }, { duration: 0.2, delay: stagger(0.018), ease: "easeOut" });

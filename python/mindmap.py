@@ -1376,7 +1376,7 @@ def main():
     embed_model = embed_settings["model"]
     llm_model = llm_settings["model"]
     mindmap_heading = config.get("mindmap_heading", config.get("related_heading", "## Mindmap"))
-    write_mindmap_section = config.get("write_mindmap_section", config.get("write_related_section", True))
+    write_mindmap_section = config.get("write_mindmap_section", config.get("write_related_section", False))
     controlled_tags_path = config.get("controlled_tags_path")
     tag_aliases_path = config.get("tag_aliases_path")
     allow_free_tags = config.get("allow_free_tags", True)
@@ -1463,6 +1463,8 @@ def main():
                 updated = update_frontmatter(original, updates, config["frontmatter_keys"])
                 if write_mindmap_section:
                     updated = update_related_section(updated, mindmap_heading, updates["related"])
+                else:
+                    updated = strip_related_section(updated, mindmap_heading)
                 file_path.write_text(updated, encoding="utf-8")
                 log_lines.append(f"Applied preview: {relpath}")
             except Exception as exc:
@@ -1593,6 +1595,8 @@ def main():
         if write_mindmap_section:
             links = related_items or updates.get("related", [])
             updated = update_related_section(updated, mindmap_heading, links)
+        else:
+            updated = strip_related_section(updated, mindmap_heading)
         if updated != original:
             target_path.write_text(updated, encoding="utf-8")
             return True

@@ -42,7 +42,7 @@
   "tag_frequency_fallback": 1,
   "tag_aliases_path": "tag_aliases.json",
   "mindmap_heading": "## Mindmap",
-  "write_mindmap_section": true,
+  "write_mindmap_section": false,
   "related_overreach": 2,
   "related_creative": 2,
   "related_creative_min": 0.45,
