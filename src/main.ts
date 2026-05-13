@@ -324,7 +324,10 @@ export default class MindmapPlugin extends Plugin {
     }
     if (this.mindmapLocalGraphLeaf === null) {
       for (const leaf of this.app.workspace.getLeavesOfType("localgraph")) {
-        leaf.detach();
+        if (this.isMindmapLocalGraphLeaf(leaf)) {
+          this.mindmapLocalGraphLeaf = leaf;
+          break;
+        }
       }
     }
 
@@ -344,6 +347,7 @@ export default class MindmapPlugin extends Plugin {
 
   private getMindmapLocalGraphState(filePath: string): Record<string, unknown> {
     return {
+      pluginId: this.manifest.id,
       file: filePath,
       options: {
         "collapse-filter": true,
@@ -371,6 +375,17 @@ export default class MindmapPlugin extends Plugin {
         close: false,
       },
     };
+  }
+
+  private isMindmapLocalGraphLeaf(leaf: WorkspaceLeaf): boolean {
+    if (leaf === this.mindmapLocalGraphLeaf) {
+      return true;
+    }
+
+    const state = leaf.getViewState().state;
+    return typeof state === "object"
+      && state !== null
+      && (state as Record<string, unknown>).pluginId === this.manifest.id;
   }
 
   getPendingSnapshot(): PendingSnapshot {

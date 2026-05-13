@@ -174,8 +174,18 @@ export class ScopeManager {
       },
     });
     search.addEventListener("input", () => {
+      const selectionStart = search.selectionStart;
+      const selectionEnd = search.selectionEnd;
       this.query = search.value.trim();
       this.render();
+      const nextSearch = this.containerEl.querySelector<HTMLInputElement>(".mindmap-scope-search");
+      if (nextSearch === null) {
+        return;
+      }
+      nextSearch.focus();
+      if (selectionStart !== null && selectionEnd !== null) {
+        nextSearch.setSelectionRange(selectionStart, selectionEnd);
+      }
     });
 
     this.createButton(toolbar, "Top-level", () => {

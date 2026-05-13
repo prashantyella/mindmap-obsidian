@@ -162,7 +162,8 @@ function sourceLevel(activePath: string, candidatePath: string): number {
 }
 
 export class MindmapWorkspaceView extends ItemView {
-  private expandedPath: string | null = null;
+  private activePath: string | null = null;
+  private expandedPath: string | null | undefined = undefined;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -198,12 +199,19 @@ export class MindmapWorkspaceView extends ItemView {
     const shell = containerEl.createDiv({ cls: "mindmap-sidebar" });
 
     if (activeFile === null) {
+      this.activePath = null;
+      this.expandedPath = undefined;
       this.renderEmpty(shell, "No active note", "Open a note to see its mindmap links.");
       return;
     }
 
+    if (this.activePath !== activeFile.path) {
+      this.activePath = activeFile.path;
+      this.expandedPath = undefined;
+    }
+
     const candidates = this.getRelatedCandidates(activeFile);
-    if (candidates.length > 0 && !candidates.some((candidate) => candidate.path === this.expandedPath)) {
+    if (candidates.length > 0 && this.expandedPath === undefined) {
       this.expandedPath = candidates[0].path;
     }
 
