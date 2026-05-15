@@ -5,10 +5,13 @@ Default scope comes from config.json. Designed to be safe: no note changes unles
 """
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -17,6 +20,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Callable
 from urllib import request
+from urllib.parse import urlparse
 
 try:
     from ruamel.yaml import YAML
@@ -1056,6 +1060,168 @@ def fetch_openai_compatible_models(base_url: str, api_key: str, timeout: int) ->
     return models
 
 
+def is_localhost_url(base_url: str) -> bool:
+    parsed = urlparse(base_url)
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def openai_compatible_url_port(base_url: str, default: int = 8000) -> int:
+    parsed = urlparse(base_url)
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    return default
+
+
+def should_manage_omlx_server(config: Dict, llm_settings: Dict) -> bool:
+    raw_setting = config.get("omlx_auto_manage", "auto")
+    if raw_setting is False:
+        return False
+    if llm_settings.get("provider") != "openai_compatible":
+        return False
+
+    base_url = str(llm_settings.get("base_url", ""))
+    if not is_localhost_url(base_url):
+        return False
+    if raw_setting is True:
+        return True
+
+    model = str(llm_settings.get("model", "")).lower()
+    return "mlx" in model or openai_compatible_url_port(base_url) == 8000
+
+
+def build_omlx_server_command(config: Dict, llm_settings: Dict) -> List[str]:
+    configured_command = config.get("omlx_server_command")
+    if isinstance(configured_command, list) and all(isinstance(part, str) for part in configured_command):
+        return configured_command
+    if isinstance(configured_command, str) and configured_command.strip():
+        return shlex.split(configured_command)
+
+    base_path = Path(str(config.get("omlx_base_path", "~/.omlx"))).expanduser()
+    port = int(config.get("omlx_port", openai_compatible_url_port(str(llm_settings.get("base_url", "")))))
+    configured_python = str(config.get("omlx_python_command", "")).strip()
+    app_cli = Path("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
+    if app_cli.exists() and not configured_python:
+        return [
+            str(app_cli),
+            "serve",
+            "--base-path",
+            str(base_path),
+            "--port",
+            str(port),
+        ]
+
+    app_python = Path("/Applications/oMLX.app/Contents/MacOS/python3")
+    if configured_python:
+        python_command = configured_python
+    elif app_python.exists():
+        python_command = str(app_python)
+    else:
+        python_command = "python3"
+
+    return [
+        python_command,
+        "-m",
+        "omlx.cli",
+        "serve",
+        "--base-path",
+        str(base_path),
+        "--port",
+        str(port),
+    ]
+
+
+def probe_openai_compatible_server(base_url: str, api_key: str, timeout: int = 3) -> bool:
+    try:
+        fetch_openai_compatible_models(base_url, api_key, timeout)
+        return True
+    except Exception:
+        return False
+
+
+def start_managed_omlx_server(
+    config: Dict,
+    llm_settings: Dict,
+    log_fn: Callable[[str], None],
+) -> Optional[subprocess.Popen]:
+    if not should_manage_omlx_server(config, llm_settings):
+        return None
+
+    base_url = str(llm_settings.get("base_url", ""))
+    api_key = str(llm_settings.get("api_key", ""))
+    probe_timeout = int(config.get("omlx_probe_timeout_seconds", 3))
+    if probe_openai_compatible_server(base_url, api_key, timeout=probe_timeout):
+        log_fn(f"[omlx] Server already running at {base_url}; leaving it running after this run.")
+        return None
+
+    command = build_omlx_server_command(config, llm_settings)
+    base_path = Path(str(config.get("omlx_base_path", "~/.omlx"))).expanduser()
+    log_dir = base_path / "logs"
+    ensure_dir(log_dir)
+    log_path = log_dir / "mindmap-omlx-server.log"
+    log_handle = log_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    finally:
+        log_handle.close()
+
+    log_fn(f"[omlx] Started server for this run: {' '.join(shlex.quote(part) for part in command)}")
+    startup_timeout = int(config.get("omlx_startup_timeout_seconds", 45))
+    started_at = time.time()
+    while time.time() - started_at < startup_timeout:
+        if process.poll() is not None:
+            raise RuntimeError(
+                diagnostic_line(
+                    "error",
+                    "OMLX_START_FAILED",
+                    f"oMLX server exited before becoming ready with code {process.returncode}.",
+                    guidance=f"Check the oMLX server log at {log_path}.",
+                    context={"base_url": base_url},
+                )
+            )
+        if probe_openai_compatible_server(base_url, api_key, timeout=probe_timeout):
+            log_fn(f"[omlx] Server ready at {base_url}.")
+            return process
+        time.sleep(1)
+
+    stop_managed_omlx_server(process, log_fn, reason="startup timeout")
+    raise RuntimeError(
+        diagnostic_line(
+            "error",
+            "OMLX_START_TIMEOUT",
+            f"oMLX server did not become ready within {startup_timeout} seconds.",
+            guidance=f"Open oMLX manually or check the server log at {log_path}.",
+            context={"base_url": base_url},
+        )
+    )
+
+
+def stop_managed_omlx_server(
+    process: Optional[subprocess.Popen],
+    log_fn: Callable[[str], None],
+    reason: str = "run complete",
+) -> None:
+    if process is None or process.poll() is not None:
+        return
+    log_fn(f"[omlx] Stopping server started by this run ({reason}).")
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        log_fn("[omlx] Server did not stop after terminate; killing it.")
+        process.kill()
+        process.wait(timeout=5)
+
+
 def find_missing_models(required_models: List[str], available_models: List[str]) -> List[str]:
     available = set(available_models)
     available_bases = {model.split(":", 1)[0] for model in available_models}
@@ -1575,6 +1741,31 @@ def main():
             stream = sys.stderr if to_stderr else sys.stdout
             print(line, file=stream, flush=True)
 
+    managed_omlx_process: Optional[subprocess.Popen] = None
+
+    def cleanup_managed_omlx(reason: str = "run complete"):
+        nonlocal managed_omlx_process
+        if managed_omlx_process is None:
+            return
+        stop_managed_omlx_server(managed_omlx_process, log_event, reason=reason)
+        managed_omlx_process = None
+
+    if do_tag:
+        try:
+            managed_omlx_process = start_managed_omlx_server(config, llm_settings, log_event)
+            if managed_omlx_process is not None:
+                atexit.register(
+                    stop_managed_omlx_server,
+                    managed_omlx_process,
+                    lambda line: print(line, file=sys.stderr, flush=True),
+                    "process exit",
+                )
+        except Exception as exc:
+            log_event(f"[error] oMLX startup failed: {exc}", to_stderr=True)
+            ensure_dir(log_path.parent)
+            log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+            return 1
+
     def write_note_update(note: Note, updates: Dict, related_items: List = None) -> bool:
         target_path, issue = resolve_vault_markdown_write_target(vault_root, note.relpath)
         if issue:
@@ -1887,6 +2078,8 @@ def main():
                     log_event(f"[error] Write failed for {note.relpath}: {exc}", to_stderr=True)
             else:
                 log_event(f"[dry-run] Would update metadata: {note.relpath}", also_print=False)
+
+    cleanup_managed_omlx()
 
     ensure_dir(log_path.parent)
     log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")

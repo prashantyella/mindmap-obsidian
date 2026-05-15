@@ -165,6 +165,22 @@ export default class MindmapPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "mindmap-refresh-all",
+      name: "Run mindmap full refresh (all notes)",
+      callback: () => {
+        void this.runMindmap("manual", "refreshAll");
+      },
+    });
+
+    this.addCommand({
+      id: "mindmap-rebuild-all",
+      name: "Run mindmap full rebuild (all notes)",
+      callback: () => {
+        void this.runMindmap("manual", "rebuildAll");
+      },
+    });
+
+    this.addCommand({
       id: "mindmap-enable-scheduler",
       name: "Enable mindmap interval scheduler",
       callback: () => {
@@ -507,9 +523,9 @@ export default class MindmapPlugin extends Plugin {
   getLlmProviderConfigStatus(): LlmProviderConfigStatus {
     const runtime = this.getResolvedRuntime();
     const fallback: LlmProviderConfig = {
-      provider: "ollama",
-      baseUrl: "http://localhost:11434",
-      model: "llama3.1:8b",
+      provider: "openai_compatible",
+      baseUrl: "http://localhost:8000/v1",
+      model: "gemma-4-E4B-it-MLX-8bit",
       apiKey: "",
       maxTokens: 1024,
       enableThinking: true,

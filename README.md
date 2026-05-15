@@ -10,9 +10,9 @@ Mindmap is a desktop-only Obsidian plugin that runs a local Python workflow to:
 - Obsidian Desktop `1.5.12+`
 - Python `3.10+`
 - Ollama running locally at `http://localhost:11434`
+- oMLX with `gemma-4-E4B-it-MLX-8bit` for metadata extraction
 - Ollama models:
   - `mxbai-embed-large`
-  - `llama3.1:8b`
 
 ## Install
 
@@ -25,12 +25,13 @@ Mindmap is a desktop-only Obsidian plugin that runs a local Python workflow to:
 python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt
 ```
 
-4. Pull required Ollama models:
+4. Pull required Ollama embedding model and install the default oMLX metadata model:
 
 ```bash
 ollama pull mxbai-embed-large
-ollama pull llama3.1:8b
 ```
+
+Install `gemma-4-E4B-it-MLX-8bit` in oMLX, then set the local oMLX API key in Mindmap settings if your oMLX server requires one.
 
 ## First Run
 
@@ -43,12 +44,16 @@ ollama pull llama3.1:8b
 5. Run one command:
    - `Run Mindmap (current scope)` or
    - `Run Mindmap (all scopes)`
+   - `Run Mindmap full refresh (all notes)` after changing metadata models/prompts
+   - `Run Mindmap full rebuild (all notes)` to wipe and rebuild the vector index
 
 ## Main Commands
 
 - `Run Mindmap preflight checks`
 - `Run Mindmap (current scope)`
 - `Run Mindmap (all scopes)`
+- `Run Mindmap full refresh (all notes)`
+- `Run Mindmap full rebuild (all notes)`
 - `Show Mindmap status`
 - `Enable Mindmap LaunchAgent scheduler`
 - `Disable Mindmap schedulers`
@@ -87,8 +92,9 @@ python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt
 
 ```bash
 ollama pull mxbai-embed-large
-ollama pull llama3.1:8b
 ```
+
+For metadata extraction, confirm oMLX exposes `gemma-4-E4B-it-MLX-8bit` from `http://localhost:8000/v1/models`.
 
 - Plugin shows `scope setup required`:
   - complete `Scope setup` in plugin settings and save.
@@ -97,7 +103,7 @@ ollama pull llama3.1:8b
 
 - Desktop only (`isDesktopOnly: true`)
 - Mobile is not supported
-- All processing is local (Python + Ollama on your machine)
+- All processing is local (Python + Ollama/oMLX on your machine)
 
 ## Release Metadata
 

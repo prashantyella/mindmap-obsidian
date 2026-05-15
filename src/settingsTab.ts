@@ -127,9 +127,9 @@ export class MindmapSettingTab extends PluginSettingTab {
             this.saveProviderConfig({
               provider: "openai_compatible",
               baseUrl: "http://localhost:8000/v1",
-              model: "Qwen3.5-9B-MLX-4bit",
+              model: "gemma-4-E4B-it-MLX-8bit",
               maxTokens: 1024,
-              enableThinking: false,
+              enableThinking: true,
             });
             this.display();
           });
@@ -152,7 +152,7 @@ export class MindmapSettingTab extends PluginSettingTab {
       .setDesc("Model used for metadata extraction.")
       .addText((text) => {
         text
-          .setPlaceholder(status.provider === "openai_compatible" ? "Qwen3.5-9B-MLX-4bit" : "llama3.1:8b")
+          .setPlaceholder(status.provider === "openai_compatible" ? "gemma-4-E4B-it-MLX-8bit" : "llama3.1:8b")
           .setValue(status.model)
           .onChange((value) => {
             this.saveProviderConfig({ model: value });

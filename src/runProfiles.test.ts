@@ -16,3 +16,17 @@ void test("getRunProfile returns all-scope apply arguments", () => {
     label: "all scopes",
   });
 });
+
+void test("getRunProfile returns all-scope full refresh arguments", () => {
+  assert.deepEqual(getRunProfile("refreshAll"), {
+    args: ["--all", "--refresh-all", "--apply"],
+    label: "all scopes full refresh",
+  });
+});
+
+void test("getRunProfile returns all-scope full rebuild arguments", () => {
+  assert.deepEqual(getRunProfile("rebuildAll"), {
+    args: ["--all", "--refresh-all", "--rebuild", "--apply"],
+    label: "all scopes full rebuild",
+  });
+});
