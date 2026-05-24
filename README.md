@@ -44,6 +44,7 @@ Install `gemma-4-E4B-it-MLX-8bit` in oMLX, then set the local oMLX API key in Mi
 5. Run one command:
    - `Run Mindmap (current scope)` or
    - `Run Mindmap (all scopes)`
+   - `Run Mindmap metadata refresh (all notes)` to rewrite note metadata without rebuilding embeddings
    - `Run Mindmap full refresh (all notes)` after changing metadata models/prompts
    - `Run Mindmap full rebuild (all notes)` to wipe and rebuild the vector index
 
@@ -52,6 +53,7 @@ Install `gemma-4-E4B-it-MLX-8bit` in oMLX, then set the local oMLX API key in Mi
 - `Run Mindmap preflight checks`
 - `Run Mindmap (current scope)`
 - `Run Mindmap (all scopes)`
+- `Run Mindmap metadata refresh (all notes)`
 - `Run Mindmap full refresh (all notes)`
 - `Run Mindmap full rebuild (all notes)`
 - `Show Mindmap status`

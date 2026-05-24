@@ -592,6 +592,68 @@
   justify-content: center;
 }
 
+.mindmap-confirm-modal p {
+  color: var(--text-muted);
+}
+
+.mindmap-status {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mindmap-status.is-running {
+  color: var(--text-accent);
+}
+
+.mindmap-status-swirling {
+  position: relative;
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  color: currentColor;
+}
+
+.mindmap-status-swirling::before,
+.mindmap-status-swirling::after {
+  position: absolute;
+  content: "";
+  border-style: solid;
+  border-color: currentColor;
+  border-radius: 999px;
+  animation: mindmap-swirling-spin 0.8s linear infinite;
+}
+
+.mindmap-status-swirling::before {
+  inset: 1px;
+  border-width: 2px;
+  border-bottom-color: transparent;
+  border-left-color: transparent;
+}
+
+.mindmap-status-swirling::after {
+  inset: 4px;
+  border-width: 1.5px;
+  border-top-color: transparent;
+  border-right-color: transparent;
+  animation-direction: reverse;
+  animation-duration: 1.15s;
+}
+
+@keyframes mindmap-swirling-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mindmap-status-swirling::before,
+  .mindmap-status-swirling::after {
+    animation-duration: 1.8s;
+  }
+}
+
 @media (max-width: 760px) {
   .mindmap-view-shell {
     padding: 14px;
