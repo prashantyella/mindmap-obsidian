@@ -194,6 +194,7 @@ function renderLoadingSpinner(container: HTMLElement): void {
 export class MindmapWorkspaceView extends ItemView {
   private activePath: string | null = null;
   private expandedPath: string | null | undefined = undefined;
+  private renderedExpandedPath: string | null | undefined = undefined;
   private liveRequestId = 0;
   private liveState: LiveState = {
     path: "",
@@ -240,6 +241,7 @@ export class MindmapWorkspaceView extends ItemView {
   render(): void {
     const { containerEl } = this;
     const previousCardPositions = this.captureCardPositions(containerEl);
+    const previousExpandedPath = this.renderedExpandedPath;
     containerEl.empty();
     containerEl.addClass("mindmap-view");
 
@@ -249,6 +251,7 @@ export class MindmapWorkspaceView extends ItemView {
     if (activeFile === null) {
       this.activePath = null;
       this.expandedPath = undefined;
+      this.renderedExpandedPath = undefined;
       this.renderEmpty(shell, "No active note", "Open a note to see its mindmap links.");
       return;
     }
@@ -256,6 +259,7 @@ export class MindmapWorkspaceView extends ItemView {
     if (this.activePath !== activeFile.path) {
       this.activePath = activeFile.path;
       this.expandedPath = undefined;
+      this.renderedExpandedPath = undefined;
       this.liveState = {
         path: activeFile.path,
         status: "idle",
@@ -276,6 +280,7 @@ export class MindmapWorkspaceView extends ItemView {
       if (this.liveState.status === "loading") {
         this.renderInlineLoadingIndicator(shell);
       }
+      this.renderedExpandedPath = this.expandedPath;
       this.renderEmpty(shell, "No mindmap connections", "No mindmap connections exist for this note.");
       return;
     }
@@ -291,7 +296,8 @@ export class MindmapWorkspaceView extends ItemView {
       this.renderCandidate(list, candidate, candidate.path === this.expandedPath);
     }
 
-    this.animateSidebar(shell, previousCardPositions);
+    this.animateSidebar(shell, previousCardPositions, previousExpandedPath, this.expandedPath);
+    this.renderedExpandedPath = this.expandedPath;
   }
 
   private ensureLiveQuery(activeFile: TFile): void {
@@ -541,7 +547,13 @@ export class MindmapWorkspaceView extends ItemView {
     });
   }
 
-  private animateSidebar(container: HTMLElement, previousCardPositions: Map<string, DOMRect>): void {
+  private animateSidebar(
+    container: HTMLElement,
+    previousCardPositions: Map<string, DOMRect>,
+    previousExpandedPath: string | null | undefined,
+    nextExpandedPath: string | null | undefined,
+  ): void {
+    const expansionChanged = previousExpandedPath !== nextExpandedPath;
     const rows = Array.from(container.querySelectorAll(".mindmap-sidebar-card"));
     if (rows.length > 0) {
       rows.forEach((row, index) => {
@@ -555,12 +567,23 @@ export class MindmapWorkspaceView extends ItemView {
           animate(row, { opacity: [0.82, 1], y: [8, 0] }, { duration: 0.2, delay: index * 0.018, ease: "easeOut" });
           return;
         }
+        if (expansionChanged && path === nextExpandedPath) {
+          return;
+        }
 
         const fromY = previous.top - current.top;
         if (Math.abs(fromY) > 0.5) {
           animate(row, { y: [fromY, 0] }, { duration: 0.24, ease: "easeOut" });
         }
       });
+    }
+
+    if (expansionChanged && nextExpandedPath !== null && nextExpandedPath !== undefined) {
+      const expandedRow = rows.find((row): row is HTMLElement => row instanceof HTMLElement && row.dataset.path === nextExpandedPath);
+      const detail = expandedRow?.querySelector(".mindmap-sidebar-detail");
+      if (detail instanceof HTMLElement) {
+        animate(detail, { opacity: [0, 1], y: [-4, 0] }, { duration: 0.16, ease: "easeOut" });
+      }
     }
   }
 
