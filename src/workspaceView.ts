@@ -1,5 +1,5 @@
 import { ItemView, TFile, WorkspaceLeaf } from "obsidian";
-import { animate, stagger } from "motion";
+import { animate } from "motion";
 
 import type MindmapPlugin from "./main";
 import type { LiveRelatedResponse, LiveRelatedResult } from "./semanticTypes";
@@ -228,6 +228,7 @@ export class MindmapWorkspaceView extends ItemView {
 
   render(): void {
     const { containerEl } = this;
+    const previousCardPositions = this.captureCardPositions(containerEl);
     containerEl.empty();
     containerEl.addClass("mindmap-view");
 
@@ -261,18 +262,19 @@ export class MindmapWorkspaceView extends ItemView {
 
     if (candidates.length === 0) {
       if (this.liveState.status === "loading") {
-        this.renderEmpty(shell, "Finding live links", "Mindmap is querying the semantic index for this note.");
+        this.renderLinkingIndicator(shell);
+        this.renderEmpty(shell, "Finding mindmap connections", "Mindmap is linking this note.");
       } else if (this.liveState.status === "error") {
         this.renderEmpty(shell, "Live links unavailable", this.liveState.error ?? "Mindmap could not query live semantic links.");
-      } else if (this.liveState.status === "ready") {
-        this.renderEmpty(shell, "No live semantic links", "The semantic index returned no candidates for this note yet.");
       } else {
-        this.renderEmpty(shell, "No related notes", "Run Mindmap on this note to populate related links.");
+        this.renderEmpty(shell, "No mindmap connections", "No mindmap connections exist for this note.");
       }
       return;
     }
 
-    this.renderLiveStatus(shell);
+    if (this.liveState.status === "loading") {
+      this.renderLinkingIndicator(shell);
+    }
 
     this.renderHeatmap(shell, candidates);
 
@@ -281,7 +283,7 @@ export class MindmapWorkspaceView extends ItemView {
       this.renderCandidate(list, candidate, candidate.path === this.expandedPath);
     }
 
-    this.animateSidebar(shell);
+    this.animateSidebar(shell, previousCardPositions);
   }
 
   private ensureLiveQuery(activeFile: TFile): void {
@@ -327,21 +329,14 @@ export class MindmapWorkspaceView extends ItemView {
       });
   }
 
-  private renderLiveStatus(container: HTMLElement): void {
-    if (this.liveState.status === "idle") {
-      return;
-    }
-    const status = container.createDiv({ cls: "mindmap-live-status" });
-    if (this.liveState.status === "loading") {
-      status.setText("Finding live semantic links...");
-      return;
-    }
-    if (this.liveState.status === "error") {
-      status.setText(`Live semantic links unavailable: ${this.liveState.error ?? "unknown error"}`);
-      return;
-    }
-    const count = this.liveState.response?.related.length ?? 0;
-    status.setText(count === 1 ? "1 live semantic link" : `${count} live semantic links`);
+  private renderLinkingIndicator(container: HTMLElement): void {
+    const indicator = container.createDiv({
+      cls: "mindmap-linking-indicator",
+      attr: {
+        "aria-label": "Mindmap linking in progress",
+      },
+    });
+    indicator.createSpan({ cls: "mindmap-linking-symbol", text: "◇" });
   }
 
   private renderHeatmap(container: HTMLElement, candidates: RelatedCandidate[]): void {
@@ -475,6 +470,7 @@ export class MindmapWorkspaceView extends ItemView {
         role: "button",
         tabindex: "0",
         "aria-expanded": String(expanded),
+        "data-path": candidate.path,
       },
     });
 
@@ -541,10 +537,19 @@ export class MindmapWorkspaceView extends ItemView {
     });
   }
 
-  private animateSidebar(container: HTMLElement): void {
+  private animateSidebar(container: HTMLElement, previousCardPositions: Map<string, DOMRect>): void {
     const rows = Array.from(container.querySelectorAll(".mindmap-sidebar-card"));
     if (rows.length > 0) {
-      animate(rows, { opacity: [0.82, 1], y: [8, 0] }, { duration: 0.2, delay: stagger(0.018), ease: "easeOut" });
+      rows.forEach((row, index) => {
+        if (!(row instanceof HTMLElement)) {
+          return;
+        }
+        const path = row.dataset.path;
+        const previous = path ? previousCardPositions.get(path) : undefined;
+        const current = row.getBoundingClientRect();
+        const fromY = previous ? previous.top - current.top : 8;
+        animate(row, { opacity: [previous ? 1 : 0.82, 1], y: [fromY, 0] }, { duration: 0.24, delay: previous ? 0 : index * 0.018, ease: "easeOut" });
+      });
     }
 
     const detail = container.querySelector(".mindmap-sidebar-card.is-expanded .mindmap-sidebar-detail");
@@ -556,6 +561,17 @@ export class MindmapWorkspaceView extends ItemView {
     if (heatmap instanceof SVGSVGElement) {
       animate(heatmap, { opacity: [0.72, 1], scale: [0.985, 1] }, { duration: 0.18, ease: "easeOut" });
     }
+  }
+
+  private captureCardPositions(container: HTMLElement): Map<string, DOMRect> {
+    const positions = new Map<string, DOMRect>();
+    for (const row of Array.from(container.querySelectorAll(".mindmap-sidebar-card"))) {
+      if (!(row instanceof HTMLElement) || !row.dataset.path) {
+        continue;
+      }
+      positions.set(row.dataset.path, row.getBoundingClientRect());
+    }
+    return positions;
   }
 
   private getDisplayCandidates(activeFile: TFile): RelatedCandidate[] {
