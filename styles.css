@@ -208,6 +208,16 @@
   text-decoration: none;
 }
 
+.mindmap-live-status {
+  flex: 0 0 auto;
+  padding: 10px 25px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-family: "Geist Mono", var(--font-monospace);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .mindmap-heatmap {
   position: relative;
   flex: 0 0 auto;

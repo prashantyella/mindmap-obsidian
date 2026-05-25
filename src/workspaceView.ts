@@ -2,6 +2,7 @@ import { ItemView, TFile, WorkspaceLeaf } from "obsidian";
 import { animate, stagger } from "motion";
 
 import type MindmapPlugin from "./main";
+import type { LiveRelatedResponse, LiveRelatedResult } from "./semanticTypes";
 
 export const MINDMAP_VIEW_TYPE = "mindmap-ai-view";
 
@@ -23,6 +24,15 @@ interface RelatedCandidate {
   folderPath: string;
   summary: string | null;
   heatmap: HeatmapCell[];
+  liveScore?: number;
+  liveKind?: string;
+}
+
+interface LiveState {
+  path: string;
+  status: "idle" | "loading" | "ready" | "error";
+  response: LiveRelatedResponse | null;
+  error: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -161,9 +171,25 @@ function sourceLevel(activePath: string, candidatePath: string): number {
   return 1;
 }
 
+function formatLiveDetail(candidate: RelatedCandidate): string | null {
+  if (typeof candidate.liveScore !== "number") {
+    return null;
+  }
+  const percent = Math.round(candidate.liveScore * 100);
+  const kind = candidate.liveKind ?? "semantic";
+  return `Live ${kind} match (${percent}%).`;
+}
+
 export class MindmapWorkspaceView extends ItemView {
   private activePath: string | null = null;
   private expandedPath: string | null | undefined = undefined;
+  private liveRequestId = 0;
+  private liveState: LiveState = {
+    path: "",
+    status: "idle",
+    response: null,
+    error: null,
+  };
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -186,7 +212,17 @@ export class MindmapWorkspaceView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.render()));
-    this.registerEvent(this.app.metadataCache.on("changed", () => this.render()));
+    this.registerEvent(this.app.metadataCache.on("changed", (file) => {
+      if (file.path === this.activePath) {
+        this.liveState = {
+          path: file.path,
+          status: "idle",
+          response: null,
+          error: null,
+        };
+      }
+      this.render();
+    }));
     this.render();
   }
 
@@ -208,17 +244,35 @@ export class MindmapWorkspaceView extends ItemView {
     if (this.activePath !== activeFile.path) {
       this.activePath = activeFile.path;
       this.expandedPath = undefined;
+      this.liveState = {
+        path: activeFile.path,
+        status: "idle",
+        response: null,
+        error: null,
+      };
     }
 
-    const candidates = this.getRelatedCandidates(activeFile);
+    this.ensureLiveQuery(activeFile);
+
+    const candidates = this.getDisplayCandidates(activeFile);
     if (candidates.length > 0 && this.expandedPath === undefined) {
       this.expandedPath = candidates[0].path;
     }
 
     if (candidates.length === 0) {
-      this.renderEmpty(shell, "No related notes", "Run Mindmap on this note to populate related links.");
+      if (this.liveState.status === "loading") {
+        this.renderEmpty(shell, "Finding live links", "Mindmap is querying the semantic index for this note.");
+      } else if (this.liveState.status === "error") {
+        this.renderEmpty(shell, "Live links unavailable", this.liveState.error ?? "Mindmap could not query live semantic links.");
+      } else if (this.liveState.status === "ready") {
+        this.renderEmpty(shell, "No live semantic links", "The semantic index returned no candidates for this note yet.");
+      } else {
+        this.renderEmpty(shell, "No related notes", "Run Mindmap on this note to populate related links.");
+      }
       return;
     }
+
+    this.renderLiveStatus(shell);
 
     this.renderHeatmap(shell, candidates);
 
@@ -228,6 +282,66 @@ export class MindmapWorkspaceView extends ItemView {
     }
 
     this.animateSidebar(shell);
+  }
+
+  private ensureLiveQuery(activeFile: TFile): void {
+    if (!this.plugin.settings.liveSemanticLookupEnabled) {
+      return;
+    }
+    if (this.liveState.path === activeFile.path && this.liveState.status !== "idle") {
+      return;
+    }
+
+    const requestId = ++this.liveRequestId;
+    this.liveState = {
+      path: activeFile.path,
+      status: "loading",
+      response: null,
+      error: null,
+    };
+
+    void this.plugin.queryLiveRelated(activeFile.path)
+      .then((response) => {
+        if (requestId !== this.liveRequestId || this.activePath !== activeFile.path) {
+          return;
+        }
+        this.liveState = {
+          path: activeFile.path,
+          status: "ready",
+          response,
+          error: null,
+        };
+        this.render();
+      })
+      .catch((error) => {
+        if (requestId !== this.liveRequestId || this.activePath !== activeFile.path) {
+          return;
+        }
+        this.liveState = {
+          path: activeFile.path,
+          status: "error",
+          response: null,
+          error: error instanceof Error ? error.message : String(error),
+        };
+        this.render();
+      });
+  }
+
+  private renderLiveStatus(container: HTMLElement): void {
+    if (this.liveState.status === "idle") {
+      return;
+    }
+    const status = container.createDiv({ cls: "mindmap-live-status" });
+    if (this.liveState.status === "loading") {
+      status.setText("Finding live semantic links...");
+      return;
+    }
+    if (this.liveState.status === "error") {
+      status.setText(`Live semantic links unavailable: ${this.liveState.error ?? "unknown error"}`);
+      return;
+    }
+    const count = this.liveState.response?.related.length ?? 0;
+    status.setText(count === 1 ? "1 live semantic link" : `${count} live semantic links`);
   }
 
   private renderHeatmap(container: HTMLElement, candidates: RelatedCandidate[]): void {
@@ -387,7 +501,7 @@ export class MindmapWorkspaceView extends ItemView {
     const detail = row.createDiv({ cls: "mindmap-sidebar-detail" });
     detail.createDiv({
       cls: "mindmap-sidebar-summary",
-      text: candidate.summary ?? "No summary available yet.",
+      text: candidate.summary ?? formatLiveDetail(candidate) ?? "No summary available yet.",
     });
   }
 
@@ -442,6 +556,39 @@ export class MindmapWorkspaceView extends ItemView {
     if (heatmap instanceof SVGSVGElement) {
       animate(heatmap, { opacity: [0.72, 1], scale: [0.985, 1] }, { duration: 0.18, ease: "easeOut" });
     }
+  }
+
+  private getDisplayCandidates(activeFile: TFile): RelatedCandidate[] {
+    const liveRelated = this.liveState.path === activeFile.path && this.liveState.status === "ready"
+      ? this.liveState.response?.related ?? []
+      : [];
+    if (liveRelated.length > 0) {
+      return this.getLiveCandidates(activeFile, liveRelated);
+    }
+    return this.getRelatedCandidates(activeFile);
+  }
+
+  private getLiveCandidates(activeFile: TFile, related: LiveRelatedResult[]): RelatedCandidate[] {
+    const activeFrontmatter = this.getFrontmatter(activeFile);
+    const activeConcepts = normalizeTextList(activeFrontmatter.concepts);
+    const activeTags = normalizeTextList(activeFrontmatter.tags);
+
+    return related.map((item) => {
+      const file = this.resolveRelatedFile(item.path, activeFile.path);
+      const frontmatter = file === null ? {} : this.getFrontmatter(file);
+      const resolvedPath = file?.path ?? item.path;
+
+      return {
+        file,
+        path: resolvedPath,
+        title: item.title ?? file?.basename ?? titleFromPath(item.path),
+        folderPath: parentFolderFromPath(resolvedPath) || "Vault root",
+        summary: coerceText(frontmatter.summary),
+        heatmap: this.getHeatmapCells(activeFile.path, activeConcepts, activeTags, resolvedPath, frontmatter),
+        liveScore: item.score,
+        liveKind: item.kind,
+      };
+    });
   }
 
   private getRelatedCandidates(activeFile: TFile): RelatedCandidate[] {

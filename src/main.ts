@@ -13,6 +13,8 @@ import { assertAllowedPluginArgs } from "./runArguments";
 import { getRunProfile, type RunConfirmation, type RunScope } from "./runProfiles";
 import { migrateLegacyPluginVaultRoot } from "./runtimeConfigMigration";
 import { ensureBundledRuntimeAssets } from "./runtimeAssets";
+import { MindmapSemanticEnvironment, type SemanticEnvironmentStatus } from "./semanticEnvironment";
+import type { LiveRelatedResponse } from "./semanticTypes";
 import {
   buildDailyCalendarIntervals,
   buildLaunchAgentPlist,
@@ -165,6 +167,7 @@ export default class MindmapPlugin extends Plugin {
   private statusBarEl: HTMLElement | null = null;
   private activeRunStatus: string | null = null;
   private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
+  private semanticEnvironment: MindmapSemanticEnvironment | null = null;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
   private diagnosticsState: DiagnosticsState = {
@@ -190,6 +193,11 @@ export default class MindmapPlugin extends Plugin {
     this.pendingScanService = createPendingScanService(
       this.app.vault,
       this.getRuntimeContext(),
+      () => this.getResolvedRuntime(),
+      (message) => this.appendLog(message),
+      () => this.updateStatusBar(),
+    );
+    this.semanticEnvironment = new MindmapSemanticEnvironment(
       () => this.getResolvedRuntime(),
       (message) => this.appendLog(message),
       () => this.updateStatusBar(),
@@ -283,14 +291,26 @@ export default class MindmapPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "mindmap-start-semantic-environment",
+      name: "Start Mindmap semantic environment",
+      callback: () => {
+        void this.startSemanticEnvironment(true);
+      },
+    });
+
     this.syncScheduler();
     this.registerVaultRefreshEvents();
     void this.pendingScanService.warm().then(() => this.updateStatusBar());
     void this.runPreflight("startup");
+    if (this.settings.liveSemanticLookupEnabled) {
+      void this.startSemanticEnvironment(false);
+    }
   }
 
   onunload(): void {
     this.pendingScanService?.dispose();
+    void this.semanticEnvironment?.shutdown();
     this.stopScheduler("Plugin unloaded. Internal scheduler stopped.");
     if (this.currentProcess) {
       this.appendLog("Stopping active Mindmap run because the plugin is unloading.");
@@ -322,6 +342,34 @@ export default class MindmapPlugin extends Plugin {
 
   getResolvedRuntime(): ResolvedRuntime {
     return resolveRuntime(this.settings, this.getRuntimeContext());
+  }
+
+  getSemanticStatus(): SemanticEnvironmentStatus {
+    return this.semanticEnvironment?.getStatus() ?? {
+      state: "off",
+      message: "Semantic environment is off.",
+      health: null,
+    };
+  }
+
+  async startSemanticEnvironment(showNotice: boolean): Promise<void> {
+    if (!this.semanticEnvironment) {
+      return;
+    }
+    const status = await this.semanticEnvironment.start("current");
+    if (showNotice) {
+      new Notice(status.message, 8000);
+    }
+  }
+
+  async queryLiveRelated(path: string): Promise<LiveRelatedResponse> {
+    if (!this.settings.liveSemanticLookupEnabled) {
+      throw new Error("Live semantic lookup is disabled.");
+    }
+    if (!this.semanticEnvironment) {
+      throw new Error("Semantic environment is not available.");
+    }
+    return this.semanticEnvironment.queryRelated(path, this.settings.liveSemanticEnsureActiveNoteIndexed);
   }
 
   getSchedulerConfig(): SchedulerConfig {
@@ -1333,19 +1381,20 @@ export default class MindmapPlugin extends Plugin {
     if (isLaunchAgentSchedulerEnabled(this.settings.schedulerMode)) {
       const pending = this.getPendingSnapshot();
       const pendingLabel = pending.available ? `${pending.current.total} pending` : "pending n/a";
-      this.setStatusBarText(`Mindmap: ${pendingLabel} • LaunchAgent`);
+      this.setStatusBarText(`Mindmap: ${pendingLabel} • ${this.getSemanticStatus().state} • LaunchAgent`);
       return;
     }
 
     if (isSchedulerEnabled(this.settings.schedulerMode)) {
       const pending = this.getPendingSnapshot();
       const pendingLabel = pending.available ? `${pending.current.total} pending` : "pending n/a";
-      this.setStatusBarText(`Mindmap: ${pendingLabel} • next ${formatTimestamp(this.schedulerState.nextRunAt)}`);
+      this.setStatusBarText(`Mindmap: ${pendingLabel} • ${this.getSemanticStatus().state} • next ${formatTimestamp(this.schedulerState.nextRunAt)}`);
       return;
     }
 
     const pending = this.getPendingSnapshot();
-    this.setStatusBarText(pending.available ? `Mindmap: ${pending.current.total} pending` : "Mindmap: manual");
+    const semanticState = this.getSemanticStatus().state;
+    this.setStatusBarText(pending.available ? `Mindmap: ${pending.current.total} pending • ${semanticState}` : `Mindmap: manual • ${semanticState}`);
   }
 
   private getRuntimeContext(): RuntimeContext {
