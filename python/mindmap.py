@@ -1099,8 +1099,12 @@ def is_localhost_url(base_url: str) -> bool:
 
 def openai_compatible_url_port(base_url: str, default: int = 8000) -> int:
     parsed = urlparse(base_url)
-    if parsed.port is not None:
-        return parsed.port
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is not None:
+        return port
     if parsed.scheme == "https":
         return 443
     if parsed.scheme == "http":
@@ -1687,11 +1691,18 @@ def index_note(note: Note, chunks, notes_col, ctx: RuntimeContext, log_fn: Optio
 
     if not embeddings:
         return {"path": note.relpath, "indexed": False, "chunks": 0, "reason": "no_embeddings"}
+    if len(embeddings) != len(note_chunks):
+        return {
+            "path": note.relpath,
+            "indexed": False,
+            "chunks": 0,
+            "reason": "embedding_count_mismatch",
+        }
 
     ids = []
     metadatas = []
     documents = []
-    for i, (chunk, _emb) in enumerate(zip(note_chunks, embeddings)):
+    for i, (chunk, _emb) in enumerate(zip(note_chunks, embeddings, strict=True)):
         ids.append(f"{note.relpath}::chunk::{i}")
         metadatas.append({"path": note.relpath, "chunk": i})
         documents.append(chunk)
@@ -2198,12 +2209,19 @@ def main():
             if not embeddings:
                 log_event(f"[warn] Skipping {note.relpath}: no embeddings", to_stderr=True)
                 continue
+            if len(embeddings) != len(note_chunks):
+                log_event(
+                    f"[warn] Skipping {note.relpath}: embedding count mismatch "
+                    f"({len(embeddings)} embeddings for {len(note_chunks)} chunks)",
+                    to_stderr=True,
+                )
+                continue
 
             # Store chunks
             ids = []
             metadatas = []
             documents = []
-            for i, (chunk, emb) in enumerate(zip(note_chunks, embeddings)):
+            for i, (chunk, emb) in enumerate(zip(note_chunks, embeddings, strict=True)):
                 ids.append(f"{note.relpath}::chunk::{i}")
                 metadatas.append({"path": note.relpath, "chunk": i})
                 documents.append(chunk)

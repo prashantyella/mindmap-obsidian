@@ -126,7 +126,8 @@ class MindmapWorker:
             index_result = index_note(note, self.chunks, self.notes_col, self.ctx, log_fn=self.log)
             indexed = bool(index_result.get("indexed"))
             if indexed:
-                self.state["files"][note.relpath] = {"hash": content_hash}
+                persisted_hash = str(index_result.get("hash", content_hash))
+                self.state["files"][note.relpath] = {"hash": persisted_hash}
                 save_json(self.ctx.paths.state_path, self.state)
                 stale = False
 

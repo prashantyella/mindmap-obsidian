@@ -577,6 +577,9 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   private getDisplayCandidates(activeFile: TFile, persistedCandidates: RelatedCandidate[]): RelatedCandidate[] {
+    if (!this.plugin.settings.liveSemanticLookupEnabled) {
+      return persistedCandidates;
+    }
     const liveRelated = getDisplayLiveRelated(activeFile.path, this.liveState);
     if (liveRelated.length > 0) {
       return this.getLiveCandidates(activeFile, liveRelated);

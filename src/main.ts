@@ -1243,6 +1243,16 @@ export default class MindmapPlugin extends Plugin {
       }
     }
 
+    if (this.currentProcess) {
+      const message = "Mindmap is already running. Skipping the new request.";
+      this.appendLog(message);
+      if (trigger === "manual") {
+        new Notice(message, 8000);
+      }
+      this.updateStatusBar();
+      return;
+    }
+
     try {
       command = this.buildRuntimeCommand(profile.args);
     } catch (error) {

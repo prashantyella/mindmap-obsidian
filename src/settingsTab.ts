@@ -129,7 +129,7 @@ export class MindmapSettingTab extends PluginSettingTab {
               baseUrl: "http://localhost:8000/v1",
               model: "gemma-4-E4B-it-MLX-8bit",
               maxTokens: 1024,
-              enableThinking: true,
+              enableThinking: false,
             });
             this.display();
           });

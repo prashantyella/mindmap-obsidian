@@ -97,7 +97,7 @@ export class SemanticWorkerClient {
     this.stdoutBuffer = "";
     this.stderrBuffer = "";
     this.stopping = false;
-    this.child = spawn(this.options.runtime.command.command, [workerPath], {
+    this.child = spawn(this.options.runtime.command.command, [...this.options.runtime.command.args, workerPath], {
       cwd: this.options.runtime.command.cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });

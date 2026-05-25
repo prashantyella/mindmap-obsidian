@@ -242,9 +242,9 @@
   display: block;
   width: 16px;
   height: 16px;
-  border: 2px solid currentColor;
+  border: 2px solid currentcolor;
   border-right-color: transparent;
-  border-bottom-color: color-mix(in srgb, currentColor 35%, transparent);
+  border-bottom-color: color-mix(in srgb, currentcolor 35%, transparent);
   border-radius: 999px;
   animation: mindmap-loading-spin 0.75s linear infinite;
 }
@@ -652,7 +652,7 @@
   width: 14px;
   height: 14px;
   flex: 0 0 14px;
-  color: currentColor;
+  color: currentcolor;
 }
 
 .mindmap-status-swirling::before,
@@ -660,7 +660,7 @@
   position: absolute;
   content: "";
   border-style: solid;
-  border-color: currentColor;
+  border-color: currentcolor;
   border-radius: 999px;
   animation: mindmap-swirling-spin 0.8s linear infinite;
 }
