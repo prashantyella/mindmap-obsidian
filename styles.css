@@ -216,44 +216,36 @@
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.mindmap-linking-indicator {
-  position: absolute;
-  top: 18px;
-  right: 20px;
-  z-index: 3;
+.mindmap-loading-state {
   display: flex;
-  width: 28px;
-  height: 28px;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--background-primary) 88%, var(--interactive-accent));
+  min-height: 120px;
+  padding: 25px;
+}
+
+.mindmap-loading-spinner {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
   color: var(--text-accent);
-  pointer-events: none;
 }
 
-.mindmap-linking-symbol {
+.mindmap-loading-spinner-icon {
   display: block;
-  font-family: "Geist Mono", var(--font-monospace);
-  font-size: 17px;
-  line-height: 1;
-  animation: mindmap-linking-pulse 1.1s ease-in-out infinite;
+  width: 16px;
+  height: 16px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-bottom-color: color-mix(in srgb, currentColor 35%, transparent);
+  border-radius: 999px;
+  animation: mindmap-loading-spin 0.75s linear infinite;
 }
 
-@keyframes mindmap-linking-pulse {
-  0% {
-    opacity: 0.45;
-    transform: rotate(0deg) scale(0.84);
-  }
-
-  50% {
-    opacity: 1;
-    transform: rotate(180deg) scale(1.08);
-  }
-
-  100% {
-    opacity: 0.45;
+@keyframes mindmap-loading-spin {
+  to {
     transform: rotate(360deg) scale(0.84);
   }
 }
@@ -696,8 +688,8 @@
     animation-duration: 1.8s;
   }
 
-  .mindmap-linking-symbol {
-    animation-duration: 2.2s;
+  .mindmap-loading-spinner-icon {
+    animation-duration: 1.6s;
   }
 }
 

@@ -180,6 +180,17 @@ function formatLiveDetail(candidate: RelatedCandidate): string | null {
   return `Live ${kind} match (${percent}%).`;
 }
 
+function renderLoadingSpinner(container: HTMLElement): void {
+  const spinner = container.createDiv({
+    cls: "mindmap-loading-spinner",
+    attr: {
+      role: "status",
+      "aria-label": "Loading",
+    },
+  });
+  spinner.createSpan({ cls: "mindmap-loading-spinner-icon" });
+}
+
 export class MindmapWorkspaceView extends ItemView {
   private activePath: string | null = null;
   private expandedPath: string | null | undefined = undefined;
@@ -262,18 +273,13 @@ export class MindmapWorkspaceView extends ItemView {
 
     if (candidates.length === 0) {
       if (this.liveState.status === "loading") {
-        this.renderLinkingIndicator(shell);
-        this.renderEmpty(shell, "Finding mindmap connections", "Mindmap is linking this note.");
+        this.renderLoadingState(shell);
       } else if (this.liveState.status === "error") {
         this.renderEmpty(shell, "Live links unavailable", this.liveState.error ?? "Mindmap could not query live semantic links.");
       } else {
         this.renderEmpty(shell, "No mindmap connections", "No mindmap connections exist for this note.");
       }
       return;
-    }
-
-    if (this.liveState.status === "loading") {
-      this.renderLinkingIndicator(shell);
     }
 
     this.renderHeatmap(shell, candidates);
@@ -329,14 +335,9 @@ export class MindmapWorkspaceView extends ItemView {
       });
   }
 
-  private renderLinkingIndicator(container: HTMLElement): void {
-    const indicator = container.createDiv({
-      cls: "mindmap-linking-indicator",
-      attr: {
-        "aria-label": "Mindmap linking in progress",
-      },
-    });
-    indicator.createSpan({ cls: "mindmap-linking-symbol", text: "◇" });
+  private renderLoadingState(container: HTMLElement): void {
+    const loading = container.createDiv({ cls: "mindmap-loading-state" });
+    renderLoadingSpinner(loading);
   }
 
   private renderHeatmap(container: HTMLElement, candidates: RelatedCandidate[]): void {
@@ -560,6 +561,11 @@ export class MindmapWorkspaceView extends ItemView {
     const heatmap = container.querySelector(".mindmap-heatmap-chart");
     if (heatmap instanceof SVGSVGElement) {
       animate(heatmap, { opacity: [0.72, 1], scale: [0.985, 1] }, { duration: 0.18, ease: "easeOut" });
+    }
+
+    if (rows.length > 0) {
+      const loadedSurface = Array.from(container.querySelectorAll(".mindmap-heatmap, .mindmap-sidebar-list"));
+      animate(loadedSurface, { opacity: [0, 1], y: [10, 0] }, { duration: 0.22, ease: "easeOut" });
     }
   }
 
