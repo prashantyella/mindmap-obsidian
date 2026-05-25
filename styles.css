@@ -216,14 +216,6 @@
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.mindmap-loading-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 120px;
-  padding: 25px;
-}
-
 .mindmap-inline-loading {
   position: absolute;
   top: 18px;
