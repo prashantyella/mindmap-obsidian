@@ -224,6 +224,22 @@
   padding: 25px;
 }
 
+.mindmap-inline-loading {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  z-index: 3;
+  display: flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--background-primary) 88%, var(--interactive-accent));
+  pointer-events: none;
+}
+
 .mindmap-loading-spinner {
   display: inline-flex;
   width: 18px;

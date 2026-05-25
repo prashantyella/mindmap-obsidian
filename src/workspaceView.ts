@@ -266,7 +266,8 @@ export class MindmapWorkspaceView extends ItemView {
 
     this.ensureLiveQuery(activeFile);
 
-    const candidates = this.getDisplayCandidates(activeFile);
+    const persistedCandidates = this.getRelatedCandidates(activeFile);
+    const candidates = this.getDisplayCandidates(activeFile, persistedCandidates);
     if (candidates.length > 0 && this.expandedPath === undefined) {
       this.expandedPath = candidates[0].path;
     }
@@ -280,6 +281,10 @@ export class MindmapWorkspaceView extends ItemView {
         this.renderEmpty(shell, "No mindmap connections", "No mindmap connections exist for this note.");
       }
       return;
+    }
+
+    if (this.liveState.status === "loading") {
+      this.renderInlineLoadingIndicator(shell);
     }
 
     this.renderHeatmap(shell, candidates);
@@ -338,6 +343,11 @@ export class MindmapWorkspaceView extends ItemView {
   private renderLoadingState(container: HTMLElement): void {
     const loading = container.createDiv({ cls: "mindmap-loading-state" });
     renderLoadingSpinner(loading);
+  }
+
+  private renderInlineLoadingIndicator(container: HTMLElement): void {
+    const indicator = container.createDiv({ cls: "mindmap-inline-loading" });
+    renderLoadingSpinner(indicator);
   }
 
   private renderHeatmap(container: HTMLElement, candidates: RelatedCandidate[]): void {
@@ -580,14 +590,14 @@ export class MindmapWorkspaceView extends ItemView {
     return positions;
   }
 
-  private getDisplayCandidates(activeFile: TFile): RelatedCandidate[] {
+  private getDisplayCandidates(activeFile: TFile, persistedCandidates: RelatedCandidate[]): RelatedCandidate[] {
     const liveRelated = this.liveState.path === activeFile.path && this.liveState.status === "ready"
       ? this.liveState.response?.related ?? []
       : [];
     if (liveRelated.length > 0) {
       return this.getLiveCandidates(activeFile, liveRelated);
     }
-    return this.getRelatedCandidates(activeFile);
+    return persistedCandidates;
   }
 
   private getLiveCandidates(activeFile: TFile, related: LiveRelatedResult[]): RelatedCandidate[] {
