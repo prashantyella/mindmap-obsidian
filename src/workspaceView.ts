@@ -2,7 +2,18 @@ import { ItemView, TFile, WorkspaceLeaf } from "obsidian";
 import { animate } from "motion";
 
 import type MindmapPlugin from "./main";
-import type { LiveRelatedResponse, LiveRelatedResult } from "./semanticTypes";
+import type { LiveRelatedResult } from "./semanticTypes";
+import {
+  createErrorLiveState,
+  createIdleLiveState,
+  createLoadingLiveState,
+  createReadyLiveState,
+  getDisplayLiveRelated,
+  NO_MINDMAP_CONNECTIONS_MESSAGE,
+  NO_MINDMAP_CONNECTIONS_TITLE,
+  shouldApplyLiveResponse,
+  type SidebarLiveState,
+} from "./workspaceViewState";
 
 export const MINDMAP_VIEW_TYPE = "mindmap-ai-view";
 
@@ -26,13 +37,6 @@ interface RelatedCandidate {
   heatmap: HeatmapCell[];
   liveScore?: number;
   liveKind?: string;
-}
-
-interface LiveState {
-  path: string;
-  status: "idle" | "loading" | "ready" | "error";
-  response: LiveRelatedResponse | null;
-  error: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -196,7 +200,7 @@ export class MindmapWorkspaceView extends ItemView {
   private expandedPath: string | null | undefined = undefined;
   private renderedExpandedPath: string | null | undefined = undefined;
   private liveRequestId = 0;
-  private liveState: LiveState = {
+  private liveState: SidebarLiveState = {
     path: "",
     status: "idle",
     response: null,
@@ -226,12 +230,7 @@ export class MindmapWorkspaceView extends ItemView {
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.render()));
     this.registerEvent(this.app.metadataCache.on("changed", (file) => {
       if (file.path === this.activePath) {
-        this.liveState = {
-          path: file.path,
-          status: "idle",
-          response: this.liveState.response,
-          error: null,
-        };
+        this.liveState = createIdleLiveState(file.path, this.liveState.response);
       }
       this.render();
     }));
@@ -260,12 +259,7 @@ export class MindmapWorkspaceView extends ItemView {
       this.activePath = activeFile.path;
       this.expandedPath = undefined;
       this.renderedExpandedPath = undefined;
-      this.liveState = {
-        path: activeFile.path,
-        status: "idle",
-        response: null,
-        error: null,
-      };
+      this.liveState = createIdleLiveState(activeFile.path);
     }
 
     this.ensureLiveQuery(activeFile);
@@ -281,7 +275,7 @@ export class MindmapWorkspaceView extends ItemView {
         this.renderInlineLoadingIndicator(shell);
       }
       this.renderedExpandedPath = this.expandedPath;
-      this.renderEmpty(shell, "No mindmap connections", "No mindmap connections exist for this note.");
+      this.renderEmpty(shell, NO_MINDMAP_CONNECTIONS_TITLE, NO_MINDMAP_CONNECTIONS_MESSAGE);
       return;
     }
 
@@ -309,37 +303,21 @@ export class MindmapWorkspaceView extends ItemView {
     }
 
     const requestId = ++this.liveRequestId;
-    const previousResponse = this.liveState.path === activeFile.path ? this.liveState.response : null;
-    this.liveState = {
-      path: activeFile.path,
-      status: "loading",
-      response: previousResponse,
-      error: null,
-    };
+    this.liveState = createLoadingLiveState(activeFile.path, this.liveState);
 
     void this.plugin.queryLiveRelated(activeFile.path)
       .then((response) => {
-        if (requestId !== this.liveRequestId || this.activePath !== activeFile.path) {
+        if (!shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
           return;
         }
-        this.liveState = {
-          path: activeFile.path,
-          status: "ready",
-          response,
-          error: null,
-        };
+        this.liveState = createReadyLiveState(activeFile.path, response);
         this.render();
       })
       .catch((error) => {
-        if (requestId !== this.liveRequestId || this.activePath !== activeFile.path) {
+        if (!shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
           return;
         }
-        this.liveState = {
-          path: activeFile.path,
-          status: "error",
-          response: this.liveState.path === activeFile.path ? this.liveState.response : null,
-          error: error instanceof Error ? error.message : String(error),
-        };
+        this.liveState = createErrorLiveState(activeFile.path, this.liveState, error);
         this.render();
       });
   }
@@ -599,9 +577,7 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   private getDisplayCandidates(activeFile: TFile, persistedCandidates: RelatedCandidate[]): RelatedCandidate[] {
-    const liveRelated = this.liveState.path === activeFile.path
-      ? this.liveState.response?.related ?? []
-      : [];
+    const liveRelated = getDisplayLiveRelated(activeFile.path, this.liveState);
     if (liveRelated.length > 0) {
       return this.getLiveCandidates(activeFile, liveRelated);
     }
