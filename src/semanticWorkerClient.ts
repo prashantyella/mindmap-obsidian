@@ -15,11 +15,13 @@ interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: NodeJS.Timeout;
+  method: SemanticWorkerMethod;
 }
 
 export interface SemanticWorkerClientOptions {
   runtime: ResolvedRuntime;
   requestTimeoutMs?: number;
+  onExit?: (error: Error) => void;
 }
 
 export class SemanticWorkerClient {
@@ -29,6 +31,7 @@ export class SemanticWorkerClient {
   private stdoutBuffer = "";
   private stderrBuffer = "";
   private readonly requestTimeoutMs: number;
+  private stopping = false;
 
   constructor(private readonly options: SemanticWorkerClientOptions) {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
@@ -79,6 +82,7 @@ export class SemanticWorkerClient {
     if (!this.child) {
       return;
     }
+    this.stopping = true;
     try {
       await this.request("shutdown", {});
     } finally {
@@ -90,6 +94,9 @@ export class SemanticWorkerClient {
 
   private spawnWorker(): void {
     const workerPath = path.join(path.dirname(this.options.runtime.scriptPath), "mindmap_worker.py");
+    this.stdoutBuffer = "";
+    this.stderrBuffer = "";
+    this.stopping = false;
     this.child = spawn(this.options.runtime.command.command, [workerPath], {
       cwd: this.options.runtime.command.cwd,
       stdio: ["pipe", "pipe", "pipe"],
@@ -101,12 +108,21 @@ export class SemanticWorkerClient {
       this.stderrBuffer = (this.stderrBuffer + chunk).slice(-8000);
     });
     this.child.on("exit", (code, signal) => {
-      this.rejectAll(new Error(`Mindmap semantic worker exited (${code ?? signal ?? "unknown"}). ${this.stderrBuffer}`.trim()));
+      const error = new Error(`Mindmap semantic worker exited (${code ?? signal ?? "unknown"}). ${this.stderrBuffer}`.trim());
+      this.rejectAll(error);
       this.child = null;
+      if (!this.stopping) {
+        this.options.onExit?.(error);
+      }
+      this.stopping = false;
     });
     this.child.on("error", (error) => {
       this.rejectAll(error);
       this.child = null;
+      if (!this.stopping) {
+        this.options.onExit?.(error);
+      }
+      this.stopping = false;
     });
   }
 
@@ -124,12 +140,16 @@ export class SemanticWorkerClient {
     return new Promise<TResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Mindmap semantic worker request timed out: ${method}`));
+        const error = new Error(`Mindmap semantic worker request timed out: ${method}`);
+        reject(error);
+        this.rejectAll(error);
+        this.child?.kill();
       }, this.requestTimeoutMs);
       this.pending.set(id, {
         resolve: resolve as (value: unknown) => void,
         reject,
         timer,
+        method,
       });
       child.stdin.write(payload, "utf8", (error) => {
         if (!error) {
