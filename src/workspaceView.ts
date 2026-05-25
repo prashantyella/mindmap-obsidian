@@ -551,16 +551,17 @@ export class MindmapWorkspaceView extends ItemView {
         const path = row.dataset.path;
         const previous = path ? previousCardPositions.get(path) : undefined;
         const current = row.getBoundingClientRect();
-        const fromY = previous ? previous.top - current.top : 8;
-        animate(row, { opacity: [previous ? 1 : 0.82, 1], y: [fromY, 0] }, { duration: 0.24, delay: previous ? 0 : index * 0.018, ease: "easeOut" });
+        if (previous === undefined) {
+          animate(row, { opacity: [0.82, 1], y: [8, 0] }, { duration: 0.2, delay: index * 0.018, ease: "easeOut" });
+          return;
+        }
+
+        const fromY = previous.top - current.top;
+        if (Math.abs(fromY) > 0.5) {
+          animate(row, { y: [fromY, 0] }, { duration: 0.24, ease: "easeOut" });
+        }
       });
     }
-
-    const detail = container.querySelector(".mindmap-sidebar-card.is-expanded .mindmap-sidebar-detail");
-    if (detail instanceof HTMLElement) {
-      animate(detail, { opacity: [0, 1], y: [-6, 0] }, { duration: 0.18, ease: "easeOut" });
-    }
-
   }
 
   private captureCardPositions(container: HTMLElement): Map<string, DOMRect> {

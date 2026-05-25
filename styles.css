@@ -226,9 +226,6 @@
   height: 28px;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--background-primary) 88%, var(--interactive-accent));
   pointer-events: none;
 }
 
@@ -254,7 +251,7 @@
 
 @keyframes mindmap-loading-spin {
   to {
-    transform: rotate(360deg) scale(0.84);
+    transform: rotate(360deg);
   }
 }
 
