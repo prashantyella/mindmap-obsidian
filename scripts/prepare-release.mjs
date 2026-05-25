@@ -13,7 +13,7 @@ for (const file of ["main.js", "manifest.json", "styles.css"]) {
   await fs.promises.copyFile(path.join(root, "dist", file), path.join(releaseDir, file));
 }
 
-for (const file of ["mindmap.py", "requirements.txt", "config.template.json"]) {
+for (const file of ["mindmap.py", "mindmap_worker.py", "requirements.txt", "config.template.json"]) {
   await fs.promises.copyFile(path.join(root, "python", file), path.join(bundleDir, file));
 }
 

@@ -40,6 +40,38 @@ class Note:
     body: str
 
 
+@dataclass
+class RuntimePaths:
+    config_path: Path
+    vault_root: Path
+    db_path: Path
+    state_path: Path
+    log_path: Path
+    preview_path: Path
+
+
+@dataclass
+class RuntimeContext:
+    config: Dict
+    paths: RuntimePaths
+    embed_settings: Dict
+    llm_settings: Dict
+    embed_model: str
+    llm_model: str
+    mindmap_heading: str
+    write_mindmap_section: bool
+    related_strategy: str
+    related_candidate_limit: int
+    related_overreach: int
+    related_creative: int
+    related_creative_min: float
+    related_creative_max: float
+    ollama_embed_timeout: int
+    ollama_llm_timeout: int
+    ollama_retries: int
+    ollama_backoff: float
+
+
 def diagnostic_line(level: str, code: str, message: str, guidance: Optional[str] = None, context: Optional[Dict] = None) -> str:
     parts = [f"[{level}][{code}] {message}"]
     if guidance:
@@ -1464,6 +1496,296 @@ def run_preflight(config_path: Path) -> Dict:
         "checks": checks,
         "config_path": str(config_path),
     }
+
+
+def load_runtime_context(config_path: Path) -> RuntimeContext:
+    config, config_check = load_config_with_diagnostics(config_path)
+    if config is None:
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                config_check["code"],
+                config_check["message"],
+                guidance=config_check.get("guidance"),
+                context=config_check.get("context"),
+            )
+        )
+
+    vault_root = Path(config.get("vault_root", "."))
+    if not vault_root.is_absolute():
+        vault_root = (config_path.parent / vault_root).resolve()
+
+    embed_settings = get_embed_settings(config)
+    llm_settings = get_llm_settings(config)
+    if embed_settings["provider"] != "ollama":
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "EMBED_PROVIDER_UNSUPPORTED",
+                f"Unsupported embed_provider: {embed_settings['provider']}",
+                guidance="Use embed_provider `ollama`; non-Ollama embedding providers are not supported yet.",
+                context={"embed_provider": embed_settings["provider"]},
+            )
+        )
+    if llm_settings["provider"] not in {"ollama", "openai_compatible"}:
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "LLM_PROVIDER_UNSUPPORTED",
+                f"Unsupported llm_provider: {llm_settings['provider']}",
+                guidance="Use llm_provider `ollama` or `openai_compatible`.",
+                context={"llm_provider": llm_settings["provider"]},
+            )
+        )
+
+    ollama_timeout = int(config.get("ollama_timeout_seconds", 120))
+    paths = RuntimePaths(
+        config_path=config_path,
+        vault_root=vault_root,
+        db_path=vault_root / config["db_path"],
+        state_path=vault_root / config["state_path"],
+        log_path=vault_root / config["log_path"],
+        preview_path=vault_root / config.get("preview_log_path", "Scripts/_Mindmap/_logs/preview.jsonl"),
+    )
+    return RuntimeContext(
+        config=config,
+        paths=paths,
+        embed_settings=embed_settings,
+        llm_settings=llm_settings,
+        embed_model=embed_settings["model"],
+        llm_model=llm_settings["model"],
+        mindmap_heading=config.get("mindmap_heading", config.get("related_heading", "## Mindmap")),
+        write_mindmap_section=config.get("write_mindmap_section", config.get("write_related_section", False)),
+        related_strategy=config.get("related_strategy", "chunk"),
+        related_candidate_limit=config.get("related_candidate_limit", 40),
+        related_overreach=config.get("related_overreach", 2),
+        related_creative=config.get("related_creative", 2),
+        related_creative_min=config.get("related_creative_min", 0.45),
+        related_creative_max=config.get("related_creative_max", 0.7),
+        ollama_embed_timeout=int(config.get("ollama_embed_timeout_seconds", ollama_timeout)),
+        ollama_llm_timeout=int(config.get("ollama_llm_timeout_seconds", ollama_timeout)),
+        ollama_retries=int(config.get("ollama_retries", 1)),
+        ollama_backoff=float(config.get("ollama_backoff_seconds", 2.0)),
+    )
+
+
+def resolve_notes_paths(config: Dict, scope: str = "default") -> List[str]:
+    if scope == "all" and "notes_paths_all" in config:
+        return config["notes_paths_all"]
+    if scope == "current" and "notes_paths_current" in config:
+        return config["notes_paths_current"]
+    if "notes_paths" in config:
+        return config["notes_paths"]
+    return [config["notes_path"]]
+
+
+def open_collections(db_path: Path, rebuild: bool = False):
+    try:
+        import chromadb
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "DEPENDENCY_CHROMADB_MISSING",
+                f"chromadb import failed: {exc}",
+                guidance=dependency_install_guidance(),
+            )
+        ) from exc
+
+    try:
+        client = chromadb.PersistentClient(path=str(db_path))
+    except Exception as exc:
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "CHROMADB_INIT_FAILED",
+                f"Failed to initialize ChromaDB: {exc}",
+                guidance="Check db_path permissions and clear any corrupted local database before retrying.",
+                context={"db_path": str(db_path)},
+            )
+        ) from exc
+
+    chunks_collection = "mindmap_chunks"
+    notes_collection = "mindmap_notes"
+    if rebuild:
+        for collection_name in (chunks_collection, notes_collection):
+            try:
+                client.delete_collection(collection_name)
+            except Exception:
+                pass
+
+    chunks = client.get_or_create_collection(name=chunks_collection, metadata={"hnsw:space": "cosine"})
+    notes_col = client.get_or_create_collection(name=notes_collection, metadata={"hnsw:space": "cosine"})
+    return client, chunks, notes_col
+
+
+def load_note_by_relpath(vault_root: Path, relpath: str, related_heading: str, min_words: int = 0) -> Note:
+    target, issue = resolve_vault_markdown_write_target(vault_root, relpath)
+    if issue:
+        raise RuntimeError(diagnostic_line(issue["level"], issue["code"], issue["message"], issue.get("guidance"), issue.get("context")))
+    if target is None or not target.exists() or not target.is_file():
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "NOTE_NOT_FOUND",
+                f"Note not found: {relpath}",
+                guidance="Use a vault-relative Markdown path that exists.",
+                context={"path": relpath},
+            )
+        )
+    text = target.read_text(encoding="utf-8", errors="ignore")
+    _fm, body = parse_frontmatter(text)
+    body = strip_related_section(body, related_heading)
+    if min_words and len(body.split()) < min_words:
+        raise RuntimeError(
+            diagnostic_line(
+                "warn",
+                "NOTE_TOO_SHORT",
+                f"Note is below the configured minimum word count: {relpath}",
+                context={"path": relpath, "min_words": min_words},
+            )
+        )
+    return Note(path=target, relpath=target.relative_to(vault_root).as_posix(), title=target.stem, body=body)
+
+
+def list_notes_from_relpaths(vault_root: Path, relpaths: List[str], min_words: int, related_heading: str) -> List[Note]:
+    notes = []
+    for relpath in relpaths:
+        try:
+            notes.append(load_note_by_relpath(vault_root, relpath, related_heading, min_words=min_words))
+        except RuntimeError:
+            continue
+    return notes
+
+
+def index_note(note: Note, chunks, notes_col, ctx: RuntimeContext, log_fn: Optional[Callable[[str], None]] = None) -> Dict:
+    note_chunks = chunk_text(
+        note.body,
+        ctx.config["chunk_target_tokens"],
+        ctx.config["chunk_overlap_tokens"],
+    )
+    if not note_chunks:
+        return {"path": note.relpath, "indexed": False, "chunks": 0, "reason": "empty"}
+
+    chunks.delete(where={"path": note.relpath})
+    notes_col.delete(where={"path": note.relpath})
+
+    embeddings = []
+    batch_size = 16
+    for i in range(0, len(note_chunks), batch_size):
+        batch = note_chunks[i : i + batch_size]
+        batch_embeddings = embed_texts(
+            ctx.embed_settings["base_url"],
+            ctx.embed_model,
+            batch,
+            timeout=ctx.ollama_embed_timeout,
+            retries=ctx.ollama_retries,
+            backoff_seconds=ctx.ollama_backoff,
+            log_fn=log_fn,
+        )
+        embeddings.extend(batch_embeddings)
+
+    if not embeddings:
+        return {"path": note.relpath, "indexed": False, "chunks": 0, "reason": "no_embeddings"}
+
+    ids = []
+    metadatas = []
+    documents = []
+    for i, (chunk, _emb) in enumerate(zip(note_chunks, embeddings)):
+        ids.append(f"{note.relpath}::chunk::{i}")
+        metadatas.append({"path": note.relpath, "chunk": i})
+        documents.append(chunk)
+    chunks.add(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
+
+    note_embedding = average_vectors(embeddings)
+    notes_col.add(
+        ids=[f"{note.relpath}::note"],
+        embeddings=[note_embedding],
+        metadatas=[{"path": note.relpath, "title": note.title}],
+        documents=[note.body[:2000]],
+    )
+    return {"path": note.relpath, "indexed": True, "chunks": len(note_chunks), "hash": file_signature(note.body)}
+
+
+def delete_note_from_index(relpath: str, chunks, notes_col, state_files: Dict) -> Dict:
+    chunks.delete(where={"path": relpath})
+    notes_col.delete(where={"path": relpath})
+    state_files.pop(relpath, None)
+    return {"path": relpath, "deleted": True}
+
+
+def note_is_indexed(notes_col, relpath: str) -> bool:
+    data = notes_col.get(ids=[f"{relpath}::note"])
+    return bool(data.get("ids"))
+
+
+def query_related_for_note(
+    note: Note,
+    chunks,
+    notes_col,
+    ctx: RuntimeContext,
+    allowed_paths: set,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> List[Dict]:
+    if ctx.related_strategy == "chunk":
+        candidates = related_from_chunks(
+            chunks,
+            note.relpath,
+            ctx.related_candidate_limit,
+            ctx.config.get("related_min_score", 0.0),
+        )
+        candidates = [(p, s) for p, s in candidates if p in allowed_paths]
+    else:
+        note_id = f"{note.relpath}::note"
+        data = notes_col.get(ids=[note_id], include=["embeddings", "metadatas"])
+        embeddings = data.get("embeddings")
+        if embeddings is None or (hasattr(embeddings, "size") and embeddings.size == 0) or len(embeddings) == 0:
+            embedded = embed_texts(
+                ctx.embed_settings["base_url"],
+                ctx.embed_model,
+                [note.body[:4000]],
+                timeout=ctx.ollama_embed_timeout,
+                retries=ctx.ollama_retries,
+                backoff_seconds=ctx.ollama_backoff,
+                log_fn=log_fn,
+            )
+            note_embedding = embedded[0]
+        else:
+            note_embedding = embeddings[0]
+        results = notes_col.query(
+            query_embeddings=[note_embedding],
+            n_results=max(10, ctx.config["related_limit"] + 1),
+            include=["metadatas", "distances"],
+        )
+        candidates = []
+        metas = results.get("metadatas", [[]])[0]
+        dists = results.get("distances", [[]])[0] if results.get("distances") else [None] * len(metas)
+        for meta, dist in zip(metas, dists):
+            path = meta.get("path")
+            if path and path != note.relpath and path in allowed_paths:
+                score = 1 - dist if dist is not None else 0.0
+                if score >= ctx.config.get("related_min_score", 0.0):
+                    candidates.append((path, score))
+
+    score_by_path = {path: score for path, score in candidates}
+    selected = select_mindmap_links(
+        candidates,
+        note.relpath,
+        ctx.config["related_limit"],
+        ctx.related_overreach,
+        ctx.related_creative,
+        ctx.related_creative_min,
+        ctx.related_creative_max,
+    )
+    return [
+        {
+            "path": path,
+            "score": score_by_path.get(path, 0.0),
+            "kind": kind,
+            "title": Path(path).stem,
+        }
+        for path, kind in selected
+    ]
 
 
 def main():

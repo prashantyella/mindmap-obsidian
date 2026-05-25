@@ -2,6 +2,7 @@ import path from "node:path";
 
 export const REQUIRED_RUNTIME_ASSET_NAMES = [
   "mindmap.py",
+  "mindmap_worker.py",
   "requirements.txt",
   "config.template.json",
 ] as const;
