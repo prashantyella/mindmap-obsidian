@@ -33,6 +33,7 @@ class MemoryFs implements RuntimeAssetFs {
 
 const assets: BundledRuntimeAssets = {
   "mindmap.py": "print('mindmap')\n",
+  "mindmap_worker.py": "print('worker')\n",
   "requirements.txt": "chromadb\n",
   "config.template.json": '{"vault_root":"../../../../"}\n',
 };
@@ -44,9 +45,10 @@ void test("ensureBundledRuntimeAssets repairs missing runtime files and creates 
   const result = await ensureBundledRuntimeAssets(runtimeDir, assets, fs);
 
   assert.equal(result.ok, true);
-  assert.deepEqual(result.recovered.sort(), ["config.template.json", "mindmap.py", "requirements.txt"]);
+  assert.deepEqual(result.recovered.sort(), ["config.template.json", "mindmap.py", "mindmap_worker.py", "requirements.txt"]);
   assert.equal(result.configCreated, true);
   assert.equal(fs.files.get(path.join(runtimeDir, "mindmap.py")), assets["mindmap.py"]);
+  assert.equal(fs.files.get(path.join(runtimeDir, "mindmap_worker.py")), assets["mindmap_worker.py"]);
   assert.equal(fs.files.get(path.join(runtimeDir, "requirements.txt")), assets["requirements.txt"]);
   assert.equal(fs.files.get(path.join(runtimeDir, "config.template.json")), assets["config.template.json"]);
   assert.equal(fs.files.get(path.join(runtimeDir, "config.json")), assets["config.template.json"]);
@@ -56,6 +58,7 @@ void test("ensureBundledRuntimeAssets leaves existing runtime files untouched", 
   const runtimeDir = path.normalize("/vault/config/plugins/mindmap-ai/python");
   const fs = new MemoryFs({
     [path.join(runtimeDir, "mindmap.py")]: "custom script\n",
+    [path.join(runtimeDir, "mindmap_worker.py")]: "custom worker\n",
     [path.join(runtimeDir, "requirements.txt")]: "custom req\n",
     [path.join(runtimeDir, "config.template.json")]: "custom template\n",
     [path.join(runtimeDir, "config.json")]: "custom config\n",

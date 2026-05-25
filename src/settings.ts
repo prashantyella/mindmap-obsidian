@@ -11,6 +11,8 @@ export interface MindmapSettings {
   launchAgentWeeklyEnabled: boolean;
   launchAgentWeeklyHour: number;
   launchAgentWeeklyMinute: number;
+  liveSemanticLookupEnabled: boolean;
+  liveSemanticEnsureActiveNoteIndexed: boolean;
 }
 
 export const DEFAULT_SETTINGS: MindmapSettings = {
@@ -24,6 +26,8 @@ export const DEFAULT_SETTINGS: MindmapSettings = {
   launchAgentWeeklyEnabled: true,
   launchAgentWeeklyHour: 3,
   launchAgentWeeklyMinute: 0,
+  liveSemanticLookupEnabled: true,
+  liveSemanticEnsureActiveNoteIndexed: true,
 };
 
 export type RuntimeField = "pythonCommand" | "scriptPath" | "configPath";

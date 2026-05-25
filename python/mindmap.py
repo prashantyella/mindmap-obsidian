@@ -5,10 +5,13 @@ Default scope comes from config.json. Designed to be safe: no note changes unles
 """
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -17,6 +20,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Callable
 from urllib import request
+from urllib.parse import urlparse
 
 try:
     from ruamel.yaml import YAML
@@ -34,6 +38,38 @@ class Note:
     relpath: str
     title: str
     body: str
+
+
+@dataclass
+class RuntimePaths:
+    config_path: Path
+    vault_root: Path
+    db_path: Path
+    state_path: Path
+    log_path: Path
+    preview_path: Path
+
+
+@dataclass
+class RuntimeContext:
+    config: Dict
+    paths: RuntimePaths
+    embed_settings: Dict
+    llm_settings: Dict
+    embed_model: str
+    llm_model: str
+    mindmap_heading: str
+    write_mindmap_section: bool
+    related_strategy: str
+    related_candidate_limit: int
+    related_overreach: int
+    related_creative: int
+    related_creative_min: float
+    related_creative_max: float
+    ollama_embed_timeout: int
+    ollama_llm_timeout: int
+    ollama_retries: int
+    ollama_backoff: float
 
 
 def diagnostic_line(level: str, code: str, message: str, guidance: Optional[str] = None, context: Optional[Dict] = None) -> str:
@@ -1056,6 +1092,172 @@ def fetch_openai_compatible_models(base_url: str, api_key: str, timeout: int) ->
     return models
 
 
+def is_localhost_url(base_url: str) -> bool:
+    parsed = urlparse(base_url)
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def openai_compatible_url_port(base_url: str, default: int = 8000) -> int:
+    parsed = urlparse(base_url)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is not None:
+        return port
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    return default
+
+
+def should_manage_omlx_server(config: Dict, llm_settings: Dict) -> bool:
+    raw_setting = config.get("omlx_auto_manage", "auto")
+    if raw_setting is False:
+        return False
+    if llm_settings.get("provider") != "openai_compatible":
+        return False
+
+    base_url = str(llm_settings.get("base_url", ""))
+    if not is_localhost_url(base_url):
+        return False
+    if raw_setting is True:
+        return True
+
+    model = str(llm_settings.get("model", "")).lower()
+    return "mlx" in model or openai_compatible_url_port(base_url) == 8000
+
+
+def build_omlx_server_command(config: Dict, llm_settings: Dict) -> List[str]:
+    configured_command = config.get("omlx_server_command")
+    if isinstance(configured_command, list) and all(isinstance(part, str) for part in configured_command):
+        return configured_command
+    if isinstance(configured_command, str) and configured_command.strip():
+        return shlex.split(configured_command)
+
+    base_path = Path(str(config.get("omlx_base_path", "~/.omlx"))).expanduser()
+    port = int(config.get("omlx_port", openai_compatible_url_port(str(llm_settings.get("base_url", "")))))
+    configured_python = str(config.get("omlx_python_command", "")).strip()
+    app_cli = Path("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
+    if app_cli.exists() and not configured_python:
+        return [
+            str(app_cli),
+            "serve",
+            "--base-path",
+            str(base_path),
+            "--port",
+            str(port),
+        ]
+
+    app_python = Path("/Applications/oMLX.app/Contents/MacOS/python3")
+    if configured_python:
+        python_command = configured_python
+    elif app_python.exists():
+        python_command = str(app_python)
+    else:
+        python_command = "python3"
+
+    return [
+        python_command,
+        "-m",
+        "omlx.cli",
+        "serve",
+        "--base-path",
+        str(base_path),
+        "--port",
+        str(port),
+    ]
+
+
+def probe_openai_compatible_server(base_url: str, api_key: str, timeout: int = 3) -> bool:
+    try:
+        fetch_openai_compatible_models(base_url, api_key, timeout)
+        return True
+    except Exception:
+        return False
+
+
+def start_managed_omlx_server(
+    config: Dict,
+    llm_settings: Dict,
+    log_fn: Callable[[str], None],
+) -> Optional[subprocess.Popen]:
+    if not should_manage_omlx_server(config, llm_settings):
+        return None
+
+    base_url = str(llm_settings.get("base_url", ""))
+    api_key = str(llm_settings.get("api_key", ""))
+    probe_timeout = int(config.get("omlx_probe_timeout_seconds", 3))
+    if probe_openai_compatible_server(base_url, api_key, timeout=probe_timeout):
+        log_fn(f"[omlx] Server already running at {base_url}; leaving it running after this run.")
+        return None
+
+    command = build_omlx_server_command(config, llm_settings)
+    base_path = Path(str(config.get("omlx_base_path", "~/.omlx"))).expanduser()
+    log_dir = base_path / "logs"
+    ensure_dir(log_dir)
+    log_path = log_dir / "mindmap-omlx-server.log"
+    log_handle = log_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    finally:
+        log_handle.close()
+
+    log_fn(f"[omlx] Started server for this run: {' '.join(shlex.quote(part) for part in command)}")
+    startup_timeout = int(config.get("omlx_startup_timeout_seconds", 45))
+    started_at = time.time()
+    while time.time() - started_at < startup_timeout:
+        if process.poll() is not None:
+            raise RuntimeError(
+                diagnostic_line(
+                    "error",
+                    "OMLX_START_FAILED",
+                    f"oMLX server exited before becoming ready with code {process.returncode}.",
+                    guidance=f"Check the oMLX server log at {log_path}.",
+                    context={"base_url": base_url},
+                )
+            )
+        if probe_openai_compatible_server(base_url, api_key, timeout=probe_timeout):
+            log_fn(f"[omlx] Server ready at {base_url}.")
+            return process
+        time.sleep(1)
+
+    stop_managed_omlx_server(process, log_fn, reason="startup timeout")
+    raise RuntimeError(
+        diagnostic_line(
+            "error",
+            "OMLX_START_TIMEOUT",
+            f"oMLX server did not become ready within {startup_timeout} seconds.",
+            guidance=f"Open oMLX manually or check the server log at {log_path}.",
+            context={"base_url": base_url},
+        )
+    )
+
+
+def stop_managed_omlx_server(
+    process: Optional[subprocess.Popen],
+    log_fn: Callable[[str], None],
+    reason: str = "run complete",
+) -> None:
+    if process is None or process.poll() is not None:
+        return
+    log_fn(f"[omlx] Stopping server started by this run ({reason}).")
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        log_fn("[omlx] Server did not stop after terminate; killing it.")
+        process.kill()
+        process.wait(timeout=5)
+
+
 def find_missing_models(required_models: List[str], available_models: List[str]) -> List[str]:
     available = set(available_models)
     available_bases = {model.split(":", 1)[0] for model in available_models}
@@ -1298,6 +1500,303 @@ def run_preflight(config_path: Path) -> Dict:
         "checks": checks,
         "config_path": str(config_path),
     }
+
+
+def load_runtime_context(config_path: Path) -> RuntimeContext:
+    config, config_check = load_config_with_diagnostics(config_path)
+    if config is None:
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                config_check["code"],
+                config_check["message"],
+                guidance=config_check.get("guidance"),
+                context=config_check.get("context"),
+            )
+        )
+
+    vault_root = Path(config.get("vault_root", "."))
+    if not vault_root.is_absolute():
+        vault_root = (config_path.parent / vault_root).resolve()
+
+    embed_settings = get_embed_settings(config)
+    llm_settings = get_llm_settings(config)
+    if embed_settings["provider"] != "ollama":
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "EMBED_PROVIDER_UNSUPPORTED",
+                f"Unsupported embed_provider: {embed_settings['provider']}",
+                guidance="Use embed_provider `ollama`; non-Ollama embedding providers are not supported yet.",
+                context={"embed_provider": embed_settings["provider"]},
+            )
+        )
+    if llm_settings["provider"] not in {"ollama", "openai_compatible"}:
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "LLM_PROVIDER_UNSUPPORTED",
+                f"Unsupported llm_provider: {llm_settings['provider']}",
+                guidance="Use llm_provider `ollama` or `openai_compatible`.",
+                context={"llm_provider": llm_settings["provider"]},
+            )
+        )
+
+    ollama_timeout = int(config.get("ollama_timeout_seconds", 120))
+    paths = RuntimePaths(
+        config_path=config_path,
+        vault_root=vault_root,
+        db_path=vault_root / config["db_path"],
+        state_path=vault_root / config["state_path"],
+        log_path=vault_root / config["log_path"],
+        preview_path=vault_root / config.get("preview_log_path", "Scripts/_Mindmap/_logs/preview.jsonl"),
+    )
+    return RuntimeContext(
+        config=config,
+        paths=paths,
+        embed_settings=embed_settings,
+        llm_settings=llm_settings,
+        embed_model=embed_settings["model"],
+        llm_model=llm_settings["model"],
+        mindmap_heading=config.get("mindmap_heading", config.get("related_heading", "## Mindmap")),
+        write_mindmap_section=config.get("write_mindmap_section", config.get("write_related_section", False)),
+        related_strategy=config.get("related_strategy", "chunk"),
+        related_candidate_limit=config.get("related_candidate_limit", 40),
+        related_overreach=config.get("related_overreach", 2),
+        related_creative=config.get("related_creative", 2),
+        related_creative_min=config.get("related_creative_min", 0.45),
+        related_creative_max=config.get("related_creative_max", 0.7),
+        ollama_embed_timeout=int(config.get("ollama_embed_timeout_seconds", ollama_timeout)),
+        ollama_llm_timeout=int(config.get("ollama_llm_timeout_seconds", ollama_timeout)),
+        ollama_retries=int(config.get("ollama_retries", 1)),
+        ollama_backoff=float(config.get("ollama_backoff_seconds", 2.0)),
+    )
+
+
+def resolve_notes_paths(config: Dict, scope: str = "default") -> List[str]:
+    if scope == "all" and "notes_paths_all" in config:
+        return config["notes_paths_all"]
+    if scope == "current" and "notes_paths_current" in config:
+        return config["notes_paths_current"]
+    if "notes_paths" in config:
+        return config["notes_paths"]
+    return [config["notes_path"]]
+
+
+def open_collections(db_path: Path, rebuild: bool = False):
+    try:
+        import chromadb
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "DEPENDENCY_CHROMADB_MISSING",
+                f"chromadb import failed: {exc}",
+                guidance=dependency_install_guidance(),
+            )
+        ) from exc
+
+    try:
+        client = chromadb.PersistentClient(path=str(db_path))
+    except Exception as exc:
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "CHROMADB_INIT_FAILED",
+                f"Failed to initialize ChromaDB: {exc}",
+                guidance="Check db_path permissions and clear any corrupted local database before retrying.",
+                context={"db_path": str(db_path)},
+            )
+        ) from exc
+
+    chunks_collection = "mindmap_chunks"
+    notes_collection = "mindmap_notes"
+    if rebuild:
+        for collection_name in (chunks_collection, notes_collection):
+            try:
+                client.delete_collection(collection_name)
+            except Exception:
+                pass
+
+    chunks = client.get_or_create_collection(name=chunks_collection, metadata={"hnsw:space": "cosine"})
+    notes_col = client.get_or_create_collection(name=notes_collection, metadata={"hnsw:space": "cosine"})
+    return client, chunks, notes_col
+
+
+def load_note_by_relpath(vault_root: Path, relpath: str, related_heading: str, min_words: int = 0) -> Note:
+    target, issue = resolve_vault_markdown_write_target(vault_root, relpath)
+    if issue:
+        raise RuntimeError(diagnostic_line(issue["level"], issue["code"], issue["message"], issue.get("guidance"), issue.get("context")))
+    if target is None or not target.exists() or not target.is_file():
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "NOTE_NOT_FOUND",
+                f"Note not found: {relpath}",
+                guidance="Use a vault-relative Markdown path that exists.",
+                context={"path": relpath},
+            )
+        )
+    text = target.read_text(encoding="utf-8", errors="ignore")
+    _fm, body = parse_frontmatter(text)
+    body = strip_related_section(body, related_heading)
+    if min_words and len(body.split()) < min_words:
+        raise RuntimeError(
+            diagnostic_line(
+                "warn",
+                "NOTE_TOO_SHORT",
+                f"Note is below the configured minimum word count: {relpath}",
+                context={"path": relpath, "min_words": min_words},
+            )
+        )
+    return Note(path=target, relpath=target.relative_to(vault_root).as_posix(), title=target.stem, body=body)
+
+
+def list_notes_from_relpaths(vault_root: Path, relpaths: List[str], min_words: int, related_heading: str) -> List[Note]:
+    notes = []
+    for relpath in relpaths:
+        try:
+            notes.append(load_note_by_relpath(vault_root, relpath, related_heading, min_words=min_words))
+        except RuntimeError:
+            continue
+    return notes
+
+
+def index_note(note: Note, chunks, notes_col, ctx: RuntimeContext, log_fn: Optional[Callable[[str], None]] = None) -> Dict:
+    note_chunks = chunk_text(
+        note.body,
+        ctx.config["chunk_target_tokens"],
+        ctx.config["chunk_overlap_tokens"],
+    )
+    if not note_chunks:
+        return {"path": note.relpath, "indexed": False, "chunks": 0, "reason": "empty"}
+
+    chunks.delete(where={"path": note.relpath})
+    notes_col.delete(where={"path": note.relpath})
+
+    embeddings = []
+    batch_size = 16
+    for i in range(0, len(note_chunks), batch_size):
+        batch = note_chunks[i : i + batch_size]
+        batch_embeddings = embed_texts(
+            ctx.embed_settings["base_url"],
+            ctx.embed_model,
+            batch,
+            timeout=ctx.ollama_embed_timeout,
+            retries=ctx.ollama_retries,
+            backoff_seconds=ctx.ollama_backoff,
+            log_fn=log_fn,
+        )
+        embeddings.extend(batch_embeddings)
+
+    if not embeddings:
+        return {"path": note.relpath, "indexed": False, "chunks": 0, "reason": "no_embeddings"}
+    if len(embeddings) != len(note_chunks):
+        return {
+            "path": note.relpath,
+            "indexed": False,
+            "chunks": 0,
+            "reason": "embedding_count_mismatch",
+        }
+
+    ids = []
+    metadatas = []
+    documents = []
+    for i, (chunk, _emb) in enumerate(zip(note_chunks, embeddings, strict=True)):
+        ids.append(f"{note.relpath}::chunk::{i}")
+        metadatas.append({"path": note.relpath, "chunk": i})
+        documents.append(chunk)
+    chunks.add(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
+
+    note_embedding = average_vectors(embeddings)
+    notes_col.add(
+        ids=[f"{note.relpath}::note"],
+        embeddings=[note_embedding],
+        metadatas=[{"path": note.relpath, "title": note.title}],
+        documents=[note.body[:2000]],
+    )
+    return {"path": note.relpath, "indexed": True, "chunks": len(note_chunks), "hash": file_signature(note.body)}
+
+
+def delete_note_from_index(relpath: str, chunks, notes_col, state_files: Dict) -> Dict:
+    chunks.delete(where={"path": relpath})
+    notes_col.delete(where={"path": relpath})
+    state_files.pop(relpath, None)
+    return {"path": relpath, "deleted": True}
+
+
+def note_is_indexed(notes_col, relpath: str) -> bool:
+    data = notes_col.get(ids=[f"{relpath}::note"])
+    return bool(data.get("ids"))
+
+
+def query_related_for_note(
+    note: Note,
+    chunks,
+    notes_col,
+    ctx: RuntimeContext,
+    allowed_paths: set,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> List[Dict]:
+    if ctx.related_strategy == "chunk":
+        candidates = related_from_chunks(
+            chunks,
+            note.relpath,
+            ctx.related_candidate_limit,
+            ctx.config.get("related_min_score", 0.0),
+        )
+        candidates = [(p, s) for p, s in candidates if p in allowed_paths]
+    else:
+        note_id = f"{note.relpath}::note"
+        data = notes_col.get(ids=[note_id], include=["embeddings", "metadatas"])
+        embeddings = data.get("embeddings")
+        if embeddings is None or (hasattr(embeddings, "size") and embeddings.size == 0) or len(embeddings) == 0:
+            embedded = embed_texts(
+                ctx.embed_settings["base_url"],
+                ctx.embed_model,
+                [note.body[:4000]],
+                timeout=ctx.ollama_embed_timeout,
+                retries=ctx.ollama_retries,
+                backoff_seconds=ctx.ollama_backoff,
+                log_fn=log_fn,
+            )
+            note_embedding = embedded[0]
+        else:
+            note_embedding = embeddings[0]
+        results = notes_col.query(
+            query_embeddings=[note_embedding],
+            n_results=max(10, ctx.config["related_limit"] + 1),
+            include=["metadatas", "distances"],
+        )
+        candidates = []
+        metas = results.get("metadatas", [[]])[0]
+        dists = results.get("distances", [[]])[0] if results.get("distances") else [None] * len(metas)
+        for meta, dist in zip(metas, dists):
+            path = meta.get("path")
+            if path and path != note.relpath and path in allowed_paths:
+                score = 1 - dist if dist is not None else 0.0
+                if score >= ctx.config.get("related_min_score", 0.0):
+                    candidates.append((path, score))
+
+    score_by_path = {path: score for path, score in candidates}
+    selected = select_mindmap_links(
+        candidates,
+        note.relpath,
+        ctx.config["related_limit"],
+        ctx.related_overreach,
+        ctx.related_creative,
+        ctx.related_creative_min,
+        ctx.related_creative_max,
+    )
+    return [
+        {
+            "path": path,
+            "score": score_by_path.get(path, 0.0),
+            "kind": kind,
+            "title": Path(path).stem,
+        }
+        for path, kind in selected
+    ]
 
 
 def main():
@@ -1575,6 +2074,31 @@ def main():
             stream = sys.stderr if to_stderr else sys.stdout
             print(line, file=stream, flush=True)
 
+    managed_omlx_process: Optional[subprocess.Popen] = None
+
+    def cleanup_managed_omlx(reason: str = "run complete"):
+        nonlocal managed_omlx_process
+        if managed_omlx_process is None:
+            return
+        stop_managed_omlx_server(managed_omlx_process, log_event, reason=reason)
+        managed_omlx_process = None
+
+    if do_tag:
+        try:
+            managed_omlx_process = start_managed_omlx_server(config, llm_settings, log_event)
+            if managed_omlx_process is not None:
+                atexit.register(
+                    stop_managed_omlx_server,
+                    managed_omlx_process,
+                    lambda line: print(line, file=sys.stderr, flush=True),
+                    "process exit",
+                )
+        except Exception as exc:
+            log_event(f"[error] oMLX startup failed: {exc}", to_stderr=True)
+            ensure_dir(log_path.parent)
+            log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+            return 1
+
     def write_note_update(note: Note, updates: Dict, related_items: List = None) -> bool:
         target_path, issue = resolve_vault_markdown_write_target(vault_root, note.relpath)
         if issue:
@@ -1685,12 +2209,19 @@ def main():
             if not embeddings:
                 log_event(f"[warn] Skipping {note.relpath}: no embeddings", to_stderr=True)
                 continue
+            if len(embeddings) != len(note_chunks):
+                log_event(
+                    f"[warn] Skipping {note.relpath}: embedding count mismatch "
+                    f"({len(embeddings)} embeddings for {len(note_chunks)} chunks)",
+                    to_stderr=True,
+                )
+                continue
 
             # Store chunks
             ids = []
             metadatas = []
             documents = []
-            for i, (chunk, emb) in enumerate(zip(note_chunks, embeddings)):
+            for i, (chunk, emb) in enumerate(zip(note_chunks, embeddings, strict=True)):
                 ids.append(f"{note.relpath}::chunk::{i}")
                 metadatas.append({"path": note.relpath, "chunk": i})
                 documents.append(chunk)
@@ -1887,6 +2418,8 @@ def main():
                     log_event(f"[error] Write failed for {note.relpath}: {exc}", to_stderr=True)
             else:
                 log_event(f"[dry-run] Would update metadata: {note.relpath}", also_print=False)
+
+    cleanup_managed_omlx()
 
     ensure_dir(log_path.parent)
     log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")

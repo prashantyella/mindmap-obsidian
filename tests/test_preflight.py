@@ -9,10 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from mindmap import (  # noqa: E402
     build_metadata_messages,
     build_openai_compatible_chat_payload,
+    build_omlx_server_command,
     dependency_install_guidance,
     find_missing_models,
     get_embed_settings,
     get_llm_settings,
+    should_manage_omlx_server,
     load_config_with_diagnostics,
     parse_llm_metadata_json,
     parse_openai_compatible_chat_response,
@@ -120,6 +122,49 @@ class PreflightHelperTests(unittest.TestCase):
             parse_llm_metadata_json('["practice"]', "Qwen3.5-9B-MLX-4bit", "openai_compatible")
 
         self.assertIn("JSON was not an object", str(ctx.exception))
+
+    def test_omlx_auto_manage_detects_local_mlx_openai_provider(self):
+        config = {"omlx_auto_manage": "auto"}
+        llm_settings = {
+            "provider": "openai_compatible",
+            "base_url": "http://localhost:8000/v1",
+            "model": "Qwen3.5-9B-MLX-4bit",
+        }
+
+        self.assertTrue(should_manage_omlx_server(config, llm_settings))
+
+    def test_omlx_auto_manage_skips_remote_openai_provider(self):
+        config = {"omlx_auto_manage": "auto"}
+        llm_settings = {
+            "provider": "openai_compatible",
+            "base_url": "https://api.example.com/v1",
+            "model": "Qwen3.5-9B-MLX-4bit",
+        }
+
+        self.assertFalse(should_manage_omlx_server(config, llm_settings))
+
+    def test_build_omlx_server_command_uses_configured_python_and_base_path(self):
+        config = {
+            "omlx_python_command": "/tmp/omlx-python",
+            "omlx_base_path": "/tmp/omlx-data",
+        }
+        llm_settings = {
+            "base_url": "http://localhost:9000/v1",
+        }
+
+        self.assertEqual(
+            build_omlx_server_command(config, llm_settings),
+            [
+                "/tmp/omlx-python",
+                "-m",
+                "omlx.cli",
+                "serve",
+                "--base-path",
+                "/tmp/omlx-data",
+                "--port",
+                "9000",
+            ],
+        )
 
 
 if __name__ == "__main__":

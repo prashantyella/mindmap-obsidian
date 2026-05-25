@@ -184,6 +184,7 @@
 }
 
 .mindmap-sidebar {
+  position: relative;
   display: flex;
   height: 100%;
   min-width: 0;
@@ -213,6 +214,45 @@
   flex: 0 0 auto;
   padding: 25px 25px 18px;
   border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mindmap-inline-loading {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  z-index: 3;
+  display: flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.mindmap-loading-spinner {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-accent);
+}
+
+.mindmap-loading-spinner-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid currentcolor;
+  border-right-color: transparent;
+  border-bottom-color: color-mix(in srgb, currentcolor 35%, transparent);
+  border-radius: 999px;
+  animation: mindmap-loading-spin 0.75s linear infinite;
+}
+
+@keyframes mindmap-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .mindmap-heatmap-chart {
@@ -590,6 +630,72 @@
 .mindmap-folder-checkbox {
   display: flex;
   justify-content: center;
+}
+
+.mindmap-confirm-modal p {
+  color: var(--text-muted);
+}
+
+.mindmap-status {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mindmap-status.is-running {
+  color: var(--text-accent);
+}
+
+.mindmap-status-swirling {
+  position: relative;
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  color: currentcolor;
+}
+
+.mindmap-status-swirling::before,
+.mindmap-status-swirling::after {
+  position: absolute;
+  content: "";
+  border-style: solid;
+  border-color: currentcolor;
+  border-radius: 999px;
+  animation: mindmap-swirling-spin 0.8s linear infinite;
+}
+
+.mindmap-status-swirling::before {
+  inset: 1px;
+  border-width: 2px;
+  border-bottom-color: transparent;
+  border-left-color: transparent;
+}
+
+.mindmap-status-swirling::after {
+  inset: 4px;
+  border-width: 1.5px;
+  border-top-color: transparent;
+  border-right-color: transparent;
+  animation-direction: reverse;
+  animation-duration: 1.15s;
+}
+
+@keyframes mindmap-swirling-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mindmap-status-swirling::before,
+  .mindmap-status-swirling::after {
+    animation-duration: 1.8s;
+  }
+
+  .mindmap-loading-spinner-icon {
+    animation-duration: 1.6s;
+  }
 }
 
 @media (max-width: 760px) {

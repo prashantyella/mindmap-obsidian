@@ -3,16 +3,18 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 
-import { FileSystemAdapter, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { App, FileSystemAdapter, Modal, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 
 import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput, type PreflightResult } from "./diagnostics";
 import { isScopeSetupComplete, listVaultFolderOptions, readScopeSelection, updateScopeSelection, type ScopeSelection, type VaultFolderOption } from "./onboarding";
 import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { assertAllowedPluginArgs } from "./runArguments";
-import { getRunProfile, type RunScope } from "./runProfiles";
+import { getRunProfile, type RunConfirmation, type RunScope } from "./runProfiles";
 import { migrateLegacyPluginVaultRoot } from "./runtimeConfigMigration";
 import { ensureBundledRuntimeAssets } from "./runtimeAssets";
+import { MindmapSemanticEnvironment, type SemanticEnvironmentStatus } from "./semanticEnvironment";
+import type { LiveRelatedResponse } from "./semanticTypes";
 import {
   buildDailyCalendarIntervals,
   buildLaunchAgentPlist,
@@ -67,6 +69,60 @@ interface DiagnosticsState {
   result: PreflightResult | null;
 }
 
+class MindmapRunConfirmModal extends Modal {
+  private settled = false;
+
+  constructor(
+    app: App,
+    private readonly confirmation: RunConfirmation,
+    private readonly resolve: (confirmed: boolean) => void,
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("mindmap-confirm-modal");
+    contentEl.createEl("h2", { text: this.confirmation.title });
+    contentEl.createEl("p", { text: this.confirmation.message });
+
+    const buttonContainer = contentEl.createDiv({ cls: "modal-button-container" });
+    const cancelButton = buttonContainer.createEl("button", { text: "Cancel" });
+    cancelButton.addEventListener("click", () => this.finish(false));
+
+    const confirmButton = buttonContainer.createEl("button", { text: this.confirmation.confirmText });
+    if (this.confirmation.confirmClass) {
+      confirmButton.addClass(this.confirmation.confirmClass);
+    }
+    confirmButton.addEventListener("click", () => this.finish(true));
+    confirmButton.focus();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    if (!this.settled) {
+      this.settled = true;
+      this.resolve(false);
+    }
+  }
+
+  private finish(confirmed: boolean): void {
+    if (this.settled) {
+      return;
+    }
+    this.settled = true;
+    this.resolve(confirmed);
+    this.close();
+  }
+}
+
+function confirmMindmapRun(app: App, confirmation: RunConfirmation): Promise<boolean> {
+  return new Promise((resolve) => {
+    new MindmapRunConfirmModal(app, confirmation, resolve).open();
+  });
+}
+
 export interface ScopeSetupStatus {
   complete: boolean;
   canManage: boolean;
@@ -109,7 +165,9 @@ export default class MindmapPlugin extends Plugin {
   };
   private readonly recentLog: string[] = [];
   private statusBarEl: HTMLElement | null = null;
+  private activeRunStatus: string | null = null;
   private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
+  private semanticEnvironment: MindmapSemanticEnvironment | null = null;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
   private diagnosticsState: DiagnosticsState = {
@@ -139,6 +197,11 @@ export default class MindmapPlugin extends Plugin {
       (message) => this.appendLog(message),
       () => this.updateStatusBar(),
     );
+    this.semanticEnvironment = new MindmapSemanticEnvironment(
+      () => this.getResolvedRuntime(),
+      (message) => this.appendLog(message),
+      () => this.updateStatusBar(),
+    );
 
     this.addCommand({
       id: "mindmap-open-view",
@@ -161,6 +224,30 @@ export default class MindmapPlugin extends Plugin {
       name: "Run mindmap (all scopes)",
       callback: () => {
         void this.runMindmap("manual", "all");
+      },
+    });
+
+    this.addCommand({
+      id: "mindmap-refresh-all",
+      name: "Run mindmap full refresh (all notes)",
+      callback: () => {
+        void this.runMindmap("manual", "refreshAll");
+      },
+    });
+
+    this.addCommand({
+      id: "mindmap-refresh-metadata-all",
+      name: "Run mindmap metadata refresh (all notes)",
+      callback: () => {
+        void this.runMindmap("manual", "metadataAll");
+      },
+    });
+
+    this.addCommand({
+      id: "mindmap-rebuild-all",
+      name: "Run mindmap full rebuild (all notes)",
+      callback: () => {
+        void this.runMindmap("manual", "rebuildAll");
       },
     });
 
@@ -204,19 +291,32 @@ export default class MindmapPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "mindmap-start-semantic-environment",
+      name: "Start Mindmap semantic environment",
+      callback: () => {
+        void this.startSemanticEnvironment(true);
+      },
+    });
+
     this.syncScheduler();
     this.registerVaultRefreshEvents();
     void this.pendingScanService.warm().then(() => this.updateStatusBar());
     void this.runPreflight("startup");
+    if (this.settings.liveSemanticLookupEnabled) {
+      void this.startSemanticEnvironment(false);
+    }
   }
 
   onunload(): void {
     this.pendingScanService?.dispose();
+    void this.semanticEnvironment?.shutdown();
     this.stopScheduler("Plugin unloaded. Internal scheduler stopped.");
     if (this.currentProcess) {
       this.appendLog("Stopping active Mindmap run because the plugin is unloading.");
       this.currentProcess.kill();
       this.currentProcess = null;
+      this.activeRunStatus = null;
     }
   }
 
@@ -242,6 +342,34 @@ export default class MindmapPlugin extends Plugin {
 
   getResolvedRuntime(): ResolvedRuntime {
     return resolveRuntime(this.settings, this.getRuntimeContext());
+  }
+
+  getSemanticStatus(): SemanticEnvironmentStatus {
+    return this.semanticEnvironment?.getStatus() ?? {
+      state: "off",
+      message: "Semantic environment is off.",
+      health: null,
+    };
+  }
+
+  async startSemanticEnvironment(showNotice: boolean): Promise<void> {
+    if (!this.semanticEnvironment) {
+      return;
+    }
+    const status = await this.semanticEnvironment.start("current");
+    if (showNotice) {
+      new Notice(status.message, 8000);
+    }
+  }
+
+  async queryLiveRelated(path: string): Promise<LiveRelatedResponse> {
+    if (!this.settings.liveSemanticLookupEnabled) {
+      throw new Error("Live semantic lookup is disabled.");
+    }
+    if (!this.semanticEnvironment) {
+      throw new Error("Semantic environment is not available.");
+    }
+    return this.semanticEnvironment.queryRelated(path, this.settings.liveSemanticEnsureActiveNoteIndexed);
   }
 
   getSchedulerConfig(): SchedulerConfig {
@@ -507,9 +635,9 @@ export default class MindmapPlugin extends Plugin {
   getLlmProviderConfigStatus(): LlmProviderConfigStatus {
     const runtime = this.getResolvedRuntime();
     const fallback: LlmProviderConfig = {
-      provider: "ollama",
-      baseUrl: "http://localhost:11434",
-      model: "llama3.1:8b",
+      provider: "openai_compatible",
+      baseUrl: "http://localhost:8000/v1",
+      model: "gemma-4-E4B-it-MLX-8bit",
       apiKey: "",
       maxTokens: 1024,
       enableThinking: true,
@@ -860,7 +988,7 @@ export default class MindmapPlugin extends Plugin {
       label: WEEKLY_LAUNCH_AGENT_LABEL,
       plistPath: this.getLaunchAgentPlistPath(WEEKLY_LAUNCH_AGENT_LABEL),
       command: runtime.command,
-      extraArgs: ["--all", "--refresh-all", "--apply"],
+      extraArgs: getRunProfile("refreshAll").args,
       stdoutPath: path.join(logDir, "launchagent-weekly.out"),
       stderrPath: path.join(logDir, "launchagent-weekly.err"),
       startCalendarInterval: buildWeeklyCalendarInterval({
@@ -1048,6 +1176,28 @@ export default class MindmapPlugin extends Plugin {
     this.scheduleNextTick(Date.now());
   }
 
+  private updateRunStatusFromLine(line: string): void {
+    if (!this.currentProcess) {
+      return;
+    }
+
+    let status: string | null = null;
+    if (line.includes("[omlx] Started server for this run")) {
+      status = "Mindmap: starting oMLX";
+    } else if (line.includes("[omlx] Server ready")) {
+      status = "Mindmap: oMLX ready";
+    } else if (line.includes("[omlx] Server already running")) {
+      status = "Mindmap: oMLX already running";
+    } else if (line.includes("[omlx] Stopping server started by this run")) {
+      status = "Mindmap: stopping oMLX";
+    }
+
+    if (status) {
+      this.activeRunStatus = status;
+      this.updateStatusBar();
+    }
+  }
+
   async runMindmap(trigger: RunTrigger, scope: RunScope = "current"): Promise<void> {
     if (this.currentProcess) {
       const message = "Mindmap is already running. Skipping the new request.";
@@ -1081,6 +1231,28 @@ export default class MindmapPlugin extends Plugin {
 
     let command: { command: string; args: string[]; cwd: string };
     const profile = getRunProfile(scope);
+
+    if (trigger === "manual" && profile.confirmation) {
+      const confirmed = await confirmMindmapRun(this.app, profile.confirmation);
+      if (!confirmed) {
+        const message = `Mindmap ${profile.label} run cancelled.`;
+        this.schedulerState.lastMessage = message;
+        this.appendLog(message);
+        this.updateStatusBar();
+        return;
+      }
+    }
+
+    if (this.currentProcess) {
+      const message = "Mindmap is already running. Skipping the new request.";
+      this.appendLog(message);
+      if (trigger === "manual") {
+        new Notice(message, 8000);
+      }
+      this.updateStatusBar();
+      return;
+    }
+
     try {
       command = this.buildRuntimeCommand(profile.args);
     } catch (error) {
@@ -1104,6 +1276,7 @@ export default class MindmapPlugin extends Plugin {
         stdio: ["ignore", "pipe", "pipe"],
       });
       this.currentProcess = child;
+      this.activeRunStatus = `Mindmap: ${profile.label}`;
       this.schedulerState.lastTrigger = trigger;
       this.schedulerState.lastMessage = `Running ${profile.label} via ${trigger} trigger.`;
       this.updateStatusBar();
@@ -1115,6 +1288,7 @@ export default class MindmapPlugin extends Plugin {
         for (const line of splitLogLines(chunk.toString())) {
           stdoutLines.push(line);
           this.appendLog(`[stdout] ${line}`);
+          this.updateRunStatusFromLine(line);
         }
       });
 
@@ -1122,12 +1296,14 @@ export default class MindmapPlugin extends Plugin {
         for (const line of splitLogLines(chunk.toString())) {
           stderrLines.push(line);
           this.appendLog(`[stderr] ${line}`);
+          this.updateRunStatusFromLine(line);
         }
       });
 
       child.on("error", (error) => {
         const message = `Mindmap ${trigger} ${profile.label} run failed to start: ${error.message}`;
         this.currentProcess = null;
+        this.activeRunStatus = null;
         this.schedulerState.lastRunAt = Date.now();
         this.schedulerState.lastExitCode = -1;
         this.schedulerState.lastMessage = message;
@@ -1139,6 +1315,7 @@ export default class MindmapPlugin extends Plugin {
 
       child.on("close", (code) => {
         this.currentProcess = null;
+        this.activeRunStatus = null;
         this.schedulerState.lastRunAt = Date.now();
         this.schedulerState.lastExitCode = code;
         const failureContext = stderrLines[stderrLines.length - 1] ?? stdoutLines[stdoutLines.length - 1];
@@ -1165,47 +1342,69 @@ export default class MindmapPlugin extends Plugin {
     console.debug(`[Mindmap] ${message}`);
   }
 
+  private setStatusBarText(text: string, running = false): void {
+    if (!this.statusBarEl) {
+      return;
+    }
+
+    this.statusBarEl.classList.add("mindmap-status");
+    this.statusBarEl.classList.toggle("is-running", running);
+    this.statusBarEl.replaceChildren();
+
+    if (running) {
+      const spinner = document.createElement("span");
+      spinner.className = "mindmap-status-swirling";
+      spinner.setAttribute("aria-hidden", "true");
+      this.statusBarEl.appendChild(spinner);
+    }
+
+    const label = document.createElement("span");
+    label.textContent = text;
+    this.statusBarEl.appendChild(label);
+  }
+
   private updateStatusBar(): void {
     if (!this.statusBarEl) {
       return;
     }
 
     if (this.currentProcess) {
-      this.statusBarEl.setText("Mindmap: running");
+      this.setStatusBarText(this.activeRunStatus ?? "Mindmap: running", true);
       return;
     }
 
     if (this.diagnosticsState.inProgress) {
-      this.statusBarEl.setText("Mindmap: preflight");
+      this.setStatusBarText("Mindmap: preflight");
       return;
     }
 
     if (this.diagnosticsState.result && !this.diagnosticsState.result.ok) {
-      this.statusBarEl.setText("Mindmap: preflight failed");
+      this.setStatusBarText("Mindmap: preflight failed");
       return;
     }
 
     if (!this.getScopeSetupStatus().complete) {
-      this.statusBarEl.setText("Mindmap: scope setup required");
+      this.setStatusBarText("Mindmap: scope setup required");
       return;
     }
 
     if (isLaunchAgentSchedulerEnabled(this.settings.schedulerMode)) {
       const pending = this.getPendingSnapshot();
       const pendingLabel = pending.available ? `${pending.current.total} pending` : "pending n/a";
-      this.statusBarEl.setText(`Mindmap: ${pendingLabel} • LaunchAgent`);
+      this.setStatusBarText(`Mindmap: ${pendingLabel} • ${this.getSemanticStatus().state} • LaunchAgent`);
       return;
     }
 
     if (isSchedulerEnabled(this.settings.schedulerMode)) {
       const pending = this.getPendingSnapshot();
       const pendingLabel = pending.available ? `${pending.current.total} pending` : "pending n/a";
-      this.statusBarEl.setText(`Mindmap: ${pendingLabel} • next ${formatTimestamp(this.schedulerState.nextRunAt)}`);
+      this.setStatusBarText(`Mindmap: ${pendingLabel} • ${this.getSemanticStatus().state} • next ${formatTimestamp(this.schedulerState.nextRunAt)}`);
       return;
     }
 
     const pending = this.getPendingSnapshot();
-    this.statusBarEl.setText(pending.available ? `Mindmap: ${pending.current.total} pending` : "Mindmap: manual");
+    const semanticState = this.getSemanticStatus().state;
+    this.setStatusBarText(pending.available ? `Mindmap: ${pending.current.total} pending • ${semanticState}` : `Mindmap: manual • ${semanticState}`);
   }
 
   private getRuntimeContext(): RuntimeContext {

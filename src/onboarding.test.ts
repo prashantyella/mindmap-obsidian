@@ -14,6 +14,13 @@ void test("config template uses neutral empty scope defaults", () => {
   assert.deepEqual(template.notes_paths_all, []);
 });
 
+void test("config template uses richer tag generation defaults", () => {
+  const template = JSON.parse(fs.readFileSync(path.join(process.cwd(), "python", "config.template.json"), "utf8")) as Record<string, unknown>;
+
+  assert.equal(template.tag_limit, 6);
+  assert.equal(template.min_tag_frequency, 1);
+});
+
 void test("updateScopeSelection preserves unrelated config keys and writes valid JSON", () => {
   const rawConfig = JSON.stringify({
     vault_root: "../..",

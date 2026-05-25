@@ -1,7 +1,19 @@
 import { ItemView, TFile, WorkspaceLeaf } from "obsidian";
-import { animate, stagger } from "motion";
+import { animate } from "motion";
 
 import type MindmapPlugin from "./main";
+import type { LiveRelatedResult } from "./semanticTypes";
+import {
+  createErrorLiveState,
+  createIdleLiveState,
+  createLoadingLiveState,
+  createReadyLiveState,
+  getDisplayLiveRelated,
+  NO_MINDMAP_CONNECTIONS_MESSAGE,
+  NO_MINDMAP_CONNECTIONS_TITLE,
+  shouldApplyLiveResponse,
+  type SidebarLiveState,
+} from "./workspaceViewState";
 
 export const MINDMAP_VIEW_TYPE = "mindmap-ai-view";
 
@@ -23,6 +35,8 @@ interface RelatedCandidate {
   folderPath: string;
   summary: string | null;
   heatmap: HeatmapCell[];
+  liveScore?: number;
+  liveKind?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -161,9 +175,37 @@ function sourceLevel(activePath: string, candidatePath: string): number {
   return 1;
 }
 
+function formatLiveDetail(candidate: RelatedCandidate): string | null {
+  if (typeof candidate.liveScore !== "number") {
+    return null;
+  }
+  const percent = Math.round(candidate.liveScore * 100);
+  const kind = candidate.liveKind ?? "semantic";
+  return `Live ${kind} match (${percent}%).`;
+}
+
+function renderLoadingSpinner(container: HTMLElement): void {
+  const spinner = container.createDiv({
+    cls: "mindmap-loading-spinner",
+    attr: {
+      role: "status",
+      "aria-label": "Loading",
+    },
+  });
+  spinner.createSpan({ cls: "mindmap-loading-spinner-icon" });
+}
+
 export class MindmapWorkspaceView extends ItemView {
   private activePath: string | null = null;
   private expandedPath: string | null | undefined = undefined;
+  private renderedExpandedPath: string | null | undefined = undefined;
+  private liveRequestId = 0;
+  private liveState: SidebarLiveState = {
+    path: "",
+    status: "idle",
+    response: null,
+    error: null,
+  };
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -186,12 +228,19 @@ export class MindmapWorkspaceView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.render()));
-    this.registerEvent(this.app.metadataCache.on("changed", () => this.render()));
+    this.registerEvent(this.app.metadataCache.on("changed", (file) => {
+      if (file.path === this.activePath) {
+        this.liveState = createIdleLiveState(file.path, this.liveState.response);
+      }
+      this.render();
+    }));
     this.render();
   }
 
   render(): void {
     const { containerEl } = this;
+    const previousCardPositions = this.captureCardPositions(containerEl);
+    const previousExpandedPath = this.renderedExpandedPath;
     containerEl.empty();
     containerEl.addClass("mindmap-view");
 
@@ -201,6 +250,7 @@ export class MindmapWorkspaceView extends ItemView {
     if (activeFile === null) {
       this.activePath = null;
       this.expandedPath = undefined;
+      this.renderedExpandedPath = undefined;
       this.renderEmpty(shell, "No active note", "Open a note to see its mindmap links.");
       return;
     }
@@ -208,16 +258,29 @@ export class MindmapWorkspaceView extends ItemView {
     if (this.activePath !== activeFile.path) {
       this.activePath = activeFile.path;
       this.expandedPath = undefined;
+      this.renderedExpandedPath = undefined;
+      this.liveState = createIdleLiveState(activeFile.path);
     }
 
-    const candidates = this.getRelatedCandidates(activeFile);
+    this.ensureLiveQuery(activeFile);
+
+    const persistedCandidates = this.getRelatedCandidates(activeFile);
+    const candidates = this.getDisplayCandidates(activeFile, persistedCandidates);
     if (candidates.length > 0 && this.expandedPath === undefined) {
       this.expandedPath = candidates[0].path;
     }
 
     if (candidates.length === 0) {
-      this.renderEmpty(shell, "No related notes", "Run Mindmap on this note to populate related links.");
+      if (this.liveState.status === "loading") {
+        this.renderInlineLoadingIndicator(shell);
+      }
+      this.renderedExpandedPath = this.expandedPath;
+      this.renderEmpty(shell, NO_MINDMAP_CONNECTIONS_TITLE, NO_MINDMAP_CONNECTIONS_MESSAGE);
       return;
+    }
+
+    if (this.liveState.status === "loading") {
+      this.renderInlineLoadingIndicator(shell);
     }
 
     this.renderHeatmap(shell, candidates);
@@ -227,7 +290,41 @@ export class MindmapWorkspaceView extends ItemView {
       this.renderCandidate(list, candidate, candidate.path === this.expandedPath);
     }
 
-    this.animateSidebar(shell);
+    this.animateSidebar(shell, previousCardPositions, previousExpandedPath, this.expandedPath);
+    this.renderedExpandedPath = this.expandedPath;
+  }
+
+  private ensureLiveQuery(activeFile: TFile): void {
+    if (!this.plugin.settings.liveSemanticLookupEnabled) {
+      return;
+    }
+    if (this.liveState.path === activeFile.path && this.liveState.status !== "idle") {
+      return;
+    }
+
+    const requestId = ++this.liveRequestId;
+    this.liveState = createLoadingLiveState(activeFile.path, this.liveState);
+
+    void this.plugin.queryLiveRelated(activeFile.path)
+      .then((response) => {
+        if (!shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
+          return;
+        }
+        this.liveState = createReadyLiveState(activeFile.path, response);
+        this.render();
+      })
+      .catch((error) => {
+        if (!shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
+          return;
+        }
+        this.liveState = createErrorLiveState(activeFile.path, this.liveState, error);
+        this.render();
+      });
+  }
+
+  private renderInlineLoadingIndicator(container: HTMLElement): void {
+    const indicator = container.createDiv({ cls: "mindmap-inline-loading" });
+    renderLoadingSpinner(indicator);
   }
 
   private renderHeatmap(container: HTMLElement, candidates: RelatedCandidate[]): void {
@@ -361,6 +458,7 @@ export class MindmapWorkspaceView extends ItemView {
         role: "button",
         tabindex: "0",
         "aria-expanded": String(expanded),
+        "data-path": candidate.path,
       },
     });
 
@@ -387,7 +485,7 @@ export class MindmapWorkspaceView extends ItemView {
     const detail = row.createDiv({ cls: "mindmap-sidebar-detail" });
     detail.createDiv({
       cls: "mindmap-sidebar-summary",
-      text: candidate.summary ?? "No summary available yet.",
+      text: candidate.summary ?? formatLiveDetail(candidate) ?? "No summary available yet.",
     });
   }
 
@@ -427,21 +525,89 @@ export class MindmapWorkspaceView extends ItemView {
     });
   }
 
-  private animateSidebar(container: HTMLElement): void {
+  private animateSidebar(
+    container: HTMLElement,
+    previousCardPositions: Map<string, DOMRect>,
+    previousExpandedPath: string | null | undefined,
+    nextExpandedPath: string | null | undefined,
+  ): void {
+    const expansionChanged = previousExpandedPath !== nextExpandedPath;
     const rows = Array.from(container.querySelectorAll(".mindmap-sidebar-card"));
     if (rows.length > 0) {
-      animate(rows, { opacity: [0.82, 1], y: [8, 0] }, { duration: 0.2, delay: stagger(0.018), ease: "easeOut" });
+      rows.forEach((row, index) => {
+        if (!(row instanceof HTMLElement)) {
+          return;
+        }
+        const path = row.dataset.path;
+        const previous = path ? previousCardPositions.get(path) : undefined;
+        const current = row.getBoundingClientRect();
+        if (previous === undefined) {
+          animate(row, { opacity: [0.82, 1], y: [8, 0] }, { duration: 0.2, delay: index * 0.018, ease: "easeOut" });
+          return;
+        }
+        if (expansionChanged && path === nextExpandedPath) {
+          return;
+        }
+
+        const fromY = previous.top - current.top;
+        if (Math.abs(fromY) > 0.5) {
+          animate(row, { y: [fromY, 0] }, { duration: 0.24, ease: "easeOut" });
+        }
+      });
     }
 
-    const detail = container.querySelector(".mindmap-sidebar-card.is-expanded .mindmap-sidebar-detail");
-    if (detail instanceof HTMLElement) {
-      animate(detail, { opacity: [0, 1], y: [-6, 0] }, { duration: 0.18, ease: "easeOut" });
+    if (expansionChanged && nextExpandedPath !== null && nextExpandedPath !== undefined) {
+      const expandedRow = rows.find((row): row is HTMLElement => row instanceof HTMLElement && row.dataset.path === nextExpandedPath);
+      const detail = expandedRow?.querySelector(".mindmap-sidebar-detail");
+      if (detail instanceof HTMLElement) {
+        animate(detail, { opacity: [0, 1], y: [-4, 0] }, { duration: 0.16, ease: "easeOut" });
+      }
     }
+  }
 
-    const heatmap = container.querySelector(".mindmap-heatmap-chart");
-    if (heatmap instanceof SVGSVGElement) {
-      animate(heatmap, { opacity: [0.72, 1], scale: [0.985, 1] }, { duration: 0.18, ease: "easeOut" });
+  private captureCardPositions(container: HTMLElement): Map<string, DOMRect> {
+    const positions = new Map<string, DOMRect>();
+    for (const row of Array.from(container.querySelectorAll(".mindmap-sidebar-card"))) {
+      if (!(row instanceof HTMLElement) || !row.dataset.path) {
+        continue;
+      }
+      positions.set(row.dataset.path, row.getBoundingClientRect());
     }
+    return positions;
+  }
+
+  private getDisplayCandidates(activeFile: TFile, persistedCandidates: RelatedCandidate[]): RelatedCandidate[] {
+    if (!this.plugin.settings.liveSemanticLookupEnabled) {
+      return persistedCandidates;
+    }
+    const liveRelated = getDisplayLiveRelated(activeFile.path, this.liveState);
+    if (liveRelated.length > 0) {
+      return this.getLiveCandidates(activeFile, liveRelated);
+    }
+    return persistedCandidates;
+  }
+
+  private getLiveCandidates(activeFile: TFile, related: LiveRelatedResult[]): RelatedCandidate[] {
+    const activeFrontmatter = this.getFrontmatter(activeFile);
+    const activeConcepts = normalizeTextList(activeFrontmatter.concepts);
+    const activeTags = normalizeTextList(activeFrontmatter.tags);
+
+    return related.map((item) => {
+      const file = this.resolveRelatedFile(item.path, activeFile.path);
+      const frontmatter = file === null ? {} : this.getFrontmatter(file);
+      const resolvedPath = file?.path ?? item.path;
+
+      return {
+        file,
+        path: resolvedPath,
+        title: item.title ?? file?.basename ?? titleFromPath(item.path),
+        folderPath: parentFolderFromPath(resolvedPath) || "Vault root",
+        summary: coerceText(frontmatter.summary),
+        heatmap: this.getHeatmapCells(activeFile.path, activeConcepts, activeTags, resolvedPath, frontmatter),
+        liveScore: item.score,
+        liveKind: item.kind,
+      };
+    });
   }
 
   private getRelatedCandidates(activeFile: TFile): RelatedCandidate[] {
