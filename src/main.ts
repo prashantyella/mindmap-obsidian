@@ -424,16 +424,11 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async openMindmapView(): Promise<void> {
-    const existing = this.app.workspace.getLeavesOfType(MINDMAP_VIEW_TYPE);
-    for (const leaf of existing) {
-      leaf.detach();
-    }
-    this.mindmapLocalGraphLeaf = null;
-    this.mindmapLocalGraphPath = null;
+    this.app.workspace.detachLeavesOfType(MINDMAP_VIEW_TYPE);
 
     const leaf = await this.app.workspace.ensureSideLeaf(MINDMAP_VIEW_TYPE, "right", {
       active: true,
-      split: true,
+      split: false,
       reveal: true,
     });
     await leaf.setViewState({

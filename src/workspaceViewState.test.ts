@@ -87,3 +87,18 @@ void test("workspace view does not define a dedicated loading screen", () => {
   assert.equal(workspaceViewSource.includes("Live links unavailable"), false);
   assert.equal(stylesSource.includes("mindmap-loading-state"), false);
 });
+
+void test("open mindmap command docks into the existing right sidebar tab group", () => {
+  const sourceRoot = process.cwd();
+  const mainSource = fs.readFileSync(path.join(sourceRoot, "src", "main.ts"), "utf8");
+  const methodStart = mainSource.indexOf("  async openMindmapView(): Promise<void> {");
+  const methodEnd = mainSource.indexOf("  async syncMindmapLocalGraph", methodStart);
+
+  assert.notEqual(methodStart, -1);
+  assert.notEqual(methodEnd, -1);
+
+  const methodSource = mainSource.slice(methodStart, methodEnd);
+  assert.equal(methodSource.includes("detachLeavesOfType(MINDMAP_VIEW_TYPE)"), true);
+  assert.equal(methodSource.includes("split: true"), false);
+  assert.equal(methodSource.includes("split: false"), true);
+});
