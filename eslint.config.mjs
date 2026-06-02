@@ -26,6 +26,11 @@ export default [
     },
     rules: {
       "no-undef": "off",
+      "max-lines": ["warn", {
+        max: 1000,
+        skipBlankLines: true,
+        skipComments: true,
+      }],
       "@typescript-eslint/no-unused-vars": ["error", {
         argsIgnorePattern: "^_",
         caughtErrorsIgnorePattern: "^_",

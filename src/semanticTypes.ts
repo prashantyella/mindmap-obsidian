@@ -7,12 +7,6 @@ export type SemanticWorkerMethod =
   | "refresh_config"
   | "shutdown";
 
-export interface SemanticWorkerRequest<TParams = Record<string, unknown>> {
-  id: string;
-  method: SemanticWorkerMethod;
-  params: TParams;
-}
-
 export interface SemanticWorkerSuccess<TResult = unknown> {
   id: string;
   ok: true;

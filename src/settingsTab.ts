@@ -5,7 +5,7 @@ import { getRunProfile } from "./runProfiles";
 import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
 import { normalizeHour, normalizeMinute } from "./launchAgent";
 import type MindmapPlugin from "./main";
-import type { LlmProviderConfig } from "./main";
+import type { LlmProviderConfig } from "./pluginConfig";
 import { ScopeManager } from "./scopeManager";
 import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
 
