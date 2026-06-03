@@ -13,12 +13,20 @@ from mindmap_worker import MindmapWorker  # noqa: E402
 class FakeCollection:
     def __init__(self):
         self.deleted = []
+        self.query_calls = []
 
     def count(self):
         return 0
 
     def delete(self, where=None):
         self.deleted.append(where)
+
+    def query(self, **kwargs):
+        self.query_calls.append(kwargs)
+        return {
+            "metadatas": [[{"path": "B.md"}, {"path": "C.md"}, {"path": "Hidden.md"}]],
+            "distances": [[0.2, 0.35, 0.1]],
+        }
 
 
 def build_context(tmpdir: str) -> RuntimeContext:
@@ -104,6 +112,24 @@ class MindmapWorkerTests(unittest.TestCase):
             self.assertFalse(result["stale"])
             self.assertEqual(result["related"][0]["path"], "B.md")
             self.assertEqual(worker.state["files"]["A.md"]["hash"], "new")
+
+    def test_query_text_returns_ranked_allowed_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = MindmapWorker()
+            worker.ctx = build_context(tmpdir)
+            worker.chunks = FakeCollection()
+            worker.notes_col = FakeCollection()
+            worker.state = {"files": {}}
+            worker.allowed_paths = {"B.md", "C.md"}
+
+            with patch("mindmap.embed_texts", return_value=[[0.1, 0.2, 0.3]]):
+                result = worker.query_text({"query": "Where did I write about execution?", "limit": 2})
+
+            self.assertEqual(result["query"], "Where did I write about execution?")
+            self.assertEqual([item["path"] for item in result["related"]], ["B.md", "C.md"])
+            self.assertEqual(result["related"][0]["kind"], "lookup")
+            self.assertAlmostEqual(result["related"][0]["score"], 0.8)
+            self.assertEqual(worker.chunks.query_calls[0]["n_results"], 10)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { MindmapSemanticEnvironment } from "./semanticEnvironment";
 import type { ResolvedRuntime } from "./pathResolver";
-import type { LiveRelatedResponse, SemanticHealth } from "./semanticTypes";
+import type { LiveRelatedResponse, LookupRelatedResponse, SemanticHealth } from "./semanticTypes";
 
 const health: SemanticHealth = {
   ready: true,
@@ -62,6 +62,13 @@ class FakeSemanticClient {
 
   async queryRelated(): Promise<LiveRelatedResponse> {
     return this.query();
+  }
+
+  async queryText(): Promise<LookupRelatedResponse> {
+    return {
+      query: "test",
+      related: [],
+    };
   }
 
   async shutdown(): Promise<void> {

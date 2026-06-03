@@ -10,6 +10,14 @@ export function registerMindmapCommands(plugin: MindmapPlugin): void {
   });
 
   plugin.addCommand({
+    id: "mindmap-open-lookup",
+    name: "Open Mindmap lookup",
+    callback: () => {
+      void plugin.openMindmapLookup();
+    },
+  });
+
+  plugin.addCommand({
     id: "mindmap-run-now",
     name: "Run mindmap (current scope)",
     callback: () => {

@@ -4,6 +4,8 @@ Mindmap is a desktop-only Obsidian plugin that runs a local Python workflow to:
 - summarize notes
 - suggest tags and concepts
 - generate related-note links in a `## Mindmap` section
+- search indexed notes with natural-language questions
+- pin high-value connections to the active note
 
 ## Requirements
 
@@ -56,6 +58,7 @@ Install `gemma-4-E4B-it-MLX-8bit` in oMLX, then set the local oMLX API key in Mi
 - `Run Mindmap metadata refresh (all notes)`
 - `Run Mindmap full refresh (all notes)`
 - `Run Mindmap full rebuild (all notes)`
+- `Open Mindmap lookup`
 - `Show Mindmap status`
 - `Enable Mindmap LaunchAgent scheduler`
 - `Disable Mindmap schedulers`

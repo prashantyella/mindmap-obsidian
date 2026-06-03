@@ -102,3 +102,36 @@ void test("open mindmap command docks into the existing right sidebar tab group"
   assert.equal(methodSource.includes("split: true"), false);
   assert.equal(methodSource.includes("split: false"), true);
 });
+
+void test("workspace view exposes lookup, pin, and score affordances", () => {
+  const sourceRoot = process.cwd();
+  const workspaceViewSource = fs.readFileSync(path.join(sourceRoot, "src", "workspaceView.ts"), "utf8");
+  const mainSource = fs.readFileSync(path.join(sourceRoot, "src", "main.ts"), "utf8");
+  const commandSource = fs.readFileSync(path.join(sourceRoot, "src", "pluginCommands.ts"), "utf8");
+
+  assert.equal(workspaceViewSource.includes("mindmap-lookup-input"), true);
+  assert.equal(workspaceViewSource.includes("queryLookupRelated"), true);
+  assert.equal(workspaceViewSource.includes("captureLookupInputState"), true);
+  assert.equal(workspaceViewSource.includes("requestAnimationFrame"), true);
+  assert.equal(workspaceViewSource.includes("togglePinnedConnection"), true);
+  assert.equal(workspaceViewSource.includes("contextmenu"), true);
+  assert.equal(workspaceViewSource.includes("is-pin-revealed"), true);
+  assert.equal(workspaceViewSource.includes("animatePinReveal"), true);
+  assert.equal(workspaceViewSource.includes("mindmap-sidebar-score"), true);
+  assert.equal(mainSource.includes("pinnedConnections"), true);
+  assert.equal(commandSource.includes("mindmap-open-lookup"), true);
+});
+
+void test("semantic worker launches the worker script without the runtime app script", () => {
+  const sourceRoot = process.cwd();
+  const clientSource = fs.readFileSync(path.join(sourceRoot, "src", "semanticWorkerClient.ts"), "utf8");
+  const spawnStart = clientSource.indexOf("  private spawnWorker(): void {");
+  const spawnEnd = clientSource.indexOf("  private request<TResult>", spawnStart);
+
+  assert.notEqual(spawnStart, -1);
+  assert.notEqual(spawnEnd, -1);
+
+  const spawnSource = clientSource.slice(spawnStart, spawnEnd);
+  assert.equal(spawnSource.includes("[workerPath]"), true);
+  assert.equal(spawnSource.includes("...this.options.runtime.command.args"), false);
+});

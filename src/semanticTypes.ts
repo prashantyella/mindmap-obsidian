@@ -4,6 +4,7 @@ export type SemanticWorkerMethod =
   | "index_paths"
   | "delete_paths"
   | "query_related"
+  | "query_text"
   | "refresh_config"
   | "shutdown";
 
@@ -37,7 +38,7 @@ export interface SemanticHealth {
 export interface LiveRelatedResult {
   path: string;
   score: number;
-  kind: "core" | "overreach" | "creative" | "fill";
+  kind: "core" | "overreach" | "creative" | "fill" | "lookup";
   title?: string;
   stale?: boolean;
 }
@@ -48,6 +49,11 @@ export interface LiveRelatedResponse {
   indexed: boolean;
   stale: boolean;
   index_result: unknown | null;
+  related: LiveRelatedResult[];
+}
+
+export interface LookupRelatedResponse {
+  query: string;
   related: LiveRelatedResult[];
 }
 

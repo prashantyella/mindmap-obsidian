@@ -13,6 +13,7 @@ export interface MindmapSettings {
   launchAgentWeeklyMinute: number;
   liveSemanticLookupEnabled: boolean;
   liveSemanticEnsureActiveNoteIndexed: boolean;
+  pinnedConnections: Record<string, string[]>;
 }
 
 export const DEFAULT_SETTINGS: MindmapSettings = {
@@ -28,6 +29,7 @@ export const DEFAULT_SETTINGS: MindmapSettings = {
   launchAgentWeeklyMinute: 0,
   liveSemanticLookupEnabled: true,
   liveSemanticEnsureActiveNoteIndexed: true,
+  pinnedConnections: {},
 };
 
 export type RuntimeField = "pythonCommand" | "scriptPath" | "configPath";

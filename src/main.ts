@@ -33,7 +33,7 @@ import { confirmMindmapRun } from "./runConfirmModal";
 import { migrateLegacyPluginVaultRoot } from "./runtimeConfigMigration";
 import { ensureBundledRuntimeAssets } from "./runtimeAssets";
 import { MindmapSemanticEnvironment, type SemanticEnvironmentStatus } from "./semanticEnvironment";
-import type { LiveRelatedResponse } from "./semanticTypes";
+import type { LiveRelatedResponse, LookupRelatedResponse } from "./semanticTypes";
 import { buildMindmapLocalGraphState, isMindmapLocalGraphLeaf } from "./localGraph";
 import {
   buildDailyCalendarIntervals,
@@ -111,6 +111,7 @@ export default class MindmapPlugin extends Plugin {
   private semanticEnvironment: MindmapSemanticEnvironment | null = null;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
+  private focusLookupOnNextRender = false;
   private diagnosticsState: DiagnosticsState = {
     inProgress: false,
     lastRunAt: null,
@@ -168,6 +169,9 @@ export default class MindmapPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    if (typeof this.settings.pinnedConnections !== "object" || this.settings.pinnedConnections === null || Array.isArray(this.settings.pinnedConnections)) {
+      this.settings.pinnedConnections = {};
+    }
     this.settings.schedulerIntervalMinutes = normalizeSchedulerInterval(this.settings.schedulerIntervalMinutes);
     this.settings.launchAgentDailyHour = normalizeHour(this.settings.launchAgentDailyHour);
     this.settings.launchAgentDailyMinute = normalizeMinute(this.settings.launchAgentDailyMinute);
@@ -218,6 +222,16 @@ export default class MindmapPlugin extends Plugin {
     return this.semanticEnvironment.queryRelated(path, this.settings.liveSemanticEnsureActiveNoteIndexed);
   }
 
+  async queryLookupRelated(query: string, limit?: number): Promise<LookupRelatedResponse> {
+    if (!this.settings.liveSemanticLookupEnabled) {
+      throw new Error("Live semantic lookup is disabled.");
+    }
+    if (!this.semanticEnvironment) {
+      throw new Error("Semantic environment is not available.");
+    }
+    return this.semanticEnvironment.queryText(query, limit);
+  }
+
   getSchedulerConfig(): SchedulerConfig {
     return {
       mode: this.settings.schedulerMode,
@@ -255,6 +269,46 @@ export default class MindmapPlugin extends Plugin {
       active: true,
     });
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  async openMindmapLookup(): Promise<void> {
+    this.focusLookupOnNextRender = true;
+    await this.openMindmapView();
+  }
+
+  consumeLookupFocusRequest(): boolean {
+    const requested = this.focusLookupOnNextRender;
+    this.focusLookupOnNextRender = false;
+    return requested;
+  }
+
+  getPinnedConnections(sourcePath: string): string[] {
+    return [...(this.settings.pinnedConnections[sourcePath] ?? [])];
+  }
+
+  isConnectionPinned(sourcePath: string, targetPath: string): boolean {
+    return this.getPinnedConnections(sourcePath).includes(targetPath);
+  }
+
+  async togglePinnedConnection(sourcePath: string, targetPath: string): Promise<boolean> {
+    const current = this.getPinnedConnections(sourcePath);
+    const existingIndex = current.indexOf(targetPath);
+    const pinned = existingIndex < 0;
+    if (pinned) {
+      current.unshift(targetPath);
+    } else {
+      current.splice(existingIndex, 1);
+    }
+
+    this.settings.pinnedConnections = {
+      ...this.settings.pinnedConnections,
+      [sourcePath]: current,
+    };
+    if (current.length === 0) {
+      delete this.settings.pinnedConnections[sourcePath];
+    }
+    await this.saveSettings();
+    return pinned;
   }
 
   async syncMindmapLocalGraph(file: TFile | null): Promise<void> {
