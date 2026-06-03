@@ -13,10 +13,6 @@ interface ScopeManagerOptions {
   compact?: boolean;
 }
 
-function selectionSummary(paths: string[]): string {
-  return paths.length > 0 ? paths.join(", ") : "None";
-}
-
 function cloneSelection(selection: ScopeSelection): ScopeSelection {
   return {
     currentPaths: [...selection.currentPaths],
@@ -324,8 +320,4 @@ export class ScopeManager {
     button.addEventListener("click", onClick);
     return button;
   }
-}
-
-export function formatScopeSummary(selection: ScopeSelection): string {
-  return `Current: ${selectionSummary(selection.currentPaths)}\nAll: ${selectionSummary(selection.allPaths)}`;
 }

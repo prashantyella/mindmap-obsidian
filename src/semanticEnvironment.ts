@@ -1,6 +1,6 @@
 import type { ResolvedRuntime } from "./pathResolver";
 import { SemanticWorkerClient, type SemanticWorkerClientOptions } from "./semanticWorkerClient";
-import type { LiveRelatedResponse, SemanticHealth } from "./semanticTypes";
+import type { LiveRelatedResponse, LookupRelatedResponse, SemanticHealth } from "./semanticTypes";
 
 export interface SemanticEnvironmentStatus {
   state: "off" | "starting" | "ready" | "degraded";
@@ -11,6 +11,7 @@ export interface SemanticEnvironmentStatus {
 interface SemanticClient {
   start(scope?: string): Promise<SemanticHealth>;
   queryRelated(path: string, ensureIndex: boolean): Promise<LiveRelatedResponse>;
+  queryText(query: string, limit?: number): Promise<LookupRelatedResponse>;
   shutdown(): Promise<void>;
 }
 
@@ -54,6 +55,17 @@ export class MindmapSemanticEnvironment {
       this.setStatus("degraded", toErrorMessage(error), null);
       await this.restart("current");
       return this.requireClient().queryRelated(path, ensureIndex);
+    }
+  }
+
+  async queryText(query: string, limit?: number): Promise<LookupRelatedResponse> {
+    await this.ensureReady();
+    try {
+      return await this.requireClient().queryText(query, limit);
+    } catch (error) {
+      this.setStatus("degraded", toErrorMessage(error), null);
+      await this.restart("current");
+      return this.requireClient().queryText(query, limit);
     }
   }
 

@@ -1799,6 +1799,61 @@ def query_related_for_note(
     ]
 
 
+def query_related_for_text(
+    query: str,
+    chunks,
+    notes_col,
+    ctx: RuntimeContext,
+    allowed_paths: set,
+    limit: Optional[int] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> List[Dict]:
+    query_text = query.strip()
+    if not query_text:
+        return []
+
+    result_limit = max(1, int(limit or ctx.config.get("related_limit", 8)))
+    candidate_limit = max(result_limit * 4, ctx.related_candidate_limit)
+    query_embedding = embed_texts(
+        ctx.embed_settings["base_url"],
+        ctx.embed_model,
+        [query_text[:4000]],
+        timeout=ctx.ollama_embed_timeout,
+        retries=ctx.ollama_retries,
+        backoff_seconds=ctx.ollama_backoff,
+        log_fn=log_fn,
+    )[0]
+
+    results = chunks.query(
+        query_embeddings=[query_embedding],
+        n_results=candidate_limit,
+        include=["metadatas", "distances"],
+    )
+    scores: Dict[str, float] = {}
+    metas = results.get("metadatas", [[]])[0]
+    dists = results.get("distances", [[]])[0] if results.get("distances") else [None] * len(metas)
+    for meta, dist in zip(metas, dists, strict=True):
+        path = meta.get("path") if isinstance(meta, dict) else None
+        if not path or path not in allowed_paths:
+            continue
+        score = 1 - dist if dist is not None else 0.0
+        if score < ctx.config.get("related_min_score", 0.0):
+            continue
+        if path not in scores or score > scores[path]:
+            scores[path] = score
+
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:result_limit]
+    return [
+        {
+            "path": path,
+            "score": score,
+            "kind": "lookup",
+            "title": Path(path).stem,
+        }
+        for path, score in ranked
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Local knowledge maintenance for Obsidian notes")
     parser.add_argument("--config", default=None, help="Config path")

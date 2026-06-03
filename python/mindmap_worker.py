@@ -20,6 +20,7 @@ from mindmap import (
     note_is_indexed,
     open_collections,
     query_related_for_note,
+    query_related_for_text,
     resolve_config_path,
     resolve_notes_paths,
     save_json,
@@ -144,6 +145,32 @@ class MindmapWorker:
             "related": related,
         }
 
+    def query_text(self, params: Dict) -> Dict:
+        self.require_initialized()
+        query = params.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise RuntimeError("query_text requires params.query")
+        limit = params.get("limit")
+        if limit is not None:
+            try:
+                limit = int(limit)
+            except (TypeError, ValueError):
+                raise RuntimeError("query_text params.limit must be a number") from None
+
+        related = query_related_for_text(
+            query,
+            self.chunks,
+            self.notes_col,
+            self.ctx,
+            self.allowed_paths,
+            limit=limit,
+            log_fn=self.log,
+        )
+        return {
+            "query": query.strip(),
+            "related": related,
+        }
+
     def refresh_config(self, params: Dict) -> Dict:
         return self.initialize(params)
 
@@ -169,6 +196,7 @@ def main() -> int:
         "index_paths": worker.index_paths,
         "delete_paths": worker.delete_paths,
         "query_related": worker.query_related,
+        "query_text": worker.query_text,
         "refresh_config": worker.refresh_config,
         "shutdown": worker.shutdown,
     }

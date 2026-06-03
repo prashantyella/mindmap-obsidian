@@ -1,4 +1,4 @@
-import { ItemView, TFile, WorkspaceLeaf } from "obsidian";
+import { ItemView, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { animate } from "motion";
 
 import type MindmapPlugin from "./main";
@@ -37,6 +37,15 @@ interface RelatedCandidate {
   heatmap: HeatmapCell[];
   liveScore?: number;
   liveKind?: string;
+  source?: "saved" | "live" | "lookup" | "pinned";
+  pinned?: boolean;
+}
+
+interface LookupState {
+  query: string;
+  status: "idle" | "loading" | "ready" | "error";
+  related: LiveRelatedResult[];
+  error: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -175,13 +184,19 @@ function sourceLevel(activePath: string, candidatePath: string): number {
   return 1;
 }
 
-function formatLiveDetail(candidate: RelatedCandidate): string | null {
+function formatScoreDetail(candidate: RelatedCandidate): string | null {
   if (typeof candidate.liveScore !== "number") {
+    if (candidate.pinned) {
+      return "Pinned connection.";
+    }
     return null;
   }
   const percent = Math.round(candidate.liveScore * 100);
+  if (candidate.source === "lookup") {
+    return `Lookup match (${percent}%).`;
+  }
   const kind = candidate.liveKind ?? "semantic";
-  return `Live ${kind} match (${percent}%).`;
+  return `${candidate.source === "live" ? "Live" : "Saved"} ${kind} match (${percent}%).`;
 }
 
 function renderLoadingSpinner(container: HTMLElement): void {
@@ -199,7 +214,20 @@ export class MindmapWorkspaceView extends ItemView {
   private activePath: string | null = null;
   private expandedPath: string | null | undefined = undefined;
   private renderedExpandedPath: string | null | undefined = undefined;
+  private renderedPinRevealPath: string | null = null;
   private liveRequestId = 0;
+  private lookupRequestId = 0;
+  private lookupTimer: number | null = null;
+  private pinRevealPath: string | null = null;
+  private lookupShouldRefocus = false;
+  private lookupSelectionStart: number | null = null;
+  private lookupSelectionEnd: number | null = null;
+  private lookupState: LookupState = {
+    query: "",
+    status: "idle",
+    related: [],
+    error: null,
+  };
   private liveState: SidebarLiveState = {
     path: "",
     status: "idle",
@@ -237,21 +265,46 @@ export class MindmapWorkspaceView extends ItemView {
     this.render();
   }
 
+  async onClose(): Promise<void> {
+    if (this.lookupTimer !== null) {
+      window.clearTimeout(this.lookupTimer);
+      this.lookupTimer = null;
+    }
+  }
+
   render(): void {
     const { containerEl } = this;
     const previousCardPositions = this.captureCardPositions(containerEl);
     const previousExpandedPath = this.renderedExpandedPath;
+    const previousPinRevealPath = this.renderedPinRevealPath;
     containerEl.empty();
     containerEl.addClass("mindmap-view");
 
     const activeFile = this.app.workspace.getActiveFile();
     const shell = containerEl.createDiv({ cls: "mindmap-sidebar" });
+    this.renderLookupSearch(shell);
 
     if (activeFile === null) {
       this.activePath = null;
       this.expandedPath = undefined;
       this.renderedExpandedPath = undefined;
-      this.renderEmpty(shell, "No active note", "Open a note to see its mindmap links.");
+      this.renderedPinRevealPath = null;
+      if (this.hasLookupQuery()) {
+        const candidates = this.getLookupCandidates(null);
+        if (this.isLoadingVisible()) {
+          this.renderInlineLoadingIndicator(shell);
+        }
+        if (candidates.length === 0) {
+          this.renderLookupResults(shell, null);
+          return;
+        }
+        const list = shell.createDiv({ cls: "mindmap-sidebar-list" });
+        for (const candidate of candidates) {
+          this.renderCandidate(list, candidate, false);
+        }
+      } else {
+        this.renderEmpty(shell, "No active note", "Open a note to see its mindmap links.");
+      }
       return;
     }
 
@@ -259,31 +312,42 @@ export class MindmapWorkspaceView extends ItemView {
       this.activePath = activeFile.path;
       this.expandedPath = undefined;
       this.renderedExpandedPath = undefined;
+      this.pinRevealPath = null;
+      this.renderedPinRevealPath = null;
       this.liveState = createIdleLiveState(activeFile.path);
     }
 
     this.ensureLiveQuery(activeFile);
 
     const persistedCandidates = this.getRelatedCandidates(activeFile);
-    const candidates = this.getDisplayCandidates(activeFile, persistedCandidates);
+    const candidates = this.hasLookupQuery()
+      ? this.getLookupCandidates(activeFile)
+      : this.getDisplayCandidates(activeFile, persistedCandidates);
     if (candidates.length > 0 && this.expandedPath === undefined) {
       this.expandedPath = candidates[0].path;
     }
 
     if (candidates.length === 0) {
-      if (this.liveState.status === "loading") {
+      if (this.isLoadingVisible()) {
         this.renderInlineLoadingIndicator(shell);
       }
       this.renderedExpandedPath = this.expandedPath;
-      this.renderEmpty(shell, NO_MINDMAP_CONNECTIONS_TITLE, NO_MINDMAP_CONNECTIONS_MESSAGE);
+      this.renderedPinRevealPath = null;
+      if (this.hasLookupQuery()) {
+        this.renderLookupResults(shell, activeFile);
+      } else {
+        this.renderEmpty(shell, NO_MINDMAP_CONNECTIONS_TITLE, NO_MINDMAP_CONNECTIONS_MESSAGE);
+      }
       return;
     }
 
-    if (this.liveState.status === "loading") {
+    if (this.isLoadingVisible()) {
       this.renderInlineLoadingIndicator(shell);
     }
 
-    this.renderHeatmap(shell, candidates);
+    if (!this.hasLookupQuery()) {
+      this.renderHeatmap(shell, candidates);
+    }
 
     const list = shell.createDiv({ cls: "mindmap-sidebar-list" });
     for (const candidate of candidates) {
@@ -291,7 +355,189 @@ export class MindmapWorkspaceView extends ItemView {
     }
 
     this.animateSidebar(shell, previousCardPositions, previousExpandedPath, this.expandedPath);
+    this.animatePinReveal(shell, previousPinRevealPath, this.pinRevealPath);
     this.renderedExpandedPath = this.expandedPath;
+    this.renderedPinRevealPath = this.pinRevealPath;
+  }
+
+  private renderLookupSearch(container: HTMLElement): void {
+    const search = container.createDiv({ cls: "mindmap-lookup" });
+    const input = search.createEl("input", {
+      cls: "mindmap-lookup-input",
+      attr: {
+        type: "search",
+        placeholder: "Ask across notes",
+        "aria-label": "Search Mindmap connections",
+        value: this.lookupState.query,
+      },
+    });
+    const searchButton = search.createEl("button", {
+      cls: "mindmap-lookup-button",
+      attr: {
+        type: "button",
+        "aria-label": "Search",
+      },
+    });
+    setIcon(searchButton, "search");
+    const clearButton = search.createEl("button", {
+      cls: "mindmap-lookup-button",
+      attr: {
+        type: "button",
+        "aria-label": "Clear search",
+      },
+    });
+    setIcon(clearButton, "x");
+
+    input.addEventListener("input", () => {
+      this.captureLookupInputState(input);
+      const hasQuery = input.value.trim().length > 0;
+      this.lookupState = {
+        ...this.lookupState,
+        query: input.value,
+        status: hasQuery ? "loading" : "idle",
+        related: [],
+        error: null,
+      };
+      this.lookupShouldRefocus = true;
+      if (!hasQuery) {
+        this.lookupRequestId += 1;
+        this.cancelLookupTimer();
+        this.render();
+        return;
+      }
+      this.render();
+      this.scheduleLookupQuery();
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      this.captureLookupInputState(input);
+      this.cancelLookupTimer();
+      this.runLookupQuery();
+    });
+    searchButton.addEventListener("click", () => {
+      this.cancelLookupTimer();
+      this.captureLookupInputState(input);
+      this.lookupShouldRefocus = true;
+      this.runLookupQuery();
+    });
+    clearButton.addEventListener("click", () => {
+      this.lookupRequestId += 1;
+      this.cancelLookupTimer();
+      this.lookupState = {
+        query: "",
+        status: "idle",
+        related: [],
+        error: null,
+      };
+      this.lookupShouldRefocus = true;
+      this.render();
+    });
+
+    if (this.lookupState.status === "error" && this.lookupState.error !== null) {
+      search.createDiv({ cls: "mindmap-lookup-error", text: this.lookupState.error });
+    }
+
+    if (this.lookupShouldRefocus || this.plugin.consumeLookupFocusRequest()) {
+      this.lookupShouldRefocus = false;
+      window.requestAnimationFrame(() => {
+        input.focus();
+        const start = this.lookupSelectionStart ?? input.value.length;
+        const end = this.lookupSelectionEnd ?? start;
+        input.setSelectionRange(Math.min(start, input.value.length), Math.min(end, input.value.length));
+      });
+    }
+  }
+
+  private captureLookupInputState(input: HTMLInputElement): void {
+    this.lookupSelectionStart = input.selectionStart;
+    this.lookupSelectionEnd = input.selectionEnd;
+  }
+
+  private renderLookupResults(container: HTMLElement, activeFile: TFile | null): void {
+    if (this.lookupState.status === "loading") {
+      this.renderEmpty(container, "Searching notes", "Finding semantic matches.");
+      return;
+    }
+    if (this.lookupState.status === "error") {
+      this.renderEmpty(container, "Lookup unavailable", this.lookupState.error ?? "Mindmap lookup could not run.");
+      return;
+    }
+    if (activeFile === null) {
+      this.renderEmpty(container, "No active note", "Lookup works without an active note, but pins need a source note.");
+      return;
+    }
+    this.renderEmpty(container, "No lookup matches", "Try a more specific question.");
+  }
+
+  private hasLookupQuery(): boolean {
+    return this.lookupState.query.trim().length > 0;
+  }
+
+  private isLoadingVisible(): boolean {
+    return this.hasLookupQuery() ? this.lookupState.status === "loading" : this.liveState.status === "loading";
+  }
+
+  private scheduleLookupQuery(): void {
+    this.cancelLookupTimer();
+    this.lookupTimer = window.setTimeout(() => {
+      this.lookupTimer = null;
+      this.runLookupQuery();
+    }, 350);
+  }
+
+  private cancelLookupTimer(): void {
+    if (this.lookupTimer === null) {
+      return;
+    }
+    window.clearTimeout(this.lookupTimer);
+    this.lookupTimer = null;
+  }
+
+  private runLookupQuery(): void {
+    const query = this.lookupState.query.trim();
+    if (!query) {
+      return;
+    }
+    const requestId = ++this.lookupRequestId;
+    this.lookupState = {
+      query,
+      status: "loading",
+      related: [],
+      error: null,
+    };
+    this.lookupShouldRefocus = true;
+    this.render();
+
+    void this.plugin.queryLookupRelated(query)
+      .then((response) => {
+        if (requestId !== this.lookupRequestId || response.query !== this.lookupState.query.trim()) {
+          return;
+        }
+        this.lookupState = {
+          query: response.query,
+          status: "ready",
+          related: response.related,
+          error: null,
+        };
+        this.lookupShouldRefocus = true;
+        this.render();
+      })
+      .catch((error) => {
+        if (requestId !== this.lookupRequestId) {
+          return;
+        }
+        this.lookupState = {
+          query,
+          status: "error",
+          related: [],
+          error: error instanceof Error ? error.message : String(error),
+        };
+        this.lookupShouldRefocus = true;
+        this.render();
+      });
   }
 
   private ensureLiveQuery(activeFile: TFile): void {
@@ -452,8 +698,10 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   private renderCandidate(container: HTMLElement, candidate: RelatedCandidate, expanded: boolean): void {
+    const activeFile = this.app.workspace.getActiveFile();
+    const pinRevealed = activeFile !== null && this.pinRevealPath === candidate.path;
     const row = container.createDiv({
-      cls: `mindmap-sidebar-card${expanded ? " is-expanded" : ""}`,
+      cls: `mindmap-sidebar-card${expanded ? " is-expanded" : ""}${pinRevealed ? " is-pin-revealed" : ""}`,
       attr: {
         role: "button",
         tabindex: "0",
@@ -464,29 +712,100 @@ export class MindmapWorkspaceView extends ItemView {
 
     row.addEventListener("click", () => {
       this.expandedPath = expanded ? null : candidate.path;
+      this.pinRevealPath = null;
+      this.render();
+    });
+    row.addEventListener("contextmenu", (event) => {
+      if (activeFile === null) {
+        return;
+      }
+      event.preventDefault();
+      this.pinRevealPath = pinRevealed ? null : candidate.path;
       this.render();
     });
     row.addEventListener("keydown", (event) => {
+      if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+        if (activeFile === null) {
+          return;
+        }
+        event.preventDefault();
+        this.pinRevealPath = pinRevealed ? null : candidate.path;
+        this.render();
+        return;
+      }
       if (event.key !== "Enter" && event.key !== " ") {
         return;
       }
 
       event.preventDefault();
       this.expandedPath = expanded ? null : candidate.path;
+      this.pinRevealPath = null;
       this.render();
     });
 
-    this.renderCandidateLink(row, candidate, "mindmap-sidebar-title");
+    if (activeFile !== null) {
+      this.renderPinAction(row, activeFile, candidate, pinRevealed);
+    }
+
+    const body = row.createDiv({ cls: "mindmap-sidebar-card-body" });
+    const top = body.createDiv({ cls: "mindmap-sidebar-card-top" });
+    const titleWrap = top.createDiv({ cls: "mindmap-sidebar-title-wrap" });
+    this.renderCandidateLink(titleWrap, candidate, "mindmap-sidebar-title");
+    this.renderCandidateMeta(top, candidate);
 
     if (!expanded) {
       return;
     }
 
-    const detail = row.createDiv({ cls: "mindmap-sidebar-detail" });
+    const detail = body.createDiv({ cls: "mindmap-sidebar-detail" });
     detail.createDiv({
       cls: "mindmap-sidebar-summary",
-      text: candidate.summary ?? formatLiveDetail(candidate) ?? "No summary available yet.",
+      text: candidate.summary ?? formatScoreDetail(candidate) ?? "No summary available yet.",
     });
+  }
+
+  private renderPinAction(container: HTMLElement, activeFile: TFile, candidate: RelatedCandidate, revealed: boolean): void {
+    const button = container.createEl("button", {
+      cls: `mindmap-sidebar-pin${candidate.pinned ? " is-pinned" : ""}`,
+      attr: {
+        type: "button",
+        "aria-label": candidate.pinned ? `Unpin ${candidate.title}` : `Pin ${candidate.title}`,
+        tabindex: revealed ? "0" : "-1",
+      },
+    });
+    setIcon(button, "pin");
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.plugin.togglePinnedConnection(activeFile.path, candidate.path).then(() => {
+        this.pinRevealPath = null;
+        this.render();
+      });
+    });
+  }
+
+  private renderCandidateMeta(container: HTMLElement, candidate: RelatedCandidate): void {
+    const meta = container.createDiv({ cls: "mindmap-sidebar-meta" });
+    const score = this.formatScore(candidate);
+    if (score !== null) {
+      meta.createSpan({
+        cls: "mindmap-sidebar-score",
+        text: score,
+        attr: {
+          "aria-label": `${score} semantic score`,
+        },
+      });
+    } else if (candidate.pinned) {
+      meta.createSpan({ cls: "mindmap-sidebar-score", text: "Pinned" });
+    }
+  }
+
+  private formatScore(candidate: RelatedCandidate): string | null {
+    if (typeof candidate.liveScore !== "number") {
+      return null;
+    }
+    const percent = Math.max(0, Math.min(100, Math.round(candidate.liveScore * 100)));
+    return `${percent}`;
   }
 
   private renderEmpty(container: HTMLElement, title: string, message: string): void {
@@ -565,6 +884,41 @@ export class MindmapWorkspaceView extends ItemView {
     }
   }
 
+  private animatePinReveal(container: HTMLElement, previousPath: string | null, nextPath: string | null): void {
+    if (previousPath === nextPath) {
+      return;
+    }
+
+    if (previousPath !== null) {
+      const row = this.findCandidateRow(container, previousPath);
+      const body = row?.querySelector(".mindmap-sidebar-card-body");
+      const pin = row?.querySelector(".mindmap-sidebar-pin");
+      if (body instanceof HTMLElement) {
+        animate(body, { x: [32, 0] }, { duration: 0.16, ease: [0.25, 1, 0.5, 1] });
+      }
+      if (pin instanceof HTMLElement) {
+        animate(pin, { opacity: [1, 0], x: [0, -4] }, { duration: 0.12, ease: [0.25, 1, 0.5, 1] });
+      }
+    }
+
+    if (nextPath !== null) {
+      const row = this.findCandidateRow(container, nextPath);
+      const body = row?.querySelector(".mindmap-sidebar-card-body");
+      const pin = row?.querySelector(".mindmap-sidebar-pin");
+      if (body instanceof HTMLElement) {
+        animate(body, { x: [0, 32] }, { duration: 0.16, ease: [0.25, 1, 0.5, 1] });
+      }
+      if (pin instanceof HTMLElement) {
+        animate(pin, { opacity: [0, 1], x: [-4, 0] }, { duration: 0.14, ease: [0.25, 1, 0.5, 1] });
+      }
+    }
+  }
+
+  private findCandidateRow(container: HTMLElement, path: string): HTMLElement | null {
+    return Array.from(container.querySelectorAll(".mindmap-sidebar-card"))
+      .find((row): row is HTMLElement => row instanceof HTMLElement && row.dataset.path === path) ?? null;
+  }
+
   private captureCardPositions(container: HTMLElement): Map<string, DOMRect> {
     const positions = new Map<string, DOMRect>();
     for (const row of Array.from(container.querySelectorAll(".mindmap-sidebar-card"))) {
@@ -578,22 +932,30 @@ export class MindmapWorkspaceView extends ItemView {
 
   private getDisplayCandidates(activeFile: TFile, persistedCandidates: RelatedCandidate[]): RelatedCandidate[] {
     if (!this.plugin.settings.liveSemanticLookupEnabled) {
-      return persistedCandidates;
+      return this.applyPinnedCandidates(activeFile, persistedCandidates);
     }
     const liveRelated = getDisplayLiveRelated(activeFile.path, this.liveState);
     if (liveRelated.length > 0) {
-      return this.getLiveCandidates(activeFile, liveRelated);
+      return this.applyPinnedCandidates(activeFile, this.getLiveCandidates(activeFile, liveRelated, "live"));
     }
-    return persistedCandidates;
+    return this.applyPinnedCandidates(activeFile, persistedCandidates);
   }
 
-  private getLiveCandidates(activeFile: TFile, related: LiveRelatedResult[]): RelatedCandidate[] {
-    const activeFrontmatter = this.getFrontmatter(activeFile);
-    const activeConcepts = normalizeTextList(activeFrontmatter.concepts);
-    const activeTags = normalizeTextList(activeFrontmatter.tags);
+  private getLookupCandidates(activeFile: TFile | null): RelatedCandidate[] {
+    if (this.lookupState.related.length === 0) {
+      return activeFile === null ? [] : this.applyPinnedCandidates(activeFile, []);
+    }
+    const lookupCandidates = this.getLiveCandidates(activeFile, this.lookupState.related, "lookup");
+    return activeFile === null ? lookupCandidates : this.applyPinnedCandidates(activeFile, lookupCandidates);
+  }
+
+  private getLiveCandidates(activeFile: TFile | null, related: LiveRelatedResult[], source: "live" | "lookup"): RelatedCandidate[] {
+    const activeFrontmatter = activeFile === null ? {} : this.getFrontmatter(activeFile);
+    const activeConcepts = activeFile === null ? [] : normalizeTextList(activeFrontmatter.concepts);
+    const activeTags = activeFile === null ? [] : normalizeTextList(activeFrontmatter.tags);
 
     return related.map((item) => {
-      const file = this.resolveRelatedFile(item.path, activeFile.path);
+      const file = this.resolveRelatedFile(item.path, activeFile?.path ?? "");
       const frontmatter = file === null ? {} : this.getFrontmatter(file);
       const resolvedPath = file?.path ?? item.path;
 
@@ -603,9 +965,10 @@ export class MindmapWorkspaceView extends ItemView {
         title: item.title ?? file?.basename ?? titleFromPath(item.path),
         folderPath: parentFolderFromPath(resolvedPath) || "Vault root",
         summary: coerceText(frontmatter.summary),
-        heatmap: this.getHeatmapCells(activeFile.path, activeConcepts, activeTags, resolvedPath, frontmatter),
+        heatmap: activeFile === null ? [] : this.getHeatmapCells(activeFile.path, activeConcepts, activeTags, resolvedPath, frontmatter),
         liveScore: item.score,
         liveKind: item.kind,
+        source,
       };
     });
   }
@@ -628,8 +991,57 @@ export class MindmapWorkspaceView extends ItemView {
         folderPath: parentFolderFromPath(resolvedPath) || "Vault root",
         summary: coerceText(frontmatter.summary),
         heatmap: this.getHeatmapCells(activeFile.path, activeConcepts, activeTags, resolvedPath, frontmatter),
+        source: "saved",
       };
     });
+  }
+
+  private applyPinnedCandidates(activeFile: TFile, candidates: RelatedCandidate[]): RelatedCandidate[] {
+    const pinnedPaths = this.plugin.getPinnedConnections(activeFile.path);
+    const byPath = new Map<string, RelatedCandidate>();
+    for (const candidate of candidates) {
+      byPath.set(candidate.path, {
+        ...candidate,
+        pinned: this.plugin.isConnectionPinned(activeFile.path, candidate.path),
+      });
+    }
+
+    const pinnedCandidates = pinnedPaths.map((path) => {
+      const existing = byPath.get(path);
+      if (existing !== undefined) {
+        byPath.delete(path);
+        return {
+          ...existing,
+          pinned: true,
+        };
+      }
+      return this.getPinnedCandidate(activeFile, path);
+    });
+
+    return [
+      ...pinnedCandidates,
+      ...Array.from(byPath.values()),
+    ];
+  }
+
+  private getPinnedCandidate(activeFile: TFile, path: string): RelatedCandidate {
+    const file = this.resolveRelatedFile(path, activeFile.path);
+    const frontmatter = file === null ? {} : this.getFrontmatter(file);
+    const resolvedPath = file?.path ?? path;
+    const activeFrontmatter = this.getFrontmatter(activeFile);
+    const activeConcepts = normalizeTextList(activeFrontmatter.concepts);
+    const activeTags = normalizeTextList(activeFrontmatter.tags);
+
+    return {
+      file,
+      path: resolvedPath,
+      title: file?.basename ?? titleFromPath(path),
+      folderPath: parentFolderFromPath(resolvedPath) || "Vault root",
+      summary: coerceText(frontmatter.summary),
+      heatmap: this.getHeatmapCells(activeFile.path, activeConcepts, activeTags, resolvedPath, frontmatter),
+      source: "pinned",
+      pinned: true,
+    };
   }
 
   private getHeatmapCells(

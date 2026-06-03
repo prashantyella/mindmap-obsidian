@@ -5,6 +5,7 @@ import type {
   DeletePathsResponse,
   IndexPathsResponse,
   LiveRelatedResponse,
+  LookupRelatedResponse,
   SemanticHealth,
   SemanticWorkerFailure,
   SemanticWorkerMethod,
@@ -70,6 +71,13 @@ export class SemanticWorkerClient {
     });
   }
 
+  queryText(query: string, limit?: number): Promise<LookupRelatedResponse> {
+    return this.request<LookupRelatedResponse>("query_text", {
+      query,
+      ...(typeof limit === "number" ? { limit } : {}),
+    });
+  }
+
   indexPaths(paths: string[]): Promise<IndexPathsResponse> {
     return this.request<IndexPathsResponse>("index_paths", { paths });
   }
@@ -97,8 +105,8 @@ export class SemanticWorkerClient {
     this.stdoutBuffer = "";
     this.stderrBuffer = "";
     this.stopping = false;
-    this.child = spawn(this.options.runtime.command.command, [...this.options.runtime.command.args, workerPath], {
-      cwd: this.options.runtime.command.cwd,
+    this.child = spawn(this.options.runtime.command.command, [workerPath], {
+      cwd: path.dirname(workerPath),
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child.stdout.setEncoding("utf8");

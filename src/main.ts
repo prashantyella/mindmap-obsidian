@@ -3,18 +3,38 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 
-import { App, FileSystemAdapter, Modal, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { FileSystemAdapter, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 
 import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput, type PreflightResult } from "./diagnostics";
-import { isScopeSetupComplete, listVaultFolderOptions, readScopeSelection, updateScopeSelection, type ScopeSelection, type VaultFolderOption } from "./onboarding";
+import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } from "./onboarding";
 import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
+import { registerMindmapCommands } from "./pluginCommands";
+import {
+  getLlmProviderConfigStatus as resolveLlmProviderConfigStatus,
+  getScopeSetupStatus as resolveScopeSetupStatus,
+  saveLlmProviderConfig as writeLlmProviderConfig,
+  saveScopeSetup as writeScopeSetup,
+  type LlmProviderConfig,
+  type LlmProviderConfigStatus,
+  type ScopeSetupStatus,
+} from "./pluginConfig";
+import {
+  buildDiagnosticsSummary,
+  buildPendingSummary,
+  buildSchedulerSummary,
+  buildScopeSetupSummary,
+  type DiagnosticsSummaryState,
+  type SchedulerSummaryState,
+} from "./pluginSummaries";
 import { assertAllowedPluginArgs } from "./runArguments";
-import { getRunProfile, type RunConfirmation, type RunScope } from "./runProfiles";
+import { getRunProfile, type RunScope } from "./runProfiles";
+import { confirmMindmapRun } from "./runConfirmModal";
 import { migrateLegacyPluginVaultRoot } from "./runtimeConfigMigration";
 import { ensureBundledRuntimeAssets } from "./runtimeAssets";
 import { MindmapSemanticEnvironment, type SemanticEnvironmentStatus } from "./semanticEnvironment";
-import type { LiveRelatedResponse } from "./semanticTypes";
+import type { LiveRelatedResponse, LookupRelatedResponse } from "./semanticTypes";
+import { buildMindmapLocalGraphState, isMindmapLocalGraphLeaf } from "./localGraph";
 import {
   buildDailyCalendarIntervals,
   buildLaunchAgentPlist,
@@ -28,7 +48,6 @@ import {
   type LaunchAgentSpec,
 } from "./launchAgent";
 import {
-  buildSchedulerStatus,
   computeNextRunAt,
   formatTimestamp,
   getSchedulerAction,
@@ -53,7 +72,7 @@ function splitLogLines(text: string): string[] {
 
 type RunTrigger = "manual" | "scheduled";
 
-interface SchedulerState {
+interface SchedulerState extends SchedulerSummaryState {
   nextRunAt: number | null;
   lastRunAt: number | null;
   lastTrigger: RunTrigger | null;
@@ -63,88 +82,10 @@ interface SchedulerState {
   launchAgentPaths: string[];
 }
 
-interface DiagnosticsState {
+interface DiagnosticsState extends DiagnosticsSummaryState {
   inProgress: boolean;
   lastRunAt: number | null;
   result: PreflightResult | null;
-}
-
-class MindmapRunConfirmModal extends Modal {
-  private settled = false;
-
-  constructor(
-    app: App,
-    private readonly confirmation: RunConfirmation,
-    private readonly resolve: (confirmed: boolean) => void,
-  ) {
-    super(app);
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.addClass("mindmap-confirm-modal");
-    contentEl.createEl("h2", { text: this.confirmation.title });
-    contentEl.createEl("p", { text: this.confirmation.message });
-
-    const buttonContainer = contentEl.createDiv({ cls: "modal-button-container" });
-    const cancelButton = buttonContainer.createEl("button", { text: "Cancel" });
-    cancelButton.addEventListener("click", () => this.finish(false));
-
-    const confirmButton = buttonContainer.createEl("button", { text: this.confirmation.confirmText });
-    if (this.confirmation.confirmClass) {
-      confirmButton.addClass(this.confirmation.confirmClass);
-    }
-    confirmButton.addEventListener("click", () => this.finish(true));
-    confirmButton.focus();
-  }
-
-  onClose(): void {
-    this.contentEl.empty();
-    if (!this.settled) {
-      this.settled = true;
-      this.resolve(false);
-    }
-  }
-
-  private finish(confirmed: boolean): void {
-    if (this.settled) {
-      return;
-    }
-    this.settled = true;
-    this.resolve(confirmed);
-    this.close();
-  }
-}
-
-function confirmMindmapRun(app: App, confirmation: RunConfirmation): Promise<boolean> {
-  return new Promise((resolve) => {
-    new MindmapRunConfirmModal(app, confirmation, resolve).open();
-  });
-}
-
-export interface ScopeSetupStatus {
-  complete: boolean;
-  canManage: boolean;
-  configPath: string | null;
-  currentPaths: string[];
-  allPaths: string[];
-  guidance: string;
-}
-
-export interface LlmProviderConfig {
-  provider: "ollama" | "openai_compatible";
-  baseUrl: string;
-  model: string;
-  apiKey: string;
-  maxTokens: number;
-  enableThinking: boolean;
-}
-
-export interface LlmProviderConfigStatus extends LlmProviderConfig {
-  canManage: boolean;
-  configPath: string | null;
-  guidance: string;
 }
 
 export default class MindmapPlugin extends Plugin {
@@ -170,6 +111,7 @@ export default class MindmapPlugin extends Plugin {
   private semanticEnvironment: MindmapSemanticEnvironment | null = null;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
+  private focusLookupOnNextRender = false;
   private diagnosticsState: DiagnosticsState = {
     inProgress: false,
     lastRunAt: null,
@@ -203,102 +145,7 @@ export default class MindmapPlugin extends Plugin {
       () => this.updateStatusBar(),
     );
 
-    this.addCommand({
-      id: "mindmap-open-view",
-      name: "Open Mindmap",
-      callback: () => {
-        void this.openMindmapView();
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-run-now",
-      name: "Run mindmap (current scope)",
-      callback: () => {
-        void this.runMindmap("manual", "current");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-run-all",
-      name: "Run mindmap (all scopes)",
-      callback: () => {
-        void this.runMindmap("manual", "all");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-refresh-all",
-      name: "Run mindmap full refresh (all notes)",
-      callback: () => {
-        void this.runMindmap("manual", "refreshAll");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-refresh-metadata-all",
-      name: "Run mindmap metadata refresh (all notes)",
-      callback: () => {
-        void this.runMindmap("manual", "metadataAll");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-rebuild-all",
-      name: "Run mindmap full rebuild (all notes)",
-      callback: () => {
-        void this.runMindmap("manual", "rebuildAll");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-enable-scheduler",
-      name: "Enable mindmap interval scheduler",
-      callback: () => {
-        void this.setSchedulerMode("interval");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-enable-launchagent-scheduler",
-      name: "Enable mindmap LaunchAgent scheduler",
-      callback: () => {
-        void this.setSchedulerMode("launchAgent");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-disable-scheduler",
-      name: "Disable mindmap schedulers",
-      callback: () => {
-        void this.setSchedulerMode("manual");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-open-status",
-      name: "Show mindmap status",
-      callback: () => {
-        this.showRuntimeNotice(this.getResolvedRuntime());
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-validate-runtime",
-      name: "Run mindmap preflight checks",
-      callback: () => {
-        void this.runPreflight("manual");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-start-semantic-environment",
-      name: "Start Mindmap semantic environment",
-      callback: () => {
-        void this.startSemanticEnvironment(true);
-      },
-    });
-
+    registerMindmapCommands(this);
     this.syncScheduler();
     this.registerVaultRefreshEvents();
     void this.pendingScanService.warm().then(() => this.updateStatusBar());
@@ -322,6 +169,9 @@ export default class MindmapPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    if (typeof this.settings.pinnedConnections !== "object" || this.settings.pinnedConnections === null || Array.isArray(this.settings.pinnedConnections)) {
+      this.settings.pinnedConnections = {};
+    }
     this.settings.schedulerIntervalMinutes = normalizeSchedulerInterval(this.settings.schedulerIntervalMinutes);
     this.settings.launchAgentDailyHour = normalizeHour(this.settings.launchAgentDailyHour);
     this.settings.launchAgentDailyMinute = normalizeMinute(this.settings.launchAgentDailyMinute);
@@ -372,6 +222,16 @@ export default class MindmapPlugin extends Plugin {
     return this.semanticEnvironment.queryRelated(path, this.settings.liveSemanticEnsureActiveNoteIndexed);
   }
 
+  async queryLookupRelated(query: string, limit?: number): Promise<LookupRelatedResponse> {
+    if (!this.settings.liveSemanticLookupEnabled) {
+      throw new Error("Live semantic lookup is disabled.");
+    }
+    if (!this.semanticEnvironment) {
+      throw new Error("Semantic environment is not available.");
+    }
+    return this.semanticEnvironment.queryText(query, limit);
+  }
+
   getSchedulerConfig(): SchedulerConfig {
     return {
       mode: this.settings.schedulerMode,
@@ -381,42 +241,15 @@ export default class MindmapPlugin extends Plugin {
 
   getSchedulerSummary(): DocumentFragment {
     const config = this.getSchedulerConfig();
-    const status = buildSchedulerStatus(config, this.schedulerState.nextRunAt);
-    const fragment = document.createDocumentFragment();
-    fragment.appendText(`Mode: ${config.mode}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Internal scheduler enabled: ${status.enabled ? "Yes" : "No"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Interval: ${status.intervalMinutes} minutes`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`LaunchAgent scheduler enabled: ${isLaunchAgentSchedulerEnabled(config.mode) ? "Yes" : "No"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(
+    return buildSchedulerSummary(
+      config,
+      this.schedulerState,
+      this.currentProcess !== null,
       `LaunchAgent daily: ${formatClockTime({ hour: this.settings.launchAgentDailyHour, minute: this.settings.launchAgentDailyMinute })} Mon-Sat`,
-    );
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(
       this.settings.launchAgentWeeklyEnabled
         ? `LaunchAgent weekly refresh: ${formatClockTime({ hour: this.settings.launchAgentWeeklyHour, minute: this.settings.launchAgentWeeklyMinute })} Sunday`
         : "LaunchAgent weekly refresh: disabled",
     );
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Next run: ${formatTimestamp(status.nextRunAt)}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Last result: ${this.schedulerState.lastMessage}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`LaunchAgent status: ${this.schedulerState.launchAgentMessage}`);
-    if (this.schedulerState.launchAgentPaths.length > 0) {
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText(`LaunchAgent files: ${this.schedulerState.launchAgentPaths.join(", ")}`);
-    }
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Active run: ${this.currentProcess ? "Yes" : "No"}`);
-    if (this.schedulerState.lastRunAt !== null) {
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText(`Last run at: ${formatTimestamp(this.schedulerState.lastRunAt)}`);
-    }
-    return fragment;
   }
 
   getRecentLogLines(): string[] {
@@ -424,16 +257,11 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async openMindmapView(): Promise<void> {
-    const existing = this.app.workspace.getLeavesOfType(MINDMAP_VIEW_TYPE);
-    for (const leaf of existing) {
-      leaf.detach();
-    }
-    this.mindmapLocalGraphLeaf = null;
-    this.mindmapLocalGraphPath = null;
+    this.app.workspace.detachLeavesOfType(MINDMAP_VIEW_TYPE);
 
     const leaf = await this.app.workspace.ensureSideLeaf(MINDMAP_VIEW_TYPE, "right", {
       active: true,
-      split: true,
+      split: false,
       reveal: true,
     });
     await leaf.setViewState({
@@ -441,6 +269,46 @@ export default class MindmapPlugin extends Plugin {
       active: true,
     });
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  async openMindmapLookup(): Promise<void> {
+    this.focusLookupOnNextRender = true;
+    await this.openMindmapView();
+  }
+
+  consumeLookupFocusRequest(): boolean {
+    const requested = this.focusLookupOnNextRender;
+    this.focusLookupOnNextRender = false;
+    return requested;
+  }
+
+  getPinnedConnections(sourcePath: string): string[] {
+    return [...(this.settings.pinnedConnections[sourcePath] ?? [])];
+  }
+
+  isConnectionPinned(sourcePath: string, targetPath: string): boolean {
+    return this.getPinnedConnections(sourcePath).includes(targetPath);
+  }
+
+  async togglePinnedConnection(sourcePath: string, targetPath: string): Promise<boolean> {
+    const current = this.getPinnedConnections(sourcePath);
+    const existingIndex = current.indexOf(targetPath);
+    const pinned = existingIndex < 0;
+    if (pinned) {
+      current.unshift(targetPath);
+    } else {
+      current.splice(existingIndex, 1);
+    }
+
+    this.settings.pinnedConnections = {
+      ...this.settings.pinnedConnections,
+      [sourcePath]: current,
+    };
+    if (current.length === 0) {
+      delete this.settings.pinnedConnections[sourcePath];
+    }
+    await this.saveSettings();
+    return pinned;
   }
 
   async syncMindmapLocalGraph(file: TFile | null): Promise<void> {
@@ -459,61 +327,22 @@ export default class MindmapPlugin extends Plugin {
       }
     }
 
+    const state = buildMindmapLocalGraphState(this.manifest.id, file.path);
     this.mindmapLocalGraphLeaf = await this.app.workspace.ensureSideLeaf("localgraph", "right", {
       active: false,
       split: true,
       reveal: true,
-      state: this.getMindmapLocalGraphState(file.path),
     });
     await this.mindmapLocalGraphLeaf.setViewState({
       type: "localgraph",
-      state: this.getMindmapLocalGraphState(file.path),
+      state,
       active: false,
     });
     this.mindmapLocalGraphPath = file.path;
   }
 
-  private getMindmapLocalGraphState(filePath: string): Record<string, unknown> {
-    return {
-      pluginId: this.manifest.id,
-      file: filePath,
-      options: {
-        "collapse-filter": true,
-        search: "",
-        localJumps: 1,
-        localBacklinks: true,
-        localForelinks: true,
-        localInterlinks: false,
-        showTags: false,
-        showAttachments: false,
-        hideUnresolved: false,
-        "collapse-color-groups": true,
-        colorGroups: [],
-        "collapse-display": true,
-        showArrow: false,
-        textFadeMultiplier: 0,
-        nodeSizeMultiplier: 1,
-        lineSizeMultiplier: 1,
-        "collapse-forces": true,
-        centerStrength: 0.52,
-        repelStrength: 10,
-        linkStrength: 1,
-        linkDistance: 250,
-        scale: 1,
-        close: false,
-      },
-    };
-  }
-
   private isMindmapLocalGraphLeaf(leaf: WorkspaceLeaf): boolean {
-    if (leaf === this.mindmapLocalGraphLeaf) {
-      return true;
-    }
-
-    const state = leaf.getViewState().state;
-    return typeof state === "object"
-      && state !== null
-      && (state as Record<string, unknown>).pluginId === this.manifest.id;
+    return isMindmapLocalGraphLeaf(leaf, this.mindmapLocalGraphLeaf, this.manifest.id);
   }
 
   getPendingSnapshot(): PendingSnapshot {
@@ -537,77 +366,12 @@ export default class MindmapPlugin extends Plugin {
   }
 
   getPendingSummary(): DocumentFragment {
-    const snapshot = this.getPendingSnapshot();
-    const fragment = document.createDocumentFragment();
-    if (!snapshot.available) {
-      fragment.appendText(`Pending scan unavailable: ${snapshot.reason}`);
-      return fragment;
-    }
-
-    fragment.appendText(`Current scope: ${snapshot.current.total} pending`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`All scopes: ${snapshot.all.total} pending`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Top current items: ${snapshot.current.items.join(", ") || "None"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Top all items: ${snapshot.all.items.join(", ") || "None"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(
-      `Last scan: ${snapshot.metrics.durationMs}ms, listed ${snapshot.metrics.filesListed}, rescanned ${snapshot.metrics.filesScanned}, updated ${snapshot.metrics.filesUpdated}`,
-    );
-    return fragment;
+    return buildPendingSummary(this.getPendingSnapshot());
   }
 
   getScopeSetupStatus(): ScopeSetupStatus {
     const runtime = this.getResolvedRuntime();
-    if (!runtime.valid) {
-      const error = runtime.messages.find((message) => message.level === "error");
-      return {
-        complete: false,
-        canManage: false,
-        configPath: null,
-        currentPaths: [],
-        allPaths: [],
-        guidance: error?.message ?? "Mindmap runtime is not ready.",
-      };
-    }
-
-    if (!this.canManageConfig(runtime)) {
-      return {
-        complete: false,
-        canManage: false,
-        configPath: runtime.configPath,
-        currentPaths: [],
-        allPaths: [],
-        guidance: "Scope setup controls only the bundled plugin config. Reset config path to default or update your custom config manually.",
-      };
-    }
-
-    try {
-      const rawConfig = fs.readFileSync(runtime.configPath, "utf8");
-      const selection = readScopeSelection(rawConfig);
-      return {
-        complete: isScopeSetupComplete(selection),
-        canManage: true,
-        configPath: runtime.configPath,
-        currentPaths: selection.currentPaths,
-        allPaths: selection.allPaths,
-        guidance: isScopeSetupComplete(selection)
-          ? "Scope folders are configured."
-          : "Select at least one folder for current and all scopes, then save setup.",
-      };
-    } catch (error) {
-      return {
-        complete: false,
-        canManage: true,
-        configPath: runtime.configPath,
-        currentPaths: [],
-        allPaths: [],
-        guidance: error instanceof Error
-          ? `Mindmap config could not be read: ${error.message}`
-          : "Mindmap config could not be read.",
-      };
-    }
+    return resolveScopeSetupStatus(runtime, runtime.valid && this.canManageConfig(runtime));
   }
 
   getVaultFolderOptions(): VaultFolderOption[] {
@@ -625,71 +389,15 @@ export default class MindmapPlugin extends Plugin {
       throw new Error(status.guidance);
     }
 
-    const updated = updateScopeSelection(fs.readFileSync(status.configPath, "utf8"), selection);
-    fs.writeFileSync(status.configPath, updated, "utf8");
-    this.appendLog(`[setup] Updated scope folders in ${status.configPath}`);
+    const configPath = writeScopeSetup(status, selection);
+    this.appendLog(`[setup] Updated scope folders in ${configPath}`);
     this.pendingScanService?.requestRefresh("scope setup updated");
     this.updateStatusBar();
   }
 
   getLlmProviderConfigStatus(): LlmProviderConfigStatus {
     const runtime = this.getResolvedRuntime();
-    const fallback: LlmProviderConfig = {
-      provider: "openai_compatible",
-      baseUrl: "http://localhost:8000/v1",
-      model: "gemma-4-E4B-it-MLX-8bit",
-      apiKey: "",
-      maxTokens: 1024,
-      enableThinking: true,
-    };
-
-    if (!runtime.valid) {
-      const error = runtime.messages.find((message) => message.level === "error");
-      return {
-        ...fallback,
-        canManage: false,
-        configPath: null,
-        guidance: error?.message ?? "Mindmap runtime is not ready.",
-      };
-    }
-
-    if (!this.canManageConfig(runtime)) {
-      return {
-        ...fallback,
-        canManage: false,
-        configPath: runtime.configPath,
-        guidance: "Provider setup controls only the bundled plugin config. Reset config path to default or update your custom config manually.",
-      };
-    }
-
-    try {
-      const config = this.readRuntimeConfig(runtime.configPath);
-      const provider = config.llm_provider === "openai_compatible" ? "openai_compatible" : "ollama";
-      const templateKwargs = typeof config.llm_chat_template_kwargs === "object" && config.llm_chat_template_kwargs !== null && !Array.isArray(config.llm_chat_template_kwargs)
-        ? config.llm_chat_template_kwargs as Record<string, unknown>
-        : {};
-      const maxTokens = Number.parseInt(String(config.llm_max_tokens ?? fallback.maxTokens), 10);
-      return {
-        provider,
-        baseUrl: String(config.llm_base_url ?? config.ollama_base_url ?? fallback.baseUrl),
-        model: String(config.llm_model ?? fallback.model),
-        apiKey: String(config.llm_api_key ?? ""),
-        maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : fallback.maxTokens,
-        enableThinking: templateKwargs.enable_thinking === false ? false : true,
-        canManage: true,
-        configPath: runtime.configPath,
-        guidance: "LLM provider config is editable.",
-      };
-    } catch (error) {
-      return {
-        ...fallback,
-        canManage: true,
-        configPath: runtime.configPath,
-        guidance: error instanceof Error
-          ? `Mindmap config could not be read: ${error.message}`
-          : "Mindmap config could not be read.",
-      };
-    }
+    return resolveLlmProviderConfigStatus(runtime, runtime.valid && this.canManageConfig(runtime));
   }
 
   saveLlmProviderConfig(providerConfig: LlmProviderConfig): void {
@@ -698,86 +406,16 @@ export default class MindmapPlugin extends Plugin {
       throw new Error(status.guidance);
     }
 
-    const config = this.readRuntimeConfig(status.configPath);
-    config.llm_provider = providerConfig.provider;
-    config.llm_base_url = providerConfig.baseUrl.trim();
-    config.llm_model = providerConfig.model.trim();
-    config.llm_api_key = providerConfig.apiKey;
-    config.llm_api_key_env = "";
-    config.llm_max_tokens = Number.isFinite(providerConfig.maxTokens) && providerConfig.maxTokens > 0
-      ? Math.trunc(providerConfig.maxTokens)
-      : 1024;
-
-    const templateKwargs = typeof config.llm_chat_template_kwargs === "object" && config.llm_chat_template_kwargs !== null && !Array.isArray(config.llm_chat_template_kwargs)
-      ? config.llm_chat_template_kwargs as Record<string, unknown>
-      : {};
-    templateKwargs.enable_thinking = providerConfig.enableThinking;
-    config.llm_chat_template_kwargs = templateKwargs;
-
-    fs.writeFileSync(status.configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-    this.appendLog(`[setup] Updated LLM provider config in ${status.configPath}`);
-  }
-
-  private readRuntimeConfig(configPath: string): Record<string, unknown> {
-    const config = JSON.parse(fs.readFileSync(configPath, "utf8")) as unknown;
-    if (typeof config !== "object" || config === null || Array.isArray(config)) {
-      throw new Error("Mindmap config must be a JSON object.");
-    }
-    return config as Record<string, unknown>;
+    const configPath = writeLlmProviderConfig(status, providerConfig);
+    this.appendLog(`[setup] Updated LLM provider config in ${configPath}`);
   }
 
   getScopeSetupSummary(): DocumentFragment {
-    const status = this.getScopeSetupStatus();
-    const fragment = document.createDocumentFragment();
-    fragment.appendText(`Configured: ${status.complete ? "Yes" : "No"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Config: ${status.configPath ?? "Unavailable"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Current scope: ${status.currentPaths.join(", ") || "None"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`All scopes: ${status.allPaths.join(", ") || "None"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(status.guidance);
-    return fragment;
+    return buildScopeSetupSummary(this.getScopeSetupStatus());
   }
 
   getDiagnosticsSummary(): DocumentFragment {
-    const fragment = document.createDocumentFragment();
-    const { result, inProgress, lastRunAt } = this.diagnosticsState;
-
-    fragment.appendText(`Preflight running: ${inProgress ? "Yes" : "No"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Last preflight: ${formatTimestamp(lastRunAt)}`);
-
-    if (!result) {
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText("No preflight result recorded yet.");
-    } else {
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText(`Status: ${result.ok ? "Ready" : "Not ready"}`);
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText(`Summary: ${result.summary}`);
-      for (const check of result.checks) {
-        fragment.appendChild(document.createElement("br"));
-        fragment.appendText(`[${check.status}] ${check.label}: ${check.message}`);
-        if (check.guidance) {
-          fragment.appendChild(document.createElement("br"));
-          fragment.appendText(`Guidance: ${check.guidance}`);
-        }
-      }
-    }
-
-    const recent = this.getRecentLogLines().slice(-6);
-    if (recent.length > 0) {
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText("Recent diagnostics:");
-      for (const line of recent) {
-        fragment.appendChild(document.createElement("br"));
-        fragment.appendText(line);
-      }
-    }
-
-    return fragment;
+    return buildDiagnosticsSummary(this.diagnosticsState, this.getRecentLogLines());
   }
 
   showRuntimeNotice(runtime: ResolvedRuntime): void {
