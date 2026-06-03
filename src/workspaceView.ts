@@ -390,20 +390,22 @@ export class MindmapWorkspaceView extends ItemView {
 
     input.addEventListener("input", () => {
       this.captureLookupInputState(input);
+      const hasQuery = input.value.trim().length > 0;
       this.lookupState = {
         ...this.lookupState,
         query: input.value,
-        status: input.value.trim() ? this.lookupState.status : "idle",
-        related: input.value.trim() ? this.lookupState.related : [],
+        status: hasQuery ? "loading" : "idle",
+        related: [],
         error: null,
       };
       this.lookupShouldRefocus = true;
-      if (!input.value.trim()) {
+      if (!hasQuery) {
         this.lookupRequestId += 1;
         this.cancelLookupTimer();
         this.render();
         return;
       }
+      this.render();
       this.scheduleLookupQuery();
     });
     input.addEventListener("keydown", (event) => {
@@ -503,10 +505,11 @@ export class MindmapWorkspaceView extends ItemView {
     this.lookupState = {
       query,
       status: "loading",
-      related: this.lookupState.related,
+      related: [],
       error: null,
     };
     this.lookupShouldRefocus = true;
+    this.render();
 
     void this.plugin.queryLookupRelated(query)
       .then((response) => {
@@ -721,6 +724,15 @@ export class MindmapWorkspaceView extends ItemView {
       this.render();
     });
     row.addEventListener("keydown", (event) => {
+      if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+        if (activeFile === null) {
+          return;
+        }
+        event.preventDefault();
+        this.pinRevealPath = pinRevealed ? null : candidate.path;
+        this.render();
+        return;
+      }
       if (event.key !== "Enter" && event.key !== " ") {
         return;
       }

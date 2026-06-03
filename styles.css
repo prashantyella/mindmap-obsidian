@@ -191,7 +191,7 @@
   flex-direction: column;
   background: var(--background-primary);
   color: var(--text-normal);
-  font-family: "Geist", var(--font-interface);
+  font-family: Geist, var(--font-interface);
 }
 
 .mindmap-sidebar-folder {

@@ -327,15 +327,15 @@ export default class MindmapPlugin extends Plugin {
       }
     }
 
+    const state = buildMindmapLocalGraphState(this.manifest.id, file.path);
     this.mindmapLocalGraphLeaf = await this.app.workspace.ensureSideLeaf("localgraph", "right", {
       active: false,
       split: true,
       reveal: true,
-      state: buildMindmapLocalGraphState(this.manifest.id, file.path),
     });
     await this.mindmapLocalGraphLeaf.setViewState({
       type: "localgraph",
-      state: buildMindmapLocalGraphState(this.manifest.id, file.path),
+      state,
       active: false,
     });
     this.mindmapLocalGraphPath = file.path;

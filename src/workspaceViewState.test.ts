@@ -115,6 +115,8 @@ void test("workspace view exposes lookup, pin, and score affordances", () => {
   assert.equal(workspaceViewSource.includes("requestAnimationFrame"), true);
   assert.equal(workspaceViewSource.includes("togglePinnedConnection"), true);
   assert.equal(workspaceViewSource.includes("contextmenu"), true);
+  assert.equal(workspaceViewSource.includes("ContextMenu"), true);
+  assert.equal(workspaceViewSource.includes("event.shiftKey"), true);
   assert.equal(workspaceViewSource.includes("is-pin-revealed"), true);
   assert.equal(workspaceViewSource.includes("animatePinReveal"), true);
   assert.equal(workspaceViewSource.includes("mindmap-sidebar-score"), true);

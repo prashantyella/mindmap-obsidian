@@ -1832,7 +1832,7 @@ def query_related_for_text(
     scores: Dict[str, float] = {}
     metas = results.get("metadatas", [[]])[0]
     dists = results.get("distances", [[]])[0] if results.get("distances") else [None] * len(metas)
-    for meta, dist in zip(metas, dists):
+    for meta, dist in zip(metas, dists, strict=True):
         path = meta.get("path") if isinstance(meta, dict) else None
         if not path or path not in allowed_paths:
             continue
