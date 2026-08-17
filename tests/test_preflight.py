@@ -12,11 +12,13 @@ from mindmap import (  # noqa: E402
     build_metadata_messages,
     build_openai_compatible_chat_payload,
     build_omlx_server_command,
+    can_mark_note_complete,
     classify_provider_error,
     dependency_install_guidance,
     find_missing_models,
     get_embed_settings,
     get_llm_settings,
+    is_provider_request_failure,
     should_manage_omlx_server,
     load_config_with_diagnostics,
     parse_llm_metadata_json,
@@ -170,6 +172,34 @@ class PreflightHelperTests(unittest.TestCase):
                 "9000",
             ],
         )
+
+    def test_build_omlx_server_command_appends_optional_memory_guard(self):
+        config = {
+            "omlx_python_command": "/tmp/omlx-python",
+            "omlx_base_path": "/tmp/omlx-data",
+            "omlx_memory_guard_gb": 5.5,
+        }
+
+        command = build_omlx_server_command(config, {"base_url": "http://localhost:9000/v1"})
+
+        self.assertEqual(command[-2:], ["--memory-guard-gb", "5.5"])
+
+    def test_build_omlx_server_command_ignores_invalid_memory_guards(self):
+        for value in (0, -1, float("nan"), float("inf"), True, "5"):
+            with self.subTest(value=value):
+                command = build_omlx_server_command(
+                    {"omlx_python_command": "/tmp/omlx-python", "omlx_memory_guard_gb": value},
+                    {"base_url": "http://localhost:9000/v1"},
+                )
+                self.assertNotIn("--memory-guard-gb", command)
+
+    def test_provider_failure_and_completion_policy_are_stable(self):
+        self.assertTrue(is_provider_request_failure(RuntimeError("[error][PROVIDER_REQUEST_FAILED] HTTP 507")))
+        self.assertFalse(is_provider_request_failure(RuntimeError("[error][LLM_INVALID_RESPONSE] bad JSON")))
+        self.assertTrue(can_mark_note_complete(False, True))
+        self.assertFalse(can_mark_note_complete(True, False, True, True))
+        self.assertFalse(can_mark_note_complete(True, True, False, True))
+        self.assertTrue(can_mark_note_complete(True, True, True, True))
 
     def test_classifies_connection_refused(self):
         details = classify_provider_error(URLError(ConnectionRefusedError("connection refused")))

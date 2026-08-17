@@ -8,6 +8,7 @@ import argparse
 import atexit
 import hashlib
 import json
+import math
 import os
 import re
 import socket
@@ -1133,6 +1134,25 @@ def classify_provider_error(exc: Exception) -> Dict[str, str]:
     }
 
 
+def is_provider_request_failure(exc: Exception) -> bool:
+    """Identify a provider-wide LLM request failure from the stable diagnostic code."""
+    return "[PROVIDER_REQUEST_FAILED]" in str(exc)
+
+
+def can_mark_note_complete(
+    tagging_enabled: bool,
+    index_succeeded: bool,
+    metadata_succeeded: bool = False,
+    write_succeeded: bool = False,
+) -> bool:
+    """Return whether this run has completed all required work for a note."""
+    if not index_succeeded:
+        return False
+    if not tagging_enabled:
+        return True
+    return metadata_succeeded and write_succeeded
+
+
 def provider_failure_check(
     prefix: str,
     label: str,
@@ -1216,17 +1236,31 @@ def build_omlx_server_command(config: Dict, llm_settings: Dict) -> List[str]:
 
     base_path = Path(str(config.get("omlx_base_path", "~/.omlx"))).expanduser()
     port = int(config.get("omlx_port", openai_compatible_url_port(str(llm_settings.get("base_url", "")))))
+    memory_guard = config.get("omlx_memory_guard_gb")
+    if (
+        isinstance(memory_guard, bool)
+        or not isinstance(memory_guard, (int, float))
+        or not math.isfinite(memory_guard)
+        or memory_guard <= 0
+    ):
+        memory_guard = None
+
+    def append_memory_guard(command: List[str]) -> List[str]:
+        if memory_guard is not None:
+            command.extend(["--memory-guard-gb", str(memory_guard)])
+        return command
+
     configured_python = str(config.get("omlx_python_command", "")).strip()
     app_cli = Path("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
     if app_cli.exists() and not configured_python:
-        return [
+        return append_memory_guard([
             str(app_cli),
             "serve",
             "--base-path",
             str(base_path),
             "--port",
             str(port),
-        ]
+        ])
 
     app_python = Path("/Applications/oMLX.app/Contents/MacOS/python3")
     if configured_python:
@@ -1236,7 +1270,7 @@ def build_omlx_server_command(config: Dict, llm_settings: Dict) -> List[str]:
     else:
         python_command = "python3"
 
-    return [
+    return append_memory_guard([
         python_command,
         "-m",
         "omlx.cli",
@@ -1245,7 +1279,7 @@ def build_omlx_server_command(config: Dict, llm_settings: Dict) -> List[str]:
         str(base_path),
         "--port",
         str(port),
-    ]
+    ])
 
 
 def probe_openai_compatible_server(base_url: str, api_key: str, timeout: int = 3) -> bool:
@@ -2297,6 +2331,9 @@ def main():
     log_lines = []
     preview_lines = []
     changed_notes = []
+    index_failed_paths = set()
+    run_failed = False
+    provider_failure = False
 
     def log_event(line: str, also_print: bool = True, to_stderr: bool = False):
         log_lines.append(line)
@@ -2356,12 +2393,13 @@ def main():
             return True
         return False
 
-    def refresh_state_for_note(note: Note):
+    def refresh_state_for_note(note: Note) -> bool:
         try:
             text = note.path.read_text(encoding="utf-8", errors="ignore")
             _fm, body = parse_frontmatter(text)
             body = strip_related_section(body, mindmap_heading)
             state_files[note.relpath] = {"hash": file_signature(body)}
+            return True
         except Exception as exc:
             log_event(
                 diagnostic_line(
@@ -2372,6 +2410,7 @@ def main():
                 ),
                 to_stderr=True,
             )
+            return False
 
     for note in notes:
         content_hash = file_signature(note.body)
@@ -2410,11 +2449,20 @@ def main():
                 config["chunk_overlap_tokens"],
             )
             if not note_chunks:
+                index_failed_paths.add(note.relpath)
+                run_failed = True
+                log_event(f"[error] Skipping {note.relpath}: no indexable chunks", to_stderr=True)
                 continue
 
             # Delete existing entries
-            chunks.delete(where={"path": note.relpath})
-            notes_col.delete(where={"path": note.relpath})
+            try:
+                chunks.delete(where={"path": note.relpath})
+                notes_col.delete(where={"path": note.relpath})
+            except Exception as exc:
+                index_failed_paths.add(note.relpath)
+                run_failed = True
+                log_event(f"[error] Failed to clear index entries for {note.relpath}: {exc}", to_stderr=True)
+                continue
 
             # Embed chunks in batches
             embeddings = []
@@ -2432,14 +2480,20 @@ def main():
                         log_fn=log_event,
                     )
                 except Exception as exc:
+                    index_failed_paths.add(note.relpath)
+                    run_failed = True
                     log_event(f"[error] Embedding failed for {note.relpath}: {exc}", to_stderr=True)
                     embeddings = []
                     break
                 embeddings.extend(batch_embeddings)
             if not embeddings:
+                index_failed_paths.add(note.relpath)
+                run_failed = True
                 log_event(f"[warn] Skipping {note.relpath}: no embeddings", to_stderr=True)
                 continue
             if len(embeddings) != len(note_chunks):
+                index_failed_paths.add(note.relpath)
+                run_failed = True
                 log_event(
                     f"[warn] Skipping {note.relpath}: embedding count mismatch "
                     f"({len(embeddings)} embeddings for {len(note_chunks)} chunks)",
@@ -2455,27 +2509,52 @@ def main():
                 ids.append(f"{note.relpath}::chunk::{i}")
                 metadatas.append({"path": note.relpath, "chunk": i})
                 documents.append(chunk)
-            chunks.add(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
+            try:
+                chunks.add(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=documents)
+            except Exception as exc:
+                index_failed_paths.add(note.relpath)
+                run_failed = True
+                log_event(f"[error] Failed to store chunks for {note.relpath}: {exc}", to_stderr=True)
+                continue
 
             # Store note-level embedding
             note_embedding = average_vectors(embeddings)
-            notes_col.add(
-                ids=[f"{note.relpath}::note"],
-                embeddings=[note_embedding],
-                metadatas=[{"path": note.relpath, "title": note.title}],
-                documents=[note.body[:2000]],
-            )
+            try:
+                notes_col.add(
+                    ids=[f"{note.relpath}::note"],
+                    embeddings=[note_embedding],
+                    metadatas=[{"path": note.relpath, "title": note.title}],
+                    documents=[note.body[:2000]],
+                )
+            except Exception as exc:
+                index_failed_paths.add(note.relpath)
+                run_failed = True
+                log_event(f"[error] Failed to store note embedding for {note.relpath}: {exc}", to_stderr=True)
+                continue
 
-            state_files[note.relpath] = {"hash": content_hash}
+            # A combined index/tag run must leave completion state to the tag
+            # phase. Index-only runs retain the historical behavior.
+            if can_mark_note_complete(
+                tagging_enabled=do_tag,
+                index_succeeded=note.relpath not in index_failed_paths,
+            ):
+                state_files[note.relpath] = {"hash": content_hash}
             log_lines.append(f"Indexed: {note.relpath} ({len(note_chunks)} chunks)")
 
     # Tagging + linking
     if do_tag:
         staged = []
+        staged_write_ok = {}
         total_tag = len(notes)
         for idx, note in enumerate(notes, start=1):
             content_hash = file_signature(note.body)
             if note.relpath not in changed_paths and not args.refresh_all:
+                continue
+            if note.relpath in index_failed_paths:
+                log_event(
+                    f"[error] Skipping metadata for {note.relpath}: indexing failed; note remains pending.",
+                    to_stderr=True,
+                )
                 continue
             if not args.quiet:
                 print(f"[tag] {idx}/{total_tag} {note.relpath}", flush=True)
@@ -2566,7 +2645,11 @@ def main():
                     chat_template_kwargs=llm_settings["chat_template_kwargs"],
                 )
             except Exception as exc:
+                run_failed = True
                 log_event(f"[error] Metadata extraction failed for {note.relpath}: {exc}", to_stderr=True)
+                if is_provider_request_failure(exc):
+                    provider_failure = True
+                    break
                 continue
 
             summary = metadata.get("summary", "").strip()
@@ -2602,6 +2685,7 @@ def main():
                 preview_lines.append(json.dumps(preview, ensure_ascii=True))
 
             if args.apply and apply_per_note:
+                staged_write_ok[note.relpath] = False
                 updates = {
                     "summary": summary,
                     "tags": tags,
@@ -2610,10 +2694,11 @@ def main():
                 }
                 try:
                     changed = write_note_update(note, updates, related_items)
-                    refresh_state_for_note(note)
+                    staged_write_ok[note.relpath] = True
                     state = "Updated" if changed else "Unchanged"
                     log_event(f"[write] {state}: {note.relpath}")
                 except Exception as exc:
+                    run_failed = True
                     log_event(f"[error] Write failed for {note.relpath}: {exc}", to_stderr=True)
 
         # Apply tag frequency filtering across the staged set
@@ -2638,18 +2723,33 @@ def main():
 
             if args.apply:
                 if apply_per_note and final_tags == item["tags"]:
+                    if staged_write_ok.get(note.relpath) and can_mark_note_complete(
+                        tagging_enabled=do_tag,
+                        index_succeeded=note.relpath not in index_failed_paths,
+                        metadata_succeeded=True,
+                        write_succeeded=True,
+                    ):
+                        if not refresh_state_for_note(note):
+                            run_failed = True
                     continue
                 try:
                     changed = write_note_update(note, updates, item.get("related_items"))
-                    refresh_state_for_note(note)
+                    if can_mark_note_complete(
+                        tagging_enabled=do_tag,
+                        index_succeeded=note.relpath not in index_failed_paths,
+                        metadata_succeeded=True,
+                        write_succeeded=True,
+                    ) and not refresh_state_for_note(note):
+                        run_failed = True
                     state = "Updated" if changed else "Unchanged"
                     log_event(f"[write] {state}: {note.relpath}")
                 except Exception as exc:
+                    run_failed = True
                     log_event(f"[error] Write failed for {note.relpath}: {exc}", to_stderr=True)
             else:
                 log_event(f"[dry-run] Would update metadata: {note.relpath}", also_print=False)
 
-    cleanup_managed_omlx()
+    cleanup_managed_omlx("provider failure" if provider_failure else "run complete")
 
     ensure_dir(log_path.parent)
     log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
@@ -2657,13 +2757,13 @@ def main():
         ensure_dir(preview_path.parent)
         preview_path.write_text("\n".join(preview_lines) + "\n", encoding="utf-8")
 
-    print("Run complete.")
+    print("Run completed with errors." if run_failed else "Run complete.")
     print(f"Log: {log_path}")
     if not args.apply:
         print("No note changes were made. Re-run with --apply to write updates.")
 
     save_json(state_path, {"files": state_files})
-    return 0
+    return 1 if run_failed else 0
 
 
 if __name__ == "__main__":
