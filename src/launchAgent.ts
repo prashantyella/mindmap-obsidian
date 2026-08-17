@@ -22,6 +22,11 @@ export interface LaunchAgentLaunchctlStatus {
 
 export type LaunchAgentHealth = "healthy" | "stale" | "failing";
 
+/** A recovery affordance is useful only when scheduled work is overdue and work remains. */
+export function shouldOfferLaunchAgentCatchUp(health: LaunchAgentHealth | null, pendingAll: number): boolean {
+  return (health === "stale" || health === "failing") && Number.isFinite(pendingAll) && pendingAll > 0;
+}
+
 export interface LaunchAgentHealthInput {
   launchctl: LaunchAgentLaunchctlStatus;
   schedule: CalendarInterval | CalendarInterval[];
@@ -68,7 +73,7 @@ export function normalizeClockTime(time: ClockTime): ClockTime {
 export function parseLaunchctlPrintOutput(output: string, errorOutput = ""): LaunchAgentLaunchctlStatus {
   const text = `${output}\n${errorOutput}`.trim();
   const stateMatch = text.match(/^\s*state\s*=\s*(.+?)\s*$/im);
-  const exitMatch = text.match(/^\s*last exit code\s*=\s*(-?\d+)\s*$/im);
+  const exitMatch = text.match(/^\s*last exit code\s*=\s*(-?\d+)(?:\s*:\s*.*)?\s*$/im);
   const notLoaded = /could not find service|service not found|unknown service|no such process/i.test(text);
 
   return {
@@ -206,6 +211,43 @@ export function buildLaunchAgentSpec(options: {
       MINDMAP_RUN_SOURCE: "obsidian-plugin-launchagent",
     },
   };
+}
+
+export function buildConfiguredLaunchAgentSpecs(options: {
+  command: RuntimeCommand;
+  plistDirectory: string;
+  logDirectory: string;
+  pathEnvironment: string;
+  daily: ClockTime;
+  weeklyEnabled: boolean;
+  weekly: ClockTime;
+  dailyArgs: string[];
+  weeklyArgs: string[];
+}): LaunchAgentSpec[] {
+  const daily = buildLaunchAgentSpec({
+    label: DAILY_LAUNCH_AGENT_LABEL,
+    plistPath: path.join(options.plistDirectory, `${DAILY_LAUNCH_AGENT_LABEL}.plist`),
+    command: options.command,
+    extraArgs: options.dailyArgs,
+    stdoutPath: path.join(options.logDirectory, "launchagent.out"),
+    stderrPath: path.join(options.logDirectory, "launchagent.err"),
+    startCalendarInterval: buildDailyCalendarIntervals(options.daily),
+    pathEnvironment: options.pathEnvironment,
+  });
+  if (!options.weeklyEnabled) {
+    return [daily];
+  }
+
+  return [daily, buildLaunchAgentSpec({
+    label: WEEKLY_LAUNCH_AGENT_LABEL,
+    plistPath: path.join(options.plistDirectory, `${WEEKLY_LAUNCH_AGENT_LABEL}.plist`),
+    command: options.command,
+    extraArgs: options.weeklyArgs,
+    stdoutPath: path.join(options.logDirectory, "launchagent-weekly.out"),
+    stderrPath: path.join(options.logDirectory, "launchagent-weekly.err"),
+    startCalendarInterval: buildWeeklyCalendarInterval(options.weekly),
+    pathEnvironment: options.pathEnvironment,
+  })];
 }
 
 function escapeXml(value: string): string {

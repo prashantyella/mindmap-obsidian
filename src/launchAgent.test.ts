@@ -13,6 +13,7 @@ import {
   normalizeHour,
   normalizeMinute,
   parseLaunchctlPrintOutput,
+  shouldOfferLaunchAgentCatchUp,
 } from "./launchAgent";
 
 void test("normalizes launch agent clock values", () => {
@@ -49,6 +50,15 @@ void test("parses loaded launchctl state and exit code", () => {
     state: null,
     lastExitCode: null,
   });
+});
+
+void test("parses launchctl exit codes with descriptive suffixes", () => {
+  const status = parseLaunchctlPrintOutput(
+    "gui/501/com.mindmap.daily = {\n\tstate = exited\n\tlast exit code = 78: EX_CONFIG\n}",
+  );
+
+  assert.equal(status.loaded, true);
+  assert.equal(status.lastExitCode, 78);
 });
 
 function localTime(day: number, hour: number, minute = 0): number {
@@ -107,6 +117,14 @@ void test("classifies a long-running scheduled job as healthy before its first h
     lastSuccessfulRunAt: null,
     now: localTime(17, 4),
   }), "healthy");
+});
+
+void test("offers catch-up only for stale or failing agents with pending all-scope notes", () => {
+  assert.equal(shouldOfferLaunchAgentCatchUp("stale", 1), true);
+  assert.equal(shouldOfferLaunchAgentCatchUp("failing", 2), true);
+  assert.equal(shouldOfferLaunchAgentCatchUp("healthy", 2), false);
+  assert.equal(shouldOfferLaunchAgentCatchUp("stale", 0), false);
+  assert.equal(shouldOfferLaunchAgentCatchUp(null, 2), false);
 });
 
 void test("uses env launcher for bare python commands", () => {

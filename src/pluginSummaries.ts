@@ -7,6 +7,7 @@ import {
   isLaunchAgentSchedulerEnabled,
   type SchedulerConfig,
 } from "./scheduler";
+import { shouldOfferLaunchAgentCatchUp, type LaunchAgentHealth } from "./launchAgent";
 
 export interface SchedulerSummaryState {
   nextRunAt: number | null;
@@ -14,6 +15,10 @@ export interface SchedulerSummaryState {
   lastMessage: string;
   launchAgentMessage: string;
   launchAgentPaths: string[];
+  launchAgentHealth: LaunchAgentHealth | null;
+  launchAgentLastSuccessfulRunAt: number | null;
+  launchAgentLastExitCode: number | null;
+  pendingAllCount: number | null;
 }
 
 export interface DiagnosticsSummaryState {
@@ -48,6 +53,22 @@ export function buildSchedulerSummary(
   fragment.appendText(`Last result: ${state.lastMessage}`);
   fragment.appendChild(document.createElement("br"));
   fragment.appendText(`LaunchAgent status: ${state.launchAgentMessage}`);
+  if (isLaunchAgentSchedulerEnabled(config.mode)) {
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`LaunchAgent health: ${state.launchAgentHealth ?? "unknown"}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Last successful scheduled run: ${formatTimestamp(state.launchAgentLastSuccessfulRunAt)}`);
+    fragment.appendChild(document.createElement("br"));
+    fragment.appendText(`Last LaunchAgent exit: ${state.launchAgentLastExitCode === null ? "Unknown" : state.launchAgentLastExitCode}`);
+    if (state.pendingAllCount !== null) {
+      fragment.appendChild(document.createElement("br"));
+      fragment.appendText(`All-scope pending: ${state.pendingAllCount}`);
+    }
+    if (shouldOfferLaunchAgentCatchUp(state.launchAgentHealth, state.pendingAllCount ?? 0)) {
+      fragment.appendChild(document.createElement("br"));
+      fragment.appendText("Catch-up available for pending all-scope notes.");
+    }
+  }
   if (state.launchAgentPaths.length > 0) {
     fragment.appendChild(document.createElement("br"));
     fragment.appendText(`LaunchAgent files: ${state.launchAgentPaths.join(", ")}`);

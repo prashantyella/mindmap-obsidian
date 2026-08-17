@@ -341,7 +341,23 @@ export class MindmapSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
             this.display();
           });
-      });
+        });
+
+    const catchUp = this.plugin.getLaunchAgentCatchUpStatus();
+    if (catchUp.available) {
+      new Setting(this.containerEl)
+        .setName("Scheduled recovery")
+        .setDesc(catchUp.message)
+        .addButton((button) => {
+          button
+            .setButtonText("Catch up pending notes")
+            .setCta()
+            .onClick(async () => {
+              await this.plugin.runLaunchAgentCatchUp();
+              this.display();
+            });
+        });
+    }
   }
 
   private renderPathSetting(field: RuntimeField): void {
