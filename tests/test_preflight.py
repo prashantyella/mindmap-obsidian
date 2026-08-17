@@ -3,6 +3,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
@@ -10,6 +12,7 @@ from mindmap import (  # noqa: E402
     build_metadata_messages,
     build_openai_compatible_chat_payload,
     build_omlx_server_command,
+    classify_provider_error,
     dependency_install_guidance,
     find_missing_models,
     get_embed_settings,
@@ -18,6 +21,8 @@ from mindmap import (  # noqa: E402
     load_config_with_diagnostics,
     parse_llm_metadata_json,
     parse_openai_compatible_chat_response,
+    run_preflight,
+    start_managed_omlx_server,
 )
 
 
@@ -165,6 +170,138 @@ class PreflightHelperTests(unittest.TestCase):
                 "9000",
             ],
         )
+
+    def test_classifies_connection_refused(self):
+        details = classify_provider_error(URLError(ConnectionRefusedError("connection refused")))
+
+        self.assertEqual(details["code"], "PROVIDER_CONNECTION_REFUSED")
+        self.assertEqual(details["category"], "connection_refused")
+
+    def test_classifies_unexpected_http_service_and_auth_failure(self):
+        not_provider = classify_provider_error(HTTPError("http://localhost:8000/models", 404, "Not Found", {}, None))
+        unauthorized = classify_provider_error(HTTPError("https://api.example.com/models", 401, "Unauthorized", {}, None))
+
+        self.assertEqual(not_provider["code"], "PROVIDER_UNEXPECTED_SERVICE")
+        self.assertEqual(unauthorized["code"], "PROVIDER_AUTH_FAILED")
+
+    def test_preflight_reports_missing_model(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "embed_provider": "ollama",
+                        "embed_base_url": "http://localhost:11434",
+                        "embed_model": "embed",
+                        "llm_provider": "ollama",
+                        "llm_base_url": "http://localhost:11434",
+                        "llm_model": "missing",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("mindmap.fetch_ollama_models", return_value=["embed"]):
+                result = run_preflight(config_path)
+
+        checks = {check["code"]: check for check in result["checks"]}
+        self.assertIn("LLM_MODELS_MISSING", checks)
+        self.assertFalse(result["ok"])
+
+    def test_preflight_stops_only_server_started_for_probe(self):
+        fake_process = object()
+        config = {
+            "embed_provider": "ollama",
+            "embed_base_url": "http://localhost:11434",
+            "embed_model": "embed",
+            "llm_provider": "openai_compatible",
+            "llm_base_url": "http://localhost:8000/v1",
+            "llm_model": "Qwen3.5-9B-MLX-4bit",
+            "omlx_auto_manage": True,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with patch("mindmap.fetch_ollama_models", return_value=["embed"]), \
+                    patch("mindmap.fetch_openai_compatible_models", return_value=["Qwen3.5-9B-MLX-4bit"]), \
+                    patch("mindmap.start_managed_omlx_server", return_value=fake_process) as start, \
+                    patch("mindmap.stop_managed_omlx_server") as stop:
+                result = run_preflight(config_path)
+
+        self.assertTrue(result["ok"])
+        start.assert_called_once()
+        stop.assert_called_once()
+        self.assertIs(stop.call_args.args[0], fake_process)
+
+    def test_managed_omlx_does_not_start_over_auth_failure(self):
+        config = {"omlx_auto_manage": True, "omlx_python_command": "/tmp/omlx-python"}
+        settings = {
+            "provider": "openai_compatible",
+            "base_url": "http://localhost:8000/v1",
+            "model": "Qwen3.5-9B-MLX-4bit",
+            "api_key": "bad-key",
+        }
+        auth_error = HTTPError(settings["base_url"] + "/models", 401, "Unauthorized", {}, None)
+        with patch("mindmap.fetch_openai_compatible_models", side_effect=auth_error), \
+                patch("mindmap.subprocess.Popen") as popen:
+            process = start_managed_omlx_server(config, settings, lambda _message: None)
+
+        self.assertIsNone(process)
+        popen.assert_not_called()
+
+    def test_managed_omlx_ignores_stale_bind_conflict_log_lines(self):
+        settings = {
+            "provider": "openai_compatible",
+            "base_url": "http://localhost:8000/v1",
+            "model": "Qwen3.5-9B-MLX-4bit",
+            "api_key": "",
+        }
+        process = type("ExitedProcess", (), {"poll": lambda _self: 1, "returncode": 1})()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir) / "logs"
+            log_dir.mkdir()
+            (log_dir / "mindmap-omlx-server.log").write_text(
+                "old run: address already in use\n",
+                encoding="utf-8",
+            )
+            config = {
+                "omlx_auto_manage": True,
+                "omlx_base_path": tmpdir,
+                "omlx_server_command": ["omlx-test"],
+            }
+            connection_error = URLError(ConnectionRefusedError("connection refused"))
+            with patch("mindmap.fetch_openai_compatible_models", side_effect=connection_error), \
+                    patch("mindmap.subprocess.Popen", return_value=process):
+                with self.assertRaises(RuntimeError) as ctx:
+                    start_managed_omlx_server(config, settings, lambda _message: None)
+
+        self.assertIn("[OMLX_START_FAILED]", str(ctx.exception))
+        self.assertNotIn("[OMLX_PORT_CONFLICT]", str(ctx.exception))
+
+    def test_preflight_reports_managed_omlx_port_conflict_without_stopping_process(self):
+        config = {
+            "embed_provider": "ollama",
+            "embed_base_url": "http://localhost:11434",
+            "embed_model": "embed",
+            "llm_provider": "openai_compatible",
+            "llm_base_url": "http://localhost:8000/v1",
+            "llm_model": "Qwen3.5-9B-MLX-4bit",
+            "omlx_auto_manage": True,
+        }
+        conflict = RuntimeError(
+            "[error][OMLX_PORT_CONFLICT] Managed oMLX could not bind port 8000 because it is already occupied."
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            with patch("mindmap.fetch_ollama_models", return_value=["embed"]), \
+                    patch("mindmap.start_managed_omlx_server", side_effect=conflict), \
+                    patch("mindmap.stop_managed_omlx_server") as stop:
+                result = run_preflight(config_path)
+
+        checks = {check["code"]: check for check in result["checks"]}
+        self.assertIn("OMLX_PORT_CONFLICT", checks)
+        self.assertIn("will not terminate unrelated processes", checks["OMLX_PORT_CONFLICT"]["guidance"])
+        stop.assert_not_called()
 
 
 if __name__ == "__main__":

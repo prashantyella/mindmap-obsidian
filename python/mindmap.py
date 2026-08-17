@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import shlex
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Callable
 from urllib import request
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 
 try:
@@ -1076,6 +1078,82 @@ def fetch_ollama_models(base_url: str, timeout: int) -> List[str]:
     return models
 
 
+def classify_provider_error(exc: Exception) -> Dict[str, str]:
+    """Return a stable, actionable category for a provider probe failure."""
+    if isinstance(exc, HTTPError):
+        if exc.code in {401, 403}:
+            return {
+                "category": "auth_failed",
+                "code": "PROVIDER_AUTH_FAILED",
+                "message": f"Provider rejected the request with HTTP {exc.code}.",
+                "guidance": "Check the configured API key and its environment variable.",
+            }
+        if exc.code == 404:
+            return {
+                "category": "unexpected_service",
+                "code": "PROVIDER_UNEXPECTED_SERVICE",
+                "message": "The configured port returned HTTP 404 for the provider model endpoint.",
+                "guidance": "Check that llm_base_url points to the provider (including its /v1 path), not another service.",
+            }
+        return {
+            "category": "unexpected_service",
+            "code": "PROVIDER_UNEXPECTED_SERVICE",
+            "message": f"Provider returned unexpected HTTP status {exc.code}.",
+            "guidance": "Check the configured provider URL and endpoint compatibility.",
+        }
+
+    reason = getattr(exc, "reason", exc)
+    reason_text = str(reason).lower()
+    if isinstance(reason, (ConnectionRefusedError, ConnectionResetError)) or "connection refused" in reason_text:
+        return {
+            "category": "connection_refused",
+            "code": "PROVIDER_CONNECTION_REFUSED",
+            "message": "Connection to the provider was refused.",
+            "guidance": "Start the configured provider or check its host and port.",
+        }
+    if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in reason_text or "timeout" in reason_text:
+        return {
+            "category": "timeout",
+            "code": "PROVIDER_TIMEOUT",
+            "message": "The provider did not respond before the preflight timeout.",
+            "guidance": "Check provider startup time and increase the configured timeout only if needed.",
+        }
+    if "401" in reason_text or "403" in reason_text or "unauthorized" in reason_text or "forbidden" in reason_text:
+        return {
+            "category": "auth_failed",
+            "code": "PROVIDER_AUTH_FAILED",
+            "message": "Provider authentication failed.",
+            "guidance": "Check the configured API key and its environment variable.",
+        }
+    return {
+        "category": "unreachable",
+        "code": "PROVIDER_UNREACHABLE",
+        "message": f"Provider request failed: {exc}",
+        "guidance": "Check that the configured provider is running and its URL is correct.",
+    }
+
+
+def provider_failure_check(
+    prefix: str,
+    label: str,
+    base_url: str,
+    exc: Exception,
+    context: Optional[Dict] = None,
+) -> Dict:
+    details = classify_provider_error(exc)
+    check_context = {"base_url": base_url}
+    if context:
+        check_context.update(context)
+    return build_preflight_check(
+        f"{prefix}_{details['category'].upper()}",
+        label,
+        "error",
+        f"{label} at {base_url}: {details['message']}",
+        guidance=details["guidance"],
+        context=check_context,
+    )
+
+
 def fetch_openai_compatible_models(base_url: str, api_key: str, timeout: int) -> List[str]:
     url = base_url.rstrip("/") + "/models"
     headers = {}
@@ -1178,6 +1256,32 @@ def probe_openai_compatible_server(base_url: str, api_key: str, timeout: int = 3
         return False
 
 
+def probe_openai_compatible_server_error(
+    base_url: str,
+    api_key: str,
+    timeout: int = 3,
+) -> Optional[Exception]:
+    try:
+        fetch_openai_compatible_models(base_url, api_key, timeout)
+    except Exception as exc:
+        return exc
+    return None
+
+
+def is_managed_omlx_start_candidate(exc: Exception) -> bool:
+    """Only start oMLX when the endpoint is absent or clearly the wrong service."""
+    return classify_provider_error(exc)["category"] in {"connection_refused", "unexpected_service", "timeout", "unreachable"}
+
+
+def is_bind_conflict_error(text: str) -> bool:
+    normalized = text.lower()
+    return (
+        "address already in use" in normalized
+        or "eaddrinuse" in normalized
+        or "port" in normalized and ("already" in normalized or "occupied" in normalized or "in use" in normalized)
+    )
+
+
 def start_managed_omlx_server(
     config: Dict,
     llm_settings: Dict,
@@ -1189,8 +1293,12 @@ def start_managed_omlx_server(
     base_url = str(llm_settings.get("base_url", ""))
     api_key = str(llm_settings.get("api_key", ""))
     probe_timeout = int(config.get("omlx_probe_timeout_seconds", 3))
-    if probe_openai_compatible_server(base_url, api_key, timeout=probe_timeout):
+    probe_error = probe_openai_compatible_server_error(base_url, api_key, timeout=probe_timeout)
+    if probe_error is None:
         log_fn(f"[omlx] Server already running at {base_url}; leaving it running after this run.")
+        return None
+    if not is_managed_omlx_start_candidate(probe_error):
+        log_fn(f"[omlx] Provider responded but is not usable; leaving it running: {probe_error}")
         return None
 
     command = build_omlx_server_command(config, llm_settings)
@@ -1198,15 +1306,29 @@ def start_managed_omlx_server(
     log_dir = base_path / "logs"
     ensure_dir(log_dir)
     log_path = log_dir / "mindmap-omlx-server.log"
+    initial_log_size = log_path.stat().st_size if log_path.exists() else 0
     log_handle = log_path.open("ab")
     try:
-        process = subprocess.Popen(
-            command,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            if getattr(exc, "errno", None) in {48, 98} or is_bind_conflict_error(str(exc)):
+                raise RuntimeError(
+                    diagnostic_line(
+                        "error",
+                        "OMLX_PORT_CONFLICT",
+                        f"Managed oMLX could not bind its configured port: {exc}",
+                        guidance="Choose an unused oMLX port or stop the service that owns it; Mindmap will not terminate unrelated processes.",
+                        context={"base_url": base_url, "port": openai_compatible_url_port(base_url)},
+                    )
+                ) from exc
+            raise
     finally:
         log_handle.close()
 
@@ -1215,6 +1337,23 @@ def start_managed_omlx_server(
     started_at = time.time()
     while time.time() - started_at < startup_timeout:
         if process.poll() is not None:
+            log_text = ""
+            try:
+                with log_path.open("rb") as current_log:
+                    current_log.seek(initial_log_size)
+                    log_text = current_log.read().decode("utf-8", errors="ignore")
+            except OSError:
+                pass
+            if is_bind_conflict_error(log_text):
+                raise RuntimeError(
+                    diagnostic_line(
+                        "error",
+                        "OMLX_PORT_CONFLICT",
+                        f"Managed oMLX could not bind port {openai_compatible_url_port(base_url)} because it is already occupied.",
+                        guidance="Choose an unused oMLX port or stop the service that owns it; Mindmap will not terminate unrelated processes.",
+                        context={"base_url": base_url, "port": openai_compatible_url_port(base_url)},
+                    )
+                )
             raise RuntimeError(
                 diagnostic_line(
                     "error",
@@ -1422,17 +1561,23 @@ def run_preflight(config_path: Path) -> Dict:
                 )
         except Exception as exc:
             checks.append(
-                build_preflight_check(
-                    "EMBED_PROVIDER_UNREACHABLE",
+                provider_failure_check(
+                    "EMBED_PROVIDER",
                     "Embedding provider",
-                    "error",
-                    f"Failed to reach Ollama embedding provider at {embed_settings['base_url']}: {exc}",
-                    guidance="Start Ollama locally or update embed_base_url/ollama_base_url in the config.",
-                    context={"provider": embed_settings["provider"], "base_url": embed_settings["base_url"]},
+                    embed_settings["base_url"],
+                    exc,
+                    context={"provider": embed_settings["provider"]},
                 )
             )
 
+        managed_omlx_process = None
         try:
+            if llm_settings["provider"] == "openai_compatible" and should_manage_omlx_server(config, llm_settings):
+                managed_omlx_process = start_managed_omlx_server(
+                    config,
+                    llm_settings,
+                    lambda message: emit_stderr("info", "OMLX", message),
+                )
             if llm_settings["provider"] == "ollama":
                 available_models = fetch_ollama_models(llm_settings["base_url"], timeout=timeout)
                 provider_label = "Ollama LLM provider"
@@ -1476,16 +1621,46 @@ def run_preflight(config_path: Path) -> Dict:
                     )
                 )
         except Exception as exc:
-            checks.append(
-                build_preflight_check(
-                    "LLM_PROVIDER_UNREACHABLE",
-                    "LLM provider",
-                    "error",
-                    f"Failed to reach {llm_settings['provider']} at {llm_settings['base_url']}: {exc}",
-                    guidance="Start the configured LLM provider or update llm_base_url in the config.",
-                    context={"provider": llm_settings["provider"], "base_url": llm_settings["base_url"]},
+            error_text = str(exc)
+            if "[OMLX_PORT_CONFLICT]" in error_text:
+                checks.append(
+                    build_preflight_check(
+                        "OMLX_PORT_CONFLICT",
+                        "Managed oMLX",
+                        "error",
+                        error_text,
+                        guidance="Choose an unused oMLX port or stop the service that owns it; Mindmap will not terminate unrelated processes.",
+                        context={"base_url": llm_settings["base_url"]},
+                    )
                 )
-            )
+            elif "[OMLX_" in error_text:
+                checks.append(
+                    build_preflight_check(
+                        "OMLX_START_FAILED",
+                        "Managed oMLX",
+                        "error",
+                        error_text,
+                        guidance="Check the oMLX server log and configured oMLX command.",
+                        context={"base_url": llm_settings["base_url"]},
+                    )
+                )
+            else:
+                checks.append(
+                    provider_failure_check(
+                        "LLM_PROVIDER",
+                        "LLM provider",
+                        llm_settings["base_url"],
+                        exc,
+                        context={"provider": llm_settings["provider"]},
+                    )
+                )
+        finally:
+            if managed_omlx_process is not None:
+                stop_managed_omlx_server(
+                    managed_omlx_process,
+                    lambda message: emit_stderr("info", "OMLX", message),
+                    reason="preflight complete",
+                )
 
     ok = not any(check["status"] == "error" for check in checks)
     if ok:
