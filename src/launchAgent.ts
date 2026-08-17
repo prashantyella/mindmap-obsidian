@@ -14,6 +14,24 @@ export interface CalendarInterval extends ClockTime {
   weekday?: number;
 }
 
+export interface LaunchAgentLaunchctlStatus {
+  loaded: boolean;
+  state: string | null;
+  lastExitCode: number | null;
+}
+
+export type LaunchAgentHealth = "healthy" | "stale" | "failing";
+
+export interface LaunchAgentHealthInput {
+  launchctl: LaunchAgentLaunchctlStatus;
+  schedule: CalendarInterval | CalendarInterval[];
+  lastSuccessfulRunAt: number | null;
+  now?: number;
+  graceMinutes?: number;
+}
+
+export const DEFAULT_LAUNCH_AGENT_GRACE_MINUTES = 15;
+
 export interface LaunchAgentSpec {
   label: string;
   plistPath: string;
@@ -44,6 +62,96 @@ export function normalizeClockTime(time: ClockTime): ClockTime {
     hour: normalizeHour(time.hour),
     minute: normalizeMinute(time.minute),
   };
+}
+
+/** Extract the small, useful subset of `launchctl print` output. */
+export function parseLaunchctlPrintOutput(output: string, errorOutput = ""): LaunchAgentLaunchctlStatus {
+  const text = `${output}\n${errorOutput}`.trim();
+  const stateMatch = text.match(/^\s*state\s*=\s*(.+?)\s*$/im);
+  const exitMatch = text.match(/^\s*last exit code\s*=\s*(-?\d+)\s*$/im);
+  const notLoaded = /could not find service|service not found|unknown service|no such process/i.test(text);
+
+  return {
+    loaded: text.length > 0 && !notLoaded,
+    state: stateMatch?.[1] ?? null,
+    lastExitCode: exitMatch ? Number(exitMatch[1]) : null,
+  };
+}
+
+function launchAgentWeekday(date: Date): number {
+  const day = date.getDay();
+  return day === 0 ? 7 : day;
+}
+
+function isMatchingWeekday(interval: CalendarInterval, date: Date): boolean {
+  return interval.weekday === undefined || interval.weekday === launchAgentWeekday(date);
+}
+
+function mostRecentOccurrenceForInterval(interval: CalendarInterval, now: number): number | null {
+  if (interval.weekday !== undefined && (interval.weekday < 1 || interval.weekday > 7)) {
+    return null;
+  }
+
+  const current = new Date(now);
+  if (!Number.isFinite(current.getTime())) {
+    return null;
+  }
+
+  const day = new Date(current);
+  day.setHours(0, 0, 0, 0);
+  for (let daysAgo = 0; daysAgo <= 7; daysAgo += 1) {
+    const candidate = new Date(day);
+    candidate.setDate(day.getDate() - daysAgo);
+    if (!isMatchingWeekday(interval, candidate)) {
+      continue;
+    }
+
+    candidate.setHours(normalizeHour(interval.hour), normalizeMinute(interval.minute), 0, 0);
+    if (candidate.getTime() <= now) {
+      return candidate.getTime();
+    }
+  }
+
+  return null;
+}
+
+/** Return the latest scheduled opportunity at or before `now` in local time. */
+export function getMostRecentScheduledOccurrence(
+  schedule: CalendarInterval | CalendarInterval[],
+  now: number,
+): number | null {
+  const intervals = Array.isArray(schedule) ? schedule : [schedule];
+  const occurrences = intervals
+    .map((interval) => mostRecentOccurrenceForInterval(interval, now))
+    .filter((occurrence): occurrence is number => occurrence !== null);
+  return occurrences.length > 0 ? Math.max(...occurrences) : null;
+}
+
+/** Classify a read-only LaunchAgent snapshot against its existing run-log heartbeat. */
+export function classifyLaunchAgentHealth(input: LaunchAgentHealthInput): LaunchAgentHealth {
+  if (!input.launchctl.loaded || (input.launchctl.lastExitCode !== null && input.launchctl.lastExitCode !== 0)) {
+    return "failing";
+  }
+
+  if (input.launchctl.state?.toLowerCase() === "running") {
+    return "healthy";
+  }
+
+  const now = input.now ?? Date.now();
+  const expectedAt = getMostRecentScheduledOccurrence(input.schedule, now);
+  if (expectedAt === null) {
+    return "stale";
+  }
+
+  const graceMinutes = Number.isFinite(input.graceMinutes)
+    ? Math.max(0, input.graceMinutes ?? DEFAULT_LAUNCH_AGENT_GRACE_MINUTES)
+    : DEFAULT_LAUNCH_AGENT_GRACE_MINUTES;
+  const heartbeat = input.lastSuccessfulRunAt;
+  if (heartbeat !== null && Number.isFinite(heartbeat) && heartbeat >= expectedAt) {
+    return "healthy";
+  }
+
+  return now <= expectedAt + graceMinutes * 60_000 ? "healthy" : "stale";
 }
 
 export function formatClockTime(time: ClockTime): string {
