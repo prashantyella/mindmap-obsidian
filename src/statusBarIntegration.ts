@@ -27,13 +27,16 @@ export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: Stat
     schedulerEnabled: plugin.settings.schedulerMode === "launchAgent" && process.platform === "darwin",
     weeklyEnabled: plugin.settings.launchAgentWeeklyEnabled,
     semanticState: plugin.getSemanticStatus().state,
+    activeNote: plugin.getActiveNoteEligibility(),
   });
 }
 
 export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMenuActions {
   return {
     runCurrent: () => plugin.runMindmap("manual", "current"),
+    runActiveNote: () => plugin.runActiveNote(),
     runAll: () => plugin.runMindmap("manual", "all"),
+    processPendingNote: (notePath) => plugin.processPendingNote(notePath),
     runPreflight: async () => { await plugin.runPreflight("manual"); },
     openNote: (notePath) => plugin.app.workspace.openLinkText(notePath, "", false),
     openMindmap: () => plugin.openMindmapView(),
@@ -46,6 +49,7 @@ export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMe
 }
 
 export async function openMindmapStatusMenu(plugin: MindmapPlugin, event?: MouseEvent | KeyboardEvent): Promise<void> {
+  await plugin.refreshActiveNoteEligibility();
   await plugin.refreshLaunchAgentHealth();
   if (!plugin.statusBarEl) {
     return;

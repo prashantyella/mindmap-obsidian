@@ -26,6 +26,14 @@ export function registerMindmapCommands(plugin: MindmapPlugin): void {
   });
 
   plugin.addCommand({
+    id: "mindmap-run-active-note",
+    name: "Run Mindmap for active note",
+    callback: () => {
+      void plugin.runActiveNote();
+    },
+  });
+
+  plugin.addCommand({
     id: "mindmap-run-all",
     name: "Run mindmap (all scopes)",
     callback: () => {

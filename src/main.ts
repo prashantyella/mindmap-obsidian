@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 
-import { FileSystemAdapter, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { FileSystemAdapter, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 
 import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput, type PreflightResult } from "./diagnostics";
 import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } from "./onboarding";
@@ -28,7 +28,9 @@ import {
   type SchedulerSummaryState,
 } from "./pluginSummaries";
 import { assertAllowedPluginArgs } from "./runArguments";
-import { getRunProfile, type RunScope } from "./runProfiles";
+import { getRunProfile, type RunProfile, type RunScope } from "./runProfiles";
+import { NO_ACTIVE_NOTE, type ActiveNoteEligibility } from "./individualNote";
+import { resolveActiveNoteEligibility } from "./individualNoteActions";
 import { confirmMindmapRun } from "./runConfirmModal";
 import { migrateLegacyPluginVaultRoot } from "./runtimeConfigMigration";
 import { ensureBundledRuntimeAssets } from "./runtimeAssets";
@@ -74,6 +76,7 @@ import {
 import { buildMindmapStatusBarState, openMindmapStatusMenu, type StatusBarInternalState } from "./statusBarIntegration";
 import { buildStatusSummary } from "./statusBarState";
 import type { LaunchAgentDetail } from "./launchAgentHealth";
+import { registerVaultRefreshEvents } from "./vaultRefreshEvents";
 
 const LOG_LIMIT = 50;
 
@@ -128,6 +131,7 @@ export default class MindmapPlugin extends Plugin {
   private readonly recentLog: string[] = [];
   statusBarEl: HTMLElement | null = null;
   private activeRunStatus: string | null = null;
+  private activeNoteEligibility: ActiveNoteEligibility = NO_ACTIVE_NOTE;
   private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
   private semanticEnvironment: MindmapSemanticEnvironment | null = null;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
@@ -169,7 +173,10 @@ export default class MindmapPlugin extends Plugin {
 
     registerMindmapCommands(this);
     this.syncScheduler();
-    this.registerVaultRefreshEvents();
+    registerVaultRefreshEvents(this.app.vault, (event) => this.registerEvent(event), (reason, paths) => {
+      this.pendingScanService?.requestRefresh(reason, paths);
+    });
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => { void this.refreshActiveNoteEligibility(); }));
     void this.pendingScanService.warm().then(() => this.updateStatusBar());
     void this.runPreflight("startup");
     if (this.settings.liveSemanticLookupEnabled) {
@@ -874,7 +881,29 @@ export default class MindmapPlugin extends Plugin {
     }
   }
 
-  async runMindmap(trigger: RunTrigger, scope: RunScope = "current"): Promise<void> {
+  async runActiveNote(): Promise<void> {
+    await this.refreshActiveNoteEligibility();
+    if (!this.activeNoteEligibility.eligible || !this.activeNoteEligibility.path) {
+      new Notice(this.activeNoteEligibility.reason, 8000);
+      return;
+    }
+    await this.runMindmap("manual", "note", this.activeNoteEligibility.path);
+  }
+
+  async processPendingNote(notePath: string): Promise<void> {
+    await this.runMindmap("manual", "note", notePath);
+  }
+
+  getActiveNoteEligibility(): ActiveNoteEligibility {
+    return this.activeNoteEligibility;
+  }
+
+  async refreshActiveNoteEligibility(): Promise<void> {
+    this.activeNoteEligibility = await resolveActiveNoteEligibility(this);
+    this.updateStatusBar();
+  }
+
+  async runMindmap(trigger: RunTrigger, scope: RunScope = "current", notePath?: string): Promise<void> {
     if (this.currentProcess) {
       const message = "Mindmap is already running. Skipping the new request.";
       this.appendLog(message);
@@ -906,7 +935,15 @@ export default class MindmapPlugin extends Plugin {
     }
 
     let command: { command: string; args: string[]; cwd: string };
-    const profile = getRunProfile(scope);
+    let profile: RunProfile;
+    try {
+      profile = getRunProfile(scope, notePath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "An individual note path is required.";
+      this.appendLog(message);
+      new Notice(message, 8000);
+      return;
+    }
 
     if (trigger === "manual" && profile.confirmation) {
       const confirmed = await confirmMindmapRun(this.app, profile.confirmation);
@@ -1080,23 +1117,4 @@ export default class MindmapPlugin extends Plugin {
     return path.normalize(runtime.configPath).startsWith(path.normalize(runtimeDir));
   }
 
-  private registerVaultRefreshEvents(): void {
-    const markDirty = (file: TAbstractFile | null, oldPath?: string) => {
-      const relpaths: string[] = [];
-      if (oldPath && oldPath.endsWith(".md")) {
-        relpaths.push(oldPath);
-      }
-      if (file instanceof TFile && file.extension === "md") {
-        relpaths.push(file.path);
-      }
-      if (relpaths.length > 0) {
-        this.pendingScanService?.requestRefresh("vault file changed", relpaths);
-      }
-    };
-
-    this.registerEvent(this.app.vault.on("create", (file) => markDirty(file)));
-    this.registerEvent(this.app.vault.on("modify", (file) => markDirty(file)));
-    this.registerEvent(this.app.vault.on("delete", (file) => markDirty(file)));
-    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => markDirty(file, oldPath)));
-  }
 }

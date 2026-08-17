@@ -71,8 +71,12 @@ function addMenuItem(menu: Menu, descriptor: StatusBarMenuItemDescriptor, action
           void actions.openNote(descriptor.path);
         } else if (action === "runCurrent") {
           void actions.runCurrent();
+        } else if (action === "runActiveNote") {
+          void actions.runActiveNote();
         } else if (action === "runAll") {
           void actions.runAll();
+        } else if (action === "processPendingNote" && descriptor.path) {
+          void actions.processPendingNote(descriptor.path);
         } else if (action === "runPreflight") {
           void actions.runPreflight();
         } else if (action === "openMindmap") {

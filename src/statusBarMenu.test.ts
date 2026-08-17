@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildStatusBarMenuItems, buildStatusBarPresentation, buildStatusSummary, type StatusBarMenuState } from "./statusBarState";
+import { NO_ACTIVE_NOTE } from "./individualNote";
 
 function state(overrides: Partial<StatusBarMenuState> = {}): StatusBarMenuState {
   return {
@@ -18,6 +19,7 @@ function state(overrides: Partial<StatusBarMenuState> = {}): StatusBarMenuState 
     schedulerHealth: null,
     schedulerDetails: [],
     semanticState: "off",
+    activeNote: NO_ACTIVE_NOTE,
     ...overrides,
   };
 }
@@ -43,7 +45,7 @@ void test("actionable scheduler health is announced without contradictory schedu
   assert.match(presentation.ariaLabel, /scheduler overdue/i);
 });
 
-void test("pending menu includes all-scope action and note openers", () => {
+void test("pending menu includes individual processing and clear note openers", () => {
   const items = buildStatusBarMenuItems(state({
     currentPending: 2,
     allPending: 3,
@@ -52,16 +54,27 @@ void test("pending menu includes all-scope action and note openers", () => {
   const titles = items.map((item) => item.title);
 
   assert.ok(titles.includes("Process all pending notes (3)"));
+  assert.ok(titles.includes("Process Notes/one.md"));
   assert.ok(titles.includes("Open Notes/one.md"));
   assert.ok(titles.includes("Open Notes/two.md"));
   assert.ok(titles.includes("Open settings"));
   assert.equal(titles.includes("Show status summary"), false);
 });
 
+void test("active-note action explains ineligible states", () => {
+  const items = buildStatusBarMenuItems(state({
+    activeNote: { path: "Notes/short.md", eligible: false, reason: "The active note is too short.", code: "too-short" },
+  }));
+  const action = items.find((item) => item.title.startsWith("Run active note"));
+  assert.equal(action?.disabled, true);
+  assert.match(action?.title ?? "", /too short/);
+});
+
 void test("running and unavailable states disable conflicting actions", () => {
-  const running = buildStatusBarMenuItems(state({ running: true, runStatus: "Mindmap: current" }));
+  const running = buildStatusBarMenuItems(state({ running: true, runStatus: "Mindmap: current", pendingPaths: ["Notes/one.md"] }));
   const runCurrent = running.find((item) => item.title.startsWith("Run active"));
   assert.equal(runCurrent?.disabled, true);
+  assert.equal(running.find((item) => item.title === "Process Notes/one.md")?.disabled, true);
 
   const unavailable = buildStatusBarMenuItems(state({ pendingAvailable: false, allPending: 2 }));
   const processAll = unavailable.find((item) => item.title.startsWith("Process all pending"));

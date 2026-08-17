@@ -1,4 +1,4 @@
-export type RunScope = "current" | "all" | "metadataAll" | "refreshAll" | "rebuildAll";
+export type RunScope = "current" | "all" | "note" | "metadataAll" | "refreshAll" | "rebuildAll";
 
 export interface RunConfirmation {
   title: string;
@@ -13,7 +13,7 @@ export interface RunProfile {
   confirmation?: RunConfirmation;
 }
 
-const RUN_PROFILES: Record<RunScope, RunProfile> = {
+const RUN_PROFILES: Record<Exclude<RunScope, "note">, RunProfile> = {
   current: {
     args: ["--current", "--apply"],
     label: "current scope",
@@ -54,6 +54,15 @@ const RUN_PROFILES: Record<RunScope, RunProfile> = {
   },
 };
 
-export function getRunProfile(scope: RunScope): RunProfile {
+export function getRunProfile(scope: RunScope, notePath?: string): RunProfile {
+  if (scope === "note") {
+    if (!notePath) {
+      throw new Error("An individual note path is required.");
+    }
+    return {
+      args: ["--note", notePath, "--apply"],
+      label: `individual note ${notePath}`,
+    };
+  }
   return RUN_PROFILES[scope];
 }

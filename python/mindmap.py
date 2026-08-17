@@ -117,6 +117,118 @@ def is_within_root(path: Path, root: Path) -> bool:
         return False
 
 
+APPLE_BOOKS_ANNOTATION_MIN_WORDS = 8
+
+
+def normalized_word_count(text: str) -> int:
+    return len(re.findall(r"\b[\w][\w'-]*\b", text, flags=re.UNICODE))
+
+
+def minimum_words_for_note(frontmatter: Dict, configured_minimum: int) -> int:
+    note_type = str(frontmatter.get("type", "")).strip().lower()
+    if note_type == "apple-books-annotation":
+        return APPLE_BOOKS_ANNOTATION_MIN_WORDS
+    return configured_minimum
+
+
+def note_meets_minimum(text: str, frontmatter: Dict, configured_minimum: int, body: Optional[str] = None) -> bool:
+    content = text if body is None else body
+    minimum = minimum_words_for_note(frontmatter, configured_minimum)
+    is_annotation = str(frontmatter.get("type", "")).strip().lower() == "apple-books-annotation"
+    count = normalized_word_count(content) if is_annotation else len(content.split())
+    return count >= minimum
+
+
+def normalize_scope_folder(folder: str) -> str:
+    normalized = str(folder).replace("\\", "/").strip().strip("/")
+    return normalized or "."
+
+
+def is_relpath_in_scope(relpath: str, folders: List[str]) -> bool:
+    normalized_path = relpath.replace("\\", "/").strip("/")
+    return any(
+        folder == "."
+        or normalized_path == normalize_scope_folder(folder)
+        or normalized_path.startswith(f"{normalize_scope_folder(folder)}/")
+        for folder in folders
+    )
+
+
+def is_plugin_internal_relpath(relpath: str) -> bool:
+    parts = [part for part in relpath.replace("\\", "/").split("/") if part]
+    return ".obsidian" in parts
+
+
+def validate_individual_note_target(
+    vault_root: Path,
+    raw_target: str,
+    all_scope_paths: List[str],
+) -> Tuple[Optional[Path], Optional[Dict]]:
+    target_text = str(raw_target).strip()
+    candidate = Path(target_text)
+    if not target_text:
+        return None, build_runtime_issue(
+            "error",
+            "NOTE_TARGET_EMPTY",
+            "Individual note path is empty.",
+            guidance="Use one existing vault-relative Markdown path.",
+        )
+    if candidate.is_absolute() or re.match(r"^[A-Za-z]:[\\/]", target_text) or target_text.startswith("\\\\"):
+        return None, build_runtime_issue(
+            "error",
+            "NOTE_TARGET_ABSOLUTE",
+            "Individual note paths must be vault-relative.",
+            guidance="Remove the absolute path prefix and select a note inside the vault.",
+            context={"path": target_text},
+        )
+    normalized_target = target_text.replace("\\", "/")
+    if ".." in Path(normalized_target).parts:
+        return None, build_runtime_issue(
+            "error",
+            "NOTE_TARGET_TRAVERSAL",
+            "Individual note path traversal is not allowed.",
+            guidance="Remove '..' from the path and use a direct vault-relative Markdown path.",
+            context={"path": target_text},
+        )
+    if is_plugin_internal_relpath(normalized_target):
+        return None, build_runtime_issue(
+            "error",
+            "NOTE_TARGET_RUNTIME_INTERNAL",
+            "Plugin and runtime internals cannot be processed as notes.",
+            guidance="Select a Markdown note outside .obsidian plugin/runtime files.",
+            context={"path": target_text},
+        )
+    if Path(normalized_target).suffix.lower() != ".md":
+        return None, build_runtime_issue(
+            "error",
+            "NOTE_TARGET_NOT_MARKDOWN",
+            "Individual note path must be a Markdown file (*.md).",
+            guidance="Select a .md note.",
+            context={"path": target_text},
+        )
+    if not is_relpath_in_scope(normalized_target, all_scope_paths):
+        return None, build_runtime_issue(
+            "error",
+            "NOTE_TARGET_OUT_OF_SCOPE",
+            "Individual note is outside the configured all-scope folders.",
+            guidance="Move the note into an all-scope folder or update the configured scope.",
+            context={"path": target_text},
+        )
+
+    target, issue = resolve_vault_markdown_write_target(vault_root, normalized_target)
+    if issue:
+        return None, issue
+    if target is None or not target.exists() or not target.is_file():
+        return None, build_runtime_issue(
+            "error",
+            "NOTE_TARGET_MISSING",
+            f"Individual note not found: {target_text}",
+            guidance="Use one existing vault-relative Markdown path.",
+            context={"path": target_text},
+        )
+    return target, None
+
+
 def resolve_vault_markdown_write_target(vault_root: Path, raw_target: str) -> Tuple[Optional[Path], Optional[Dict]]:
     target_text = str(raw_target).strip()
     if not target_text:
@@ -820,11 +932,13 @@ def list_notes(vault_root: Path, notes_paths: List[str], min_words: int, related
             continue
         for path in base.rglob("*.md"):
             relpath = path.relative_to(vault_root).as_posix()
+            if is_plugin_internal_relpath(relpath):
+                continue
             title = path.stem
             text = path.read_text(encoding="utf-8", errors="ignore")
             fm, body = parse_frontmatter(text)
             body = strip_related_section(body, related_heading)
-            if len(body.split()) < min_words:
+            if not note_meets_minimum(text, fm, min_words, body=body):
                 continue
             notes.append(Note(path=path, relpath=relpath, title=title, body=body))
     return notes
@@ -1151,6 +1265,23 @@ def can_mark_note_complete(
     if not tagging_enabled:
         return True
     return metadata_succeeded and write_succeeded
+
+
+def finalize_run_state(
+    state: Dict,
+    state_files: Dict,
+    failed_paths: set,
+    individual_target: Optional[Path],
+    vault_root: Path,
+    run_failed: bool,
+) -> Dict:
+    next_state = dict(state) if isinstance(state, dict) else {}
+    for failed_path in failed_paths:
+        state_files.pop(failed_path, None)
+    if run_failed and individual_target:
+        state_files.pop(individual_target.relative_to(vault_root).as_posix(), None)
+    next_state["files"] = state_files
+    return next_state
 
 
 def provider_failure_check(
@@ -1847,15 +1978,16 @@ def load_note_by_relpath(vault_root: Path, relpath: str, related_heading: str, m
             )
         )
     text = target.read_text(encoding="utf-8", errors="ignore")
-    _fm, body = parse_frontmatter(text)
+    fm, body = parse_frontmatter(text)
     body = strip_related_section(body, related_heading)
-    if min_words and len(body.split()) < min_words:
+    if min_words and not note_meets_minimum(text, fm, min_words, body=body):
         raise RuntimeError(
             diagnostic_line(
                 "warn",
                 "NOTE_TOO_SHORT",
-                f"Note is below the configured minimum word count: {relpath}",
-                context={"path": relpath, "min_words": min_words},
+                f"Note is below its minimum word count and is ineligible for individual processing: {relpath}",
+                guidance="Add more source content before processing this note.",
+                context={"path": relpath, "min_words": minimum_words_for_note(fm, min_words)},
             )
         )
     return Note(path=target, relpath=target.relative_to(vault_root).as_posix(), title=target.stem, body=body)
@@ -2079,8 +2211,18 @@ def main():
     scope_group = parser.add_mutually_exclusive_group()
     scope_group.add_argument("--current", action="store_true", help="Use current scope folders from config")
     scope_group.add_argument("--all", action="store_true", help="Use all scope folders from config")
+    scope_group.add_argument("--note", help="Process one existing vault-relative Markdown note")
 
     args = parser.parse_args()
+    if args.note:
+        for flag, enabled in (
+            ("--refresh-all", args.refresh_all),
+            ("--rebuild", args.rebuild),
+            ("--apply-preview", args.apply_preview),
+            ("--limit", args.limit is not None),
+        ):
+            if enabled:
+                parser.error(f"argument --note: not allowed with argument {flag}")
     config_path = resolve_config_path(args.config)
 
     if args.preflight:
@@ -2102,8 +2244,11 @@ def main():
     vault_root = Path(config.get("vault_root", "."))
     if not vault_root.is_absolute():
         vault_root = (config_path.parent / vault_root).resolve()
-    # Scope selection
-    if args.all and "notes_paths_all" in config:
+    # Individual notes always validate against the complete configured all-scope universe.
+    all_scope_paths = resolve_notes_paths(config, "all")
+    if args.note:
+        notes_paths = all_scope_paths
+    elif args.all and "notes_paths_all" in config:
         notes_paths = config["notes_paths_all"]
     elif args.current and "notes_paths_current" in config:
         notes_paths = config["notes_paths_current"]
@@ -2249,15 +2394,32 @@ def main():
     do_index = args.index or (not args.index and not args.tag)
     do_tag = args.tag or (not args.index and not args.tag)
 
-    notes = list_notes(
-        vault_root,
-        notes_paths,
-        config.get("min_note_words", 30),
-        mindmap_heading,
-    )
-    allowed_paths = {n.relpath for n in notes}
-    if args.limit:
-        notes = notes[: args.limit]
+    configured_min_words = config.get("min_note_words", 30)
+    all_scope_notes = list_notes(vault_root, all_scope_paths, configured_min_words, mindmap_heading)
+    individual_target = None
+    if args.note:
+        individual_target, target_issue = validate_individual_note_target(vault_root, args.note, all_scope_paths)
+        if target_issue:
+            emit_stderr(
+                target_issue["level"],
+                target_issue["code"],
+                target_issue["message"],
+                guidance=target_issue.get("guidance"),
+                context=target_issue.get("context"),
+            )
+            return 1
+        try:
+            target_note = load_note_by_relpath(vault_root, args.note, mindmap_heading, min_words=configured_min_words)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr, flush=True)
+            return 1
+        notes = [target_note]
+        allowed_paths = {n.relpath for n in all_scope_notes}
+    else:
+        notes = list_notes(vault_root, notes_paths, configured_min_words, mindmap_heading)
+        allowed_paths = {n.relpath for n in notes}
+        if args.limit:
+            notes = notes[: args.limit]
 
     if not notes:
         print("No notes found.")
@@ -2415,14 +2577,14 @@ def main():
     for note in notes:
         content_hash = file_signature(note.body)
         prev = state_files.get(note.relpath)
-        if prev and prev.get("hash") == content_hash:
+        if prev and prev.get("hash") == content_hash and not individual_target:
             continue
         changed_notes.append((note, content_hash))
     changed_paths = {note.relpath for note, _ in changed_notes}
 
     # Clean up removed notes
     current_paths = {n.relpath for n in notes}
-    removed_paths = [p for p in state_files.keys() if p not in current_paths]
+    removed_paths = [] if individual_target else [p for p in state_files.keys() if p not in current_paths]
     if removed_paths:
         for path in removed_paths:
             chunks.delete(where={"path": path})
@@ -2762,7 +2924,10 @@ def main():
     if not args.apply:
         print("No note changes were made. Re-run with --apply to write updates.")
 
-    save_json(state_path, {"files": state_files})
+    save_json(
+        state_path,
+        finalize_run_state(state, state_files, index_failed_paths, individual_target, vault_root, run_failed),
+    )
     return 1 if run_failed else 0
 
 

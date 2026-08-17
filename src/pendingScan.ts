@@ -5,6 +5,7 @@ import path from "node:path";
 import type { TFile, Vault } from "obsidian";
 
 import type { ResolvedRuntime, RuntimeContext } from "./pathResolver";
+import { isAppleBooksAnnotation, minimumWordsForNote, normalizedWordCount } from "./individualNote";
 
 const MAX_PENDING_ITEMS = 5;
 const DEFAULT_DEBOUNCE_MS = 500;
@@ -182,16 +183,18 @@ function stripRelatedSection(text: string, heading: string): string {
   return `${cleaned.join("\n").trim()}\n`;
 }
 
-function computeBodyHash(text: string, heading: string): { hash: string | null; wordCount: number } {
+function computeBodyHash(text: string, heading: string): { hash: string | null; wordCount: number; normalizedWordCount: number } {
   const body = stripRelatedSection(stripFrontmatter(text), heading);
   const wordCount = body.split(/\s+/).filter(Boolean).length;
+  const normalizedCount = normalizedWordCount(body);
   if (wordCount === 0) {
-    return { hash: null, wordCount };
+    return { hash: null, wordCount, normalizedWordCount: normalizedCount };
   }
 
   return {
     hash: createHash("sha1").update(body).digest("hex"),
     wordCount,
+    normalizedWordCount: normalizedCount,
   };
 }
 
@@ -282,7 +285,9 @@ export class PendingIndex {
       metrics.filesScanned += 1;
       const text = await file.read();
       const body = computeBodyHash(text, input.config.heading);
-      if (input.config.minWords > 0 && body.wordCount < input.config.minWords) {
+      const minimum = minimumWordsForNote(text, input.config.minWords);
+      const noteWordCount = isAppleBooksAnnotation(text) ? body.normalizedWordCount : body.wordCount;
+      if (minimum > 0 && noteWordCount < minimum) {
         this.entries.delete(file.relpath);
         continue;
       }

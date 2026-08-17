@@ -14,3 +14,25 @@ void test("assertAllowedPluginArgs rejects unexpected flags", () => {
     assertAllowedPluginArgs(["--current", "--rm-all"]);
   }, /Blocked unexpected Mindmap CLI argument/);
 });
+
+void test("assertAllowedPluginArgs validates individual note values", () => {
+  assert.doesNotThrow(() => assertAllowedPluginArgs(["--note", "Notes/one.md", "--apply", "--index", "--tag", "--quiet"]));
+  assert.throws(() => assertAllowedPluginArgs(["--note", "../outside.md"]), /traversal/i);
+  assert.throws(() => assertAllowedPluginArgs(["--note", "/vault/one.md"]), /vault-relative/i);
+  assert.throws(() => assertAllowedPluginArgs(["--note", ".obsidian/plugins/mindmap-ai/data.md"]), /runtime/i);
+  assert.throws(() => assertAllowedPluginArgs(["--note", "Notes/one.txt"]), /Markdown/i);
+});
+
+void test("assertAllowedPluginArgs rejects repeated and incompatible individual note flags", () => {
+  for (const args of [
+    ["--note", "Notes/one.md", "--note", "Notes/two.md"],
+    ["--note", "Notes/one.md", "--current"],
+    ["--note", "Notes/one.md", "--all"],
+    ["--note", "Notes/one.md", "--refresh-all"],
+    ["--note", "Notes/one.md", "--rebuild"],
+    ["--note", "Notes/one.md", "--apply-preview"],
+    ["--note", "Notes/one.md", "--limit", "1"],
+  ]) {
+    assert.throws(() => assertAllowedPluginArgs(args));
+  }
+});

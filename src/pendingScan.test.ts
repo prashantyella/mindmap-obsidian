@@ -152,3 +152,35 @@ void test("PendingIndex treats vault-root scope (.) as matching all markdown fil
   assert.equal(snapshot.all.total, 1);
   assert.deepEqual(snapshot.current.items, ["Notes/new-note.md"]);
 });
+
+void test("PendingIndex applies the eight-word Apple Books threshold", async () => {
+  const index = new PendingIndex();
+  const snapshot = await index.refresh({
+    config: {
+      currentPaths: ["Notes"],
+      allPaths: ["Notes"],
+      heading: "## Mindmap",
+      minWords: 30,
+      statePath: "/vault/state.json",
+    },
+    stateHashes: {},
+    files: [
+      {
+        relpath: "Notes/annotation.md",
+        mtimeMs: 1,
+        read: () => Promise.resolve("---\ntype: apple-books-annotation\n---\none two three four five six seven eight"),
+      },
+      {
+        relpath: "Notes/short.md",
+        mtimeMs: 1,
+        read: () => Promise.resolve("---\ntype: apple-books-annotation\n---\none two three"),
+      },
+    ],
+    dirtyPaths: new Set<string>(),
+    forceFull: true,
+    now: 1,
+  });
+
+  assert.deepEqual(snapshot.all.items, ["Notes/annotation.md"]);
+  assert.equal(snapshot.all.total, 1);
+});

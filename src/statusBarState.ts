@@ -1,6 +1,7 @@
 import type { IconName } from "obsidian";
 
 import { DAILY_LAUNCH_AGENT_LABEL, WEEKLY_LAUNCH_AGENT_LABEL, type LaunchAgentHealth } from "./launchAgent";
+import type { ActiveNoteEligibility } from "./individualNote";
 
 export interface StatusBarSchedulerDetail {
   label: string;
@@ -22,6 +23,7 @@ export interface StatusBarMenuState {
   schedulerHealth: LaunchAgentHealth | null;
   schedulerDetails: StatusBarSchedulerDetail[];
   semanticState: string;
+  activeNote: ActiveNoteEligibility;
 }
 
 export interface StatusBarStateInput {
@@ -41,6 +43,7 @@ export interface StatusBarStateInput {
   schedulerEnabled: boolean;
   weeklyEnabled: boolean;
   semanticState: string;
+  activeNote: ActiveNoteEligibility;
 }
 
 export interface StatusSummaryInput {
@@ -98,12 +101,15 @@ export function buildStatusBarMenuState(input: StatusBarStateInput): StatusBarMe
       schedulerDetail(WEEKLY_LAUNCH_AGENT_LABEL, "Weekly", input.schedulerEnabled && input.weeklyEnabled),
     ],
     semanticState: input.semanticState,
+    activeNote: input.activeNote,
   };
 }
 
 export interface StatusBarMenuActions {
   runCurrent(): void | Promise<void>;
+  runActiveNote(): void | Promise<void>;
   runAll(): void | Promise<void>;
+  processPendingNote(path: string): void | Promise<void>;
   runPreflight(): void | Promise<void>;
   openNote(path: string): void | Promise<void>;
   openMindmap(): void | Promise<void>;
@@ -172,6 +178,16 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     { title: "Standard Mode", icon: "orbit", checked: true },
     { title: "Queue", label: true },
     {
+      title: state.running
+        ? "Run active note (Mindmap is already running.)"
+        : state.activeNote.eligible
+        ? "Run Mindmap for active note"
+        : `Run active note (${state.activeNote.reason})`,
+      icon: "file-play",
+      disabled: state.running || !state.scopeReady || !state.activeNote.eligible,
+      action: state.running || !state.activeNote.eligible ? undefined : "runActiveNote",
+    },
+    {
       title: state.running ? `Run active${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope",
       icon: state.running ? "loader-circle" : "play",
       disabled: state.running || !state.scopeReady,
@@ -187,7 +203,10 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       title: state.pendingAvailable ? `Current scope: ${state.currentPending} pending` : "Pending scan unavailable",
       disabled: true,
     },
-    ...state.pendingPaths.map((path) => ({ title: `Open ${path}`, icon: "file-text" as IconName, path, action: "openNote" as const })),
+    ...state.pendingPaths.flatMap((path) => [
+      { title: `Process ${path}`, icon: "file-play" as IconName, path, disabled: state.running || !state.scopeReady, action: "processPendingNote" as const },
+      { title: `Open ${path}`, icon: "file-text" as IconName, path, action: "openNote" as const },
+    ]),
     { title: "Reading", label: true },
     { title: "Reading Mode is not enabled", icon: "book-open", disabled: true },
     { title: "Web Research", label: true },
