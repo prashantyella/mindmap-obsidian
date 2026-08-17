@@ -47,6 +47,7 @@ import {
 import {
   buildLaunchAgentCatchUpStatus,
   buildPluginLaunchAgentSpecs,
+  ensureLaunchAgentDirectories,
   getLaunchAgentPlistPath,
   getLaunchAgentsDirectory,
   refreshLaunchAgentHealth,
@@ -622,6 +623,7 @@ export default class MindmapPlugin extends Plugin {
       settings: this.settings,
       plistDirectory: getLaunchAgentsDirectory(os.homedir()),
       pathEnvironment: process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      homeDirectory: os.homedir(),
     });
   }
 
@@ -629,9 +631,7 @@ export default class MindmapPlugin extends Plugin {
     if (!isLaunchAgentSchedulerEnabled(this.settings.schedulerMode) || process.platform !== "darwin") {
       return;
     }
-    if (this.launchAgentHealthRefreshInFlight) {
-      return;
-    }
+    if (this.launchAgentHealthRefreshInFlight) return;
 
     const runtime = this.getResolvedRuntime();
     if (!runtime.valid || typeof process.getuid !== "function") {
@@ -671,7 +671,7 @@ export default class MindmapPlugin extends Plugin {
 
     try {
       await fs.promises.mkdir(getLaunchAgentsDirectory(os.homedir()), { recursive: true });
-      await fs.promises.mkdir(path.join(runtime.command.cwd, "_logs"), { recursive: true });
+      await ensureLaunchAgentDirectories(specs, os.homedir());
 
       for (const spec of specs) {
         await this.writeLaunchAgentPlist(spec);

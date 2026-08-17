@@ -193,6 +193,7 @@ export function buildLaunchAgentSpec(options: {
   plistPath: string;
   command: RuntimeCommand;
   extraArgs: string[];
+  workingDirectory?: string;
   stdoutPath: string;
   stderrPath: string;
   startCalendarInterval: CalendarInterval | CalendarInterval[];
@@ -202,7 +203,7 @@ export function buildLaunchAgentSpec(options: {
     label: options.label,
     plistPath: options.plistPath,
     programArguments: buildLaunchAgentProgramArguments(options.command, options.extraArgs),
-    workingDirectory: options.command.cwd,
+    workingDirectory: options.workingDirectory ?? options.command.cwd,
     stdoutPath: options.stdoutPath,
     stderrPath: options.stderrPath,
     startCalendarInterval: options.startCalendarInterval,
@@ -217,6 +218,7 @@ export function buildConfiguredLaunchAgentSpecs(options: {
   command: RuntimeCommand;
   plistDirectory: string;
   logDirectory: string;
+  workingDirectory?: string;
   pathEnvironment: string;
   daily: ClockTime;
   weeklyEnabled: boolean;
@@ -229,6 +231,7 @@ export function buildConfiguredLaunchAgentSpecs(options: {
     plistPath: path.join(options.plistDirectory, `${DAILY_LAUNCH_AGENT_LABEL}.plist`),
     command: options.command,
     extraArgs: options.dailyArgs,
+    workingDirectory: options.workingDirectory,
     stdoutPath: path.join(options.logDirectory, "launchagent.out"),
     stderrPath: path.join(options.logDirectory, "launchagent.err"),
     startCalendarInterval: buildDailyCalendarIntervals(options.daily),
@@ -243,6 +246,7 @@ export function buildConfiguredLaunchAgentSpecs(options: {
     plistPath: path.join(options.plistDirectory, `${WEEKLY_LAUNCH_AGENT_LABEL}.plist`),
     command: options.command,
     extraArgs: options.weeklyArgs,
+    workingDirectory: options.workingDirectory,
     stdoutPath: path.join(options.logDirectory, "launchagent-weekly.out"),
     stderrPath: path.join(options.logDirectory, "launchagent-weekly.err"),
     startCalendarInterval: buildWeeklyCalendarInterval(options.weekly),

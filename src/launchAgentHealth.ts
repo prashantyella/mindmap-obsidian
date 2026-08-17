@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 
@@ -25,16 +26,40 @@ export interface PluginLaunchAgentSettings {
   launchAgentWeeklyMinute: number;
 }
 
+export function getLaunchAgentWorkingDirectory(homeDirectory: string): string {
+  return path.join(homeDirectory, "Library", "Application Support", "Mindmap");
+}
+
+export function getLaunchAgentLogDirectory(homeDirectory: string): string {
+  return path.join(homeDirectory, "Library", "Logs", "Mindmap");
+}
+
+export async function ensureLaunchAgentDirectories(specs: LaunchAgentSpec[], homeDirectory: string): Promise<void> {
+  const directories = new Set([
+    getLaunchAgentWorkingDirectory(homeDirectory),
+    getLaunchAgentLogDirectory(homeDirectory),
+    ...specs.flatMap((spec) => [path.dirname(spec.stdoutPath), path.dirname(spec.stderrPath)]),
+  ]);
+  for (const directory of directories) {
+    await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+    await fs.promises.chmod(directory, 0o700);
+  }
+}
+
 export function buildPluginLaunchAgentSpecs(options: {
   command: RuntimeCommand;
   settings: PluginLaunchAgentSettings;
   plistDirectory: string;
   pathEnvironment: string;
+  homeDirectory?: string;
 }): LaunchAgentSpec[] {
+  const homeDirectory = options.homeDirectory ?? os.homedir();
+  const logDirectory = getLaunchAgentLogDirectory(homeDirectory);
   return buildConfiguredLaunchAgentSpecs({
     command: options.command,
     plistDirectory: options.plistDirectory,
-    logDirectory: path.join(options.command.cwd, "_logs"),
+    logDirectory,
+    workingDirectory: getLaunchAgentWorkingDirectory(homeDirectory),
     pathEnvironment: options.pathEnvironment,
     daily: {
       hour: options.settings.launchAgentDailyHour,
