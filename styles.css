@@ -767,10 +767,46 @@
   display: inline-flex;
   gap: 6px;
   align-items: center;
+  cursor: pointer;
+  border-radius: 4px;
+  outline: none;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .mindmap-status.is-running {
   color: var(--text-accent);
+}
+
+.mindmap-status.is-actionable {
+  color: var(--text-warning, var(--text-error));
+}
+
+.mindmap-status:hover,
+.mindmap-status:focus-visible {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.mindmap-status:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+}
+
+.mindmap-status-icon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+}
+
+.mindmap-status.is-running .mindmap-status-icon svg {
+  animation: mindmap-status-spin 0.9s linear infinite;
+}
+
+@keyframes mindmap-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .mindmap-status-swirling {
@@ -815,13 +851,19 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .mindmap-status,
+  .mindmap-status.is-running .mindmap-status-icon svg {
+    transition: none;
+    animation: none;
+  }
+
   .mindmap-status-swirling::before,
   .mindmap-status-swirling::after {
-    animation-duration: 1.8s;
+    animation: none;
   }
 
   .mindmap-loading-spinner-icon {
-    animation-duration: 1.6s;
+    animation: none;
   }
 }
 

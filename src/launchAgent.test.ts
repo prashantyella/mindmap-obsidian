@@ -13,6 +13,7 @@ import {
   normalizeHour,
   normalizeMinute,
   parseLaunchctlPrintOutput,
+  shouldBootstrapLaunchAgent,
   shouldOfferLaunchAgentCatchUp,
 } from "./launchAgent";
 
@@ -80,7 +81,7 @@ void test("finds Sunday weekly occurrence independently of Mon-Sat schedule", ()
   assert.equal(new Date(getMostRecentScheduledOccurrence(schedule, localTime(16, 3))!).getDate(), 16);
 });
 
-void test("classifies a recent heartbeat as healthy and an overdue one as stale", () => {
+void test("classifies a recent heartbeat as healthy and an overdue one as overdue", () => {
   const now = localTime(17, 4);
   const expectedAt = getMostRecentScheduledOccurrence(buildDailyCalendarIntervals({ hour: 2, minute: 30 }), now)!;
   const launchctl = { loaded: true, state: "exited", lastExitCode: 0 };
@@ -97,7 +98,7 @@ void test("classifies a recent heartbeat as healthy and an overdue one as stale"
     lastSuccessfulRunAt: expectedAt - 1,
     now,
     graceMinutes: 15,
-  }), "stale");
+  }), "overdue");
 });
 
 void test("classifies exit 78 as failing even with a fresh heartbeat", () => {
@@ -110,21 +111,80 @@ void test("classifies exit 78 as failing even with a fresh heartbeat", () => {
   }), "failing");
 });
 
-void test("classifies a long-running scheduled job as healthy before its first heartbeat", () => {
+void test("classifies a long-running scheduled job as running before its first heartbeat", () => {
   assert.equal(classifyLaunchAgentHealth({
     launchctl: { loaded: true, state: "running", lastExitCode: null },
     schedule: buildDailyCalendarIntervals({ hour: 2, minute: 30 }),
     lastSuccessfulRunAt: null,
     now: localTime(17, 4),
-  }), "healthy");
+  }), "running");
 });
 
-void test("offers catch-up only for stale or failing agents with pending all-scope notes", () => {
-  assert.equal(shouldOfferLaunchAgentCatchUp("stale", 1), true);
+void test("offers catch-up only for overdue or failing agents with pending all-scope notes", () => {
+  assert.equal(shouldOfferLaunchAgentCatchUp("overdue", 1), true);
   assert.equal(shouldOfferLaunchAgentCatchUp("failing", 2), true);
   assert.equal(shouldOfferLaunchAgentCatchUp("healthy", 2), false);
-  assert.equal(shouldOfferLaunchAgentCatchUp("stale", 0), false);
+  assert.equal(shouldOfferLaunchAgentCatchUp("overdue", 0), false);
   assert.equal(shouldOfferLaunchAgentCatchUp(null, 2), false);
+});
+
+void test("only bootstraps changed or unloaded agents", () => {
+  assert.equal(shouldBootstrapLaunchAgent(false, true), false);
+  assert.equal(shouldBootstrapLaunchAgent(true, true), true);
+  assert.equal(shouldBootstrapLaunchAgent(false, false), true);
+});
+
+void test("keeps a weekly agent waiting after a recent reconcile while daily succeeded", () => {
+  const now = localTime(16, 4);
+  const dailySchedule = buildDailyCalendarIntervals({ hour: 2, minute: 30 });
+  const weeklySchedule = buildWeeklyCalendarInterval({ hour: 3, minute: 0 });
+  const dailyOccurrence = getMostRecentScheduledOccurrence(dailySchedule, now)!;
+  const weeklyOccurrence = getMostRecentScheduledOccurrence(weeklySchedule, now)!;
+  const launchctl = { loaded: true, state: "exited", lastExitCode: 0 };
+
+  assert.equal(classifyLaunchAgentHealth({
+    launchctl,
+    schedule: dailySchedule,
+    lastSuccessfulRunAt: dailyOccurrence,
+    now,
+  }), "healthy");
+  assert.equal(classifyLaunchAgentHealth({
+    launchctl,
+    schedule: weeklySchedule,
+    lastSuccessfulRunAt: null,
+    reconciledAt: now,
+    now,
+  }), "waiting");
+  assert.ok(now >= weeklyOccurrence);
+});
+
+void test("preserves overdue history across an unchanged reload while new plists wait", () => {
+  const now = localTime(17, 4);
+  const schedule = buildDailyCalendarIntervals({ hour: 2, minute: 30 });
+  const occurrence = getMostRecentScheduledOccurrence(schedule, now)!;
+  const launchctl = { loaded: true, state: "exited", lastExitCode: 0 };
+
+  assert.equal(classifyLaunchAgentHealth({
+    launchctl,
+    schedule,
+    lastSuccessfulRunAt: null,
+    reconciledAt: occurrence - 60_000,
+    now,
+  }), "overdue");
+  assert.equal(classifyLaunchAgentHealth({
+    launchctl,
+    schedule,
+    lastSuccessfulRunAt: null,
+    reconciledAt: occurrence - 60_000,
+    now: now + 60_000,
+  }), "overdue");
+  assert.equal(classifyLaunchAgentHealth({
+    launchctl,
+    schedule,
+    lastSuccessfulRunAt: null,
+    reconciledAt: now,
+    now,
+  }), "waiting");
 });
 
 void test("uses env launcher for bare python commands", () => {

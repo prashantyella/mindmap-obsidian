@@ -41,6 +41,7 @@ import {
   formatClockTime,
   normalizeHour,
   normalizeMinute,
+  shouldBootstrapLaunchAgent,
   WEEKLY_LAUNCH_AGENT_LABEL,
   type LaunchAgentSpec,
 } from "./launchAgent";
@@ -50,6 +51,7 @@ import {
   ensureLaunchAgentDirectories,
   getLaunchAgentPlistPath,
   getLaunchAgentsDirectory,
+  isLaunchAgentLoaded,
   refreshLaunchAgentHealth,
 } from "./launchAgentHealth";
 import {
@@ -65,6 +67,13 @@ import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./se
 import { MindmapSettingTab } from "./settingsTab";
 import { MindmapWorkspaceView, MINDMAP_VIEW_TYPE } from "./workspaceView";
 import { BUNDLED_RUNTIME_ASSETS } from "virtual:runtime-assets";
+import {
+  configureStatusBarElement,
+  renderStatusBarElement,
+} from "./statusBarMenu";
+import { buildMindmapStatusBarState, openMindmapStatusMenu, type StatusBarInternalState } from "./statusBarIntegration";
+import { buildStatusSummary } from "./statusBarState";
+import type { LaunchAgentDetail } from "./launchAgentHealth";
 
 const LOG_LIMIT = 50;
 
@@ -85,6 +94,7 @@ interface SchedulerState extends SchedulerSummaryState {
   lastMessage: string;
   launchAgentMessage: string;
   launchAgentPaths: string[];
+  launchAgentDetails: LaunchAgentDetail[];
 }
 
 interface DiagnosticsState extends DiagnosticsSummaryState {
@@ -109,13 +119,14 @@ export default class MindmapPlugin extends Plugin {
     lastMessage: "Manual mode.",
     launchAgentMessage: "LaunchAgent scheduler not reconciled yet.",
     launchAgentPaths: [],
+    launchAgentDetails: [],
     launchAgentHealth: null,
     launchAgentLastSuccessfulRunAt: null,
     launchAgentLastExitCode: null,
     pendingAllCount: null,
   };
   private readonly recentLog: string[] = [];
-  private statusBarEl: HTMLElement | null = null;
+  statusBarEl: HTMLElement | null = null;
   private activeRunStatus: string | null = null;
   private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
   private semanticEnvironment: MindmapSemanticEnvironment | null = null;
@@ -133,6 +144,7 @@ export default class MindmapPlugin extends Plugin {
     await this.ensureBundledRuntime();
 
     this.statusBarEl = this.addStatusBarItem();
+    configureStatusBarElement(this.statusBarEl, (event) => this.openStatusMenu(event));
     this.registerView(MINDMAP_VIEW_TYPE, (leaf) => new MindmapWorkspaceView(leaf, this));
     this.registerHoverLinkSource(MINDMAP_VIEW_TYPE, {
       display: "Mindmap AI",
@@ -267,6 +279,21 @@ export default class MindmapPlugin extends Plugin {
     return buildLaunchAgentCatchUpStatus(this.settings.schedulerMode, this.schedulerState.launchAgentHealth, this.getPendingSnapshot());
   }
 
+  private openStatusMenu(event?: MouseEvent | KeyboardEvent): void {
+    openMindmapStatusMenu(this, event);
+  }
+
+  getStatusBarInternalState(): StatusBarInternalState {
+    return {
+      running: this.currentProcess !== null,
+      runStatus: this.activeRunStatus,
+      preflightInProgress: this.diagnosticsState.inProgress,
+      preflightOk: this.diagnosticsState.result?.ok ?? null,
+      schedulerHealth: this.schedulerState.launchAgentHealth,
+      schedulerDetails: this.schedulerState.launchAgentDetails,
+    };
+  }
+
   async runLaunchAgentCatchUp(): Promise<void> {
     const status = this.getLaunchAgentCatchUpStatus();
     if (!status.available) {
@@ -274,10 +301,6 @@ export default class MindmapPlugin extends Plugin {
       return;
     }
     await this.runMindmap("manual", "all");
-  }
-
-  getRecentLogLines(): string[] {
-    return [...this.recentLog];
   }
 
   async openMindmapView(): Promise<void> {
@@ -439,39 +462,22 @@ export default class MindmapPlugin extends Plugin {
   }
 
   getDiagnosticsSummary(): DocumentFragment {
-    return buildDiagnosticsSummary(this.diagnosticsState, this.getRecentLogLines());
+    return buildDiagnosticsSummary(this.diagnosticsState, [...this.recentLog]);
   }
 
-  showRuntimeNotice(runtime: ResolvedRuntime): void {
-    if (!runtime.valid) {
-      const error = runtime.messages.find((message) => message.level === "error");
-      new Notice(error?.message ?? "Mindmap runtime is not ready.", 12000);
-      return;
-    }
-
-    const scheduleLabel = isLaunchAgentSchedulerEnabled(this.settings.schedulerMode)
-      ? `Scheduler: LaunchAgent (${this.schedulerState.launchAgentMessage}).`
-      : isSchedulerEnabled(this.settings.schedulerMode)
-        ? `Scheduler: interval (next ${formatTimestamp(this.schedulerState.nextRunAt)}).`
-        : "Scheduler: manual.";
-    const pending = this.getPendingSnapshot();
-    const pendingLabel = pending.available
-      ? `Pending current/all: ${pending.current.total}/${pending.all.total}.`
-      : `Pending unavailable: ${pending.reason}.`;
-    const preflightLabel = this.diagnosticsState.result
-      ? `Preflight: ${this.diagnosticsState.result.ok ? "ready" : "failed"} (${this.diagnosticsState.result.summary}).`
-      : "Preflight: not run yet.";
-    const setup = this.getScopeSetupStatus();
-    const setupLabel = setup.complete
-      ? `Scope setup: ready (${setup.currentPaths.length}/${setup.allPaths.length}).`
-      : `Scope setup: required. ${setup.guidance}`;
-    const currentPreview = formatCommandPreview(runtime, getRunProfile("current").args);
-    const allPreview = formatCommandPreview(runtime, getRunProfile("all").args);
-
-    new Notice(
-      `Runtime trust: ${runtime.trust.level}. Runs: current ${currentPreview}; all ${allPreview}. ${scheduleLabel} ${pendingLabel} ${preflightLabel} ${setupLabel}`,
-      12000,
-    );
+  showStatusSummary(): void {
+    const runtime = this.getResolvedRuntime();
+    const state = buildMindmapStatusBarState(this, this.getStatusBarInternalState());
+    new Notice(buildStatusSummary({
+      ready: runtime.valid && state.scopeReady && state.preflightOk !== false,
+      pendingAvailable: state.pendingAvailable,
+      currentPending: state.currentPending,
+      allPending: state.allPending,
+      preflightInProgress: state.preflightInProgress,
+      preflightOk: state.preflightOk,
+      schedulerMode: state.schedulerMode,
+      schedulerDetails: state.schedulerDetails,
+    }), 8000);
   }
 
   buildRuntimeCommand(extraArgs: string[] = []): { command: string; args: string[]; cwd: string } {
@@ -627,27 +633,32 @@ export default class MindmapPlugin extends Plugin {
     });
   }
 
-  private refreshLaunchAgentHealth(): void {
+  refreshLaunchAgentHealth(): Promise<void> {
     if (!isLaunchAgentSchedulerEnabled(this.settings.schedulerMode) || process.platform !== "darwin") {
-      return;
+      return Promise.resolve();
     }
-    if (this.launchAgentHealthRefreshInFlight) return;
+    if (this.launchAgentHealthRefreshInFlight) {
+      return this.launchAgentHealthRefreshInFlight;
+    }
 
     const runtime = this.getResolvedRuntime();
     if (!runtime.valid || typeof process.getuid !== "function") {
-      return;
+      return Promise.resolve();
     }
 
     const specs = this.getLaunchAgentSpecs(runtime);
-    this.launchAgentHealthRefreshInFlight = refreshLaunchAgentHealth(specs, process.getuid(), (summary) => {
+    const refresh = refreshLaunchAgentHealth(specs, process.getuid(), (summary) => {
       this.schedulerState.launchAgentHealth = summary.health;
       this.schedulerState.launchAgentLastSuccessfulRunAt = summary.lastSuccessfulRunAt;
       this.schedulerState.launchAgentLastExitCode = summary.lastExitCode;
+      this.schedulerState.launchAgentDetails = summary.details;
       this.schedulerState.launchAgentMessage = summary.message;
       this.updateStatusBar();
     }).finally(() => {
       this.launchAgentHealthRefreshInFlight = null;
     });
+    this.launchAgentHealthRefreshInFlight = refresh;
+    return refresh;
   }
 
   private async reconcileLaunchAgents(): Promise<void> {
@@ -674,8 +685,10 @@ export default class MindmapPlugin extends Plugin {
       await ensureLaunchAgentDirectories(specs, os.homedir());
 
       for (const spec of specs) {
-        await this.writeLaunchAgentPlist(spec);
-        await this.bootstrapLaunchAgent(spec);
+        const changed = await this.writeLaunchAgentPlist(spec);
+        if (shouldBootstrapLaunchAgent(changed, await isLaunchAgentLoaded(spec.label))) {
+          await this.bootstrapLaunchAgent(spec);
+        }
       }
 
       if (!activeLabels.has(WEEKLY_LAUNCH_AGENT_LABEL)) {
@@ -698,6 +711,13 @@ export default class MindmapPlugin extends Plugin {
         return;
       }
       const message = error instanceof Error ? error.message : "LaunchAgent reconciliation failed.";
+      this.schedulerState.launchAgentHealth = "failing";
+      this.schedulerState.launchAgentDetails = specs.map((spec) => ({
+        label: spec.label,
+        health: "failing" as const,
+        lastSuccessfulRunAt: null,
+        lastExitCode: null,
+      }));
       this.schedulerState.launchAgentMessage = message;
       this.schedulerState.lastMessage = `LaunchAgent scheduler error: ${message}`;
       this.appendLog(this.schedulerState.lastMessage);
@@ -706,7 +726,7 @@ export default class MindmapPlugin extends Plugin {
     }
   }
 
-  private async writeLaunchAgentPlist(spec: LaunchAgentSpec): Promise<void> {
+  private async writeLaunchAgentPlist(spec: LaunchAgentSpec): Promise<boolean> {
     const content = buildLaunchAgentPlist(spec);
     let existing: string | null;
     try {
@@ -718,7 +738,9 @@ export default class MindmapPlugin extends Plugin {
     if (existing !== content) {
       await fs.promises.writeFile(spec.plistPath, content, "utf8");
       this.appendLog(`[launchagent] Wrote ${spec.plistPath}`);
+      return true;
     }
+    return false;
   }
 
   private async bootstrapLaunchAgent(spec: LaunchAgentSpec): Promise<void> {
@@ -755,6 +777,7 @@ export default class MindmapPlugin extends Plugin {
     this.schedulerState.launchAgentPaths = [];
     this.schedulerState.launchAgentMessage = message;
     this.schedulerState.launchAgentHealth = null;
+    this.schedulerState.launchAgentDetails = [];
     this.schedulerState.launchAgentLastSuccessfulRunAt = null;
     this.schedulerState.launchAgentLastExitCode = null;
     this.appendLog(message);
@@ -995,27 +1018,6 @@ export default class MindmapPlugin extends Plugin {
     console.debug(`[Mindmap] ${message}`);
   }
 
-  private setStatusBarText(text: string, running = false): void {
-    if (!this.statusBarEl) {
-      return;
-    }
-
-    this.statusBarEl.classList.add("mindmap-status");
-    this.statusBarEl.classList.toggle("is-running", running);
-    this.statusBarEl.replaceChildren();
-
-    if (running) {
-      const spinner = document.createElement("span");
-      spinner.className = "mindmap-status-swirling";
-      spinner.setAttribute("aria-hidden", "true");
-      this.statusBarEl.appendChild(spinner);
-    }
-
-    const label = document.createElement("span");
-    label.textContent = text;
-    this.statusBarEl.appendChild(label);
-  }
-
   private updateStatusBar(): void {
     if (!this.statusBarEl) {
       return;
@@ -1023,42 +1025,7 @@ export default class MindmapPlugin extends Plugin {
 
     const pendingSnapshot = this.getPendingSnapshot();
     this.schedulerState.pendingAllCount = pendingSnapshot.available ? pendingSnapshot.all.total : null;
-
-    if (this.currentProcess) {
-      this.setStatusBarText(this.activeRunStatus ?? "Mindmap: running", true);
-      return;
-    }
-
-    if (this.diagnosticsState.inProgress) {
-      this.setStatusBarText("Mindmap: preflight");
-      return;
-    }
-
-    if (this.diagnosticsState.result && !this.diagnosticsState.result.ok) {
-      this.setStatusBarText("Mindmap: preflight failed");
-      return;
-    }
-
-    if (!this.getScopeSetupStatus().complete) {
-      this.setStatusBarText("Mindmap: scope setup required");
-      return;
-    }
-
-    if (isLaunchAgentSchedulerEnabled(this.settings.schedulerMode)) {
-      const pendingLabel = pendingSnapshot.available ? `${pendingSnapshot.current.total} pending` : "pending n/a";
-      const health = this.schedulerState.launchAgentHealth ?? "unknown";
-      this.setStatusBarText(`Mindmap: ${pendingLabel} • ${this.getSemanticStatus().state} • LaunchAgent ${health}`);
-      return;
-    }
-
-    if (isSchedulerEnabled(this.settings.schedulerMode)) {
-      const pendingLabel = pendingSnapshot.available ? `${pendingSnapshot.current.total} pending` : "pending n/a";
-      this.setStatusBarText(`Mindmap: ${pendingLabel} • ${this.getSemanticStatus().state} • next ${formatTimestamp(this.schedulerState.nextRunAt)}`);
-      return;
-    }
-
-    const semanticState = this.getSemanticStatus().state;
-    this.setStatusBarText(pendingSnapshot.available ? `Mindmap: ${pendingSnapshot.current.total} pending • ${semanticState}` : `Mindmap: manual • ${semanticState}`);
+    renderStatusBarElement(this.statusBarEl, buildMindmapStatusBarState(this, this.getStatusBarInternalState()));
   }
 
   private getRuntimeContext(): RuntimeContext {

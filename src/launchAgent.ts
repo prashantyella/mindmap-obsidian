@@ -20,17 +20,26 @@ export interface LaunchAgentLaunchctlStatus {
   lastExitCode: number | null;
 }
 
-export type LaunchAgentHealth = "healthy" | "stale" | "failing";
+export type LaunchAgentHealth = "waiting" | "healthy" | "running" | "overdue" | "failing" | "disabled";
 
 /** A recovery affordance is useful only when scheduled work is overdue and work remains. */
 export function shouldOfferLaunchAgentCatchUp(health: LaunchAgentHealth | null, pendingAll: number): boolean {
-  return (health === "stale" || health === "failing") && Number.isFinite(pendingAll) && pendingAll > 0;
+  return (health === "overdue" || health === "failing") && Number.isFinite(pendingAll) && pendingAll > 0;
+}
+
+/** Re-bootstrap only when the plist changed or the service is no longer loaded. */
+export function shouldBootstrapLaunchAgent(plistChanged: boolean, loaded: boolean): boolean {
+  return plistChanged || !loaded;
 }
 
 export interface LaunchAgentHealthInput {
   launchctl: LaunchAgentLaunchctlStatus;
   schedule: CalendarInterval | CalendarInterval[];
   lastSuccessfulRunAt: number | null;
+  /** Timestamp of the latest successful reconciliation/load, when known. */
+  reconciledAt?: number | null;
+  /** Disabled agents are represented explicitly in detailed scheduler UI. */
+  enabled?: boolean;
   now?: number;
   graceMinutes?: number;
 }
@@ -134,18 +143,22 @@ export function getMostRecentScheduledOccurrence(
 
 /** Classify a read-only LaunchAgent snapshot against its existing run-log heartbeat. */
 export function classifyLaunchAgentHealth(input: LaunchAgentHealthInput): LaunchAgentHealth {
+  if (input.enabled === false) {
+    return "disabled";
+  }
+
   if (!input.launchctl.loaded || (input.launchctl.lastExitCode !== null && input.launchctl.lastExitCode !== 0)) {
     return "failing";
   }
 
   if (input.launchctl.state?.toLowerCase() === "running") {
-    return "healthy";
+    return "running";
   }
 
   const now = input.now ?? Date.now();
   const expectedAt = getMostRecentScheduledOccurrence(input.schedule, now);
   if (expectedAt === null) {
-    return "stale";
+    return "waiting";
   }
 
   const graceMinutes = Number.isFinite(input.graceMinutes)
@@ -156,7 +169,19 @@ export function classifyLaunchAgentHealth(input: LaunchAgentHealthInput): Launch
     return "healthy";
   }
 
-  return now <= expectedAt + graceMinutes * 60_000 ? "healthy" : "stale";
+  // A reconciliation that happens after an occurrence has already passed has
+  // not missed a run. The first opportunity belongs to the newly loaded agent.
+  if (
+    heartbeat === null
+    && input.reconciledAt !== null
+    && input.reconciledAt !== undefined
+    && Number.isFinite(input.reconciledAt)
+    && input.reconciledAt >= expectedAt
+  ) {
+    return "waiting";
+  }
+
+  return now <= expectedAt + graceMinutes * 60_000 ? "waiting" : "overdue";
 }
 
 export function formatClockTime(time: ClockTime): string {

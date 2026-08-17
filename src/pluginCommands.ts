@@ -85,7 +85,7 @@ export function registerMindmapCommands(plugin: MindmapPlugin): void {
     id: "mindmap-open-status",
     name: "Show mindmap status",
     callback: () => {
-      plugin.showRuntimeNotice(plugin.getResolvedRuntime());
+      plugin.showStatusSummary();
     },
   });
 
