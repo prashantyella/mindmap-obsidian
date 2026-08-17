@@ -27,10 +27,12 @@ export interface LlmProviderConfigStatus extends LlmProviderConfig {
   guidance: string;
 }
 
+export const DEFAULT_METADATA_MODEL = "Qwen3.5-9B-MLX-4bit";
+
 const DEFAULT_PROVIDER_CONFIG: LlmProviderConfig = {
   provider: "openai_compatible",
   baseUrl: "http://localhost:8000/v1",
-  model: "gemma-4-E4B-it-MLX-8bit",
+  model: DEFAULT_METADATA_MODEL,
   apiKey: "",
   maxTokens: 1024,
   enableThinking: true,

@@ -9,6 +9,7 @@ void test("config template uses neutral empty scope defaults", () => {
   const template = JSON.parse(fs.readFileSync(path.join(process.cwd(), "python", "config.template.json"), "utf8")) as Record<string, unknown>;
 
   assert.equal(template.vault_root, "../../../../");
+  assert.equal(template.llm_model, "Qwen3.5-9B-MLX-4bit");
   assert.deepEqual(template.notes_paths, []);
   assert.deepEqual(template.notes_paths_current, []);
   assert.deepEqual(template.notes_paths_all, []);

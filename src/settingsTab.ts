@@ -5,7 +5,7 @@ import { getRunProfile } from "./runProfiles";
 import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
 import { normalizeHour, normalizeMinute } from "./launchAgent";
 import type MindmapPlugin from "./main";
-import type { LlmProviderConfig } from "./pluginConfig";
+import { DEFAULT_METADATA_MODEL, type LlmProviderConfig } from "./pluginConfig";
 import { ScopeManager } from "./scopeManager";
 import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
 
@@ -127,7 +127,7 @@ export class MindmapSettingTab extends PluginSettingTab {
             this.saveProviderConfig({
               provider: "openai_compatible",
               baseUrl: "http://localhost:8000/v1",
-              model: "gemma-4-E4B-it-MLX-8bit",
+              model: DEFAULT_METADATA_MODEL,
               maxTokens: 1024,
               enableThinking: false,
             });
@@ -152,7 +152,7 @@ export class MindmapSettingTab extends PluginSettingTab {
       .setDesc("Model used for metadata extraction.")
       .addText((text) => {
         text
-          .setPlaceholder(status.provider === "openai_compatible" ? "gemma-4-E4B-it-MLX-8bit" : "llama3.1:8b")
+          .setPlaceholder(status.provider === "openai_compatible" ? DEFAULT_METADATA_MODEL : "llama3.1:8b")
           .setValue(status.model)
           .onChange((value) => {
             this.saveProviderConfig({ model: value });

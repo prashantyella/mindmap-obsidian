@@ -10,7 +10,7 @@
   "embed_model": "mxbai-embed-large",
   "llm_provider": "openai_compatible",
   "llm_base_url": "http://localhost:8000/v1",
-  "llm_model": "gemma-4-E4B-it-MLX-8bit",
+  "llm_model": "Qwen3.5-9B-MLX-4bit",
   "llm_api_key": "",
   "llm_api_key_env": "",
   "llm_max_tokens": 1024,

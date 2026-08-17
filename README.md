@@ -12,7 +12,7 @@ Mindmap is a desktop-only Obsidian plugin that runs a local Python workflow to:
 - Obsidian Desktop `1.5.12+`
 - Python `3.10+`
 - Ollama running locally at `http://localhost:11434`
-- oMLX with `gemma-4-E4B-it-MLX-8bit` for metadata extraction
+- oMLX with `Qwen3.5-9B-MLX-4bit` for metadata extraction
 - Ollama models:
   - `mxbai-embed-large`
 
@@ -33,7 +33,7 @@ python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt
 ollama pull mxbai-embed-large
 ```
 
-Install `gemma-4-E4B-it-MLX-8bit` in oMLX, then set the local oMLX API key in Mindmap settings if your oMLX server requires one.
+Install `Qwen3.5-9B-MLX-4bit` in oMLX, then set the local oMLX API key in Mindmap settings if your oMLX server requires one.
 
 ## First Run
 
@@ -99,7 +99,7 @@ python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt
 ollama pull mxbai-embed-large
 ```
 
-For metadata extraction, confirm oMLX exposes `gemma-4-E4B-it-MLX-8bit` from `http://localhost:8000/v1/models`.
+For metadata extraction, confirm oMLX exposes `Qwen3.5-9B-MLX-4bit` from `http://localhost:8000/v1/models`.
 
 - Plugin shows `scope setup required`:
   - complete `Scope setup` in plugin settings and save.
