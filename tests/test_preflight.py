@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from mindmap import (  # noqa: E402
     build_metadata_messages,
+    build_optional_apple_books_check,
     build_openai_compatible_chat_payload,
     build_omlx_server_command,
     can_mark_note_complete,
@@ -29,6 +30,38 @@ from mindmap import (  # noqa: E402
 
 
 class PreflightHelperTests(unittest.TestCase):
+    def test_apple_books_access_is_optional_when_database_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(json.dumps({"apple_books": {
+                "annotation_database_path": str(Path(tmpdir) / "missing.sqlite"),
+            }}), encoding="utf-8")
+
+            check = build_optional_apple_books_check(config_path)
+
+        self.assertEqual(check["status"], "skipped")
+        self.assertEqual(check["code"], "APPLE_BOOKS_DATABASE_UNAVAILABLE")
+
+    def test_apple_books_partial_read_is_optional_but_usable(self):
+        report = {
+            "status": "partial",
+            "count": 4,
+            "skipped_rows": 2,
+            "diagnostics": [{
+                "code": "APPLE_BOOKS_MALFORMED_ROWS",
+                "message": "Skipped 2 malformed Apple Books annotation row(s).",
+                "guidance": "Retry the read.",
+            }],
+        }
+        with patch("mindmap.run_apple_books_preflight", return_value=report):
+            check = build_optional_apple_books_check(Path("/vault/config.json"))
+
+        self.assertEqual(check["status"], "ok")
+        self.assertEqual(check["code"], "APPLE_BOOKS_SCHEMA_PARTIAL")
+        self.assertEqual(check["context"], {"annotation_count": 4, "skipped_rows": 2})
+        self.assertIn("4 annotation(s) are readable", check["message"])
+        self.assertIn("2 malformed row(s) were skipped", check["message"])
+
     def test_find_missing_models_accepts_available_latest_tag_for_base_name(self):
         missing = find_missing_models(
             ["mxbai-embed-large", "llama3.1:8b"],

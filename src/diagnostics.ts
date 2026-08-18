@@ -1,4 +1,4 @@
-export type PreflightStatus = "ok" | "error";
+export type PreflightStatus = "ok" | "error" | "skipped";
 
 export interface PreflightCheck {
   code: string;
@@ -34,7 +34,7 @@ function isPreflightCheck(value: unknown): value is PreflightCheck {
   const check = value as Record<string, unknown>;
   return typeof check.code === "string"
     && typeof check.label === "string"
-    && (check.status === "ok" || check.status === "error")
+    && (check.status === "ok" || check.status === "error" || check.status === "skipped")
     && typeof check.message === "string";
 }
 

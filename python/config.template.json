@@ -5,6 +5,10 @@
   "log_path": ".obsidian/plugins/mindmap-ai/logs/last-run.txt",
   "preview_log_path": ".obsidian/plugins/mindmap-ai/logs/preview.jsonl",
   "ollama_base_url": "http://localhost:11434",
+  "apple_books": {
+    "annotation_database_path": "",
+    "library_database_path": ""
+  },
   "embed_provider": "ollama",
   "embed_base_url": "http://localhost:11434",
   "embed_model": "mxbai-embed-large",

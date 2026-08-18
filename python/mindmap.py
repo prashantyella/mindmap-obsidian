@@ -348,6 +348,57 @@ def build_preflight_check(
     return payload
 
 
+def run_apple_books_preflight(config_path: Path) -> Dict:
+    """Run the optional Apple Books reader check without returning annotation text."""
+    try:
+        from apple_books_reader import check_access, load_reader_config
+
+        return check_access(load_reader_config(config_path))
+    except Exception as exc:
+        return {
+            "version": 1,
+            "status": "unavailable",
+            "count": 0,
+            "diagnostics": [{
+                "severity": "error",
+                "code": "APPLE_BOOKS_READER_UNAVAILABLE",
+                "message": "The optional Apple Books reader check could not start.",
+                "guidance": "Confirm the bundled Apple Books reader is present and retry.",
+            }],
+        }
+
+
+def build_optional_apple_books_check(config_path: Path) -> Dict:
+    report = run_apple_books_preflight(config_path)
+    status = report.get("status")
+    diagnostics = report.get("diagnostics") if isinstance(report.get("diagnostics"), list) else []
+    diagnostic = diagnostics[0] if diagnostics and isinstance(diagnostics[0], dict) else {}
+    message = diagnostic.get("message") if isinstance(diagnostic.get("message"), str) else "Apple Books optional check completed."
+    guidance = diagnostic.get("guidance") if isinstance(diagnostic.get("guidance"), str) else None
+    count = report.get("count", 0)
+    if status in {"success", "empty", "partial"}:
+        skipped_rows = report.get("skipped_rows", 0)
+        context = {"annotation_count": count}
+        if isinstance(skipped_rows, int) and skipped_rows > 0:
+            context["skipped_rows"] = skipped_rows
+        if status == "partial":
+            message = f"Apple Books reader is available; {count} annotation(s) are readable and {skipped_rows} malformed row(s) were skipped."
+        return build_preflight_check(
+            "APPLE_BOOKS_SCHEMA_PARTIAL" if status == "partial" else "APPLE_BOOKS_SCHEMA_OK",
+            "Apple Books (optional)",
+            "ok",
+            message if status == "partial" else f"Apple Books reader is available; {count} annotation(s) are readable.",
+            context=context,
+        )
+    return build_preflight_check(
+        str(diagnostic.get("code") or "APPLE_BOOKS_OPTIONAL_UNAVAILABLE"),
+        "Apple Books (optional)",
+        "skipped",
+        message,
+        guidance=guidance,
+    )
+
+
 def load_json(path: Path, default=None):
     if not path.exists():
         return default if default is not None else {}
@@ -1641,6 +1692,10 @@ def run_preflight(config_path: Path) -> Dict:
             "config_path": str(config_path),
         }
 
+    # Apple Books is experimental and optional: unavailable or denied access
+    # is surfaced for diagnostics but never blocks Standard Mode preflight.
+    checks.append(build_optional_apple_books_check(config_path))
+
     embed_settings = get_embed_settings(config)
     llm_settings = get_llm_settings(config)
     timeout = int(config.get("ollama_timeout_seconds", 120))
@@ -2199,6 +2254,7 @@ def main():
     parser = argparse.ArgumentParser(description="Local knowledge maintenance for Obsidian notes")
     parser.add_argument("--config", default=None, help="Config path")
     parser.add_argument("--preflight", action="store_true", help="Validate config, dependencies, Ollama, and model availability")
+    parser.add_argument("--apple-books-preflight", action="store_true", help="Run the optional Apple Books access/schema check")
     parser.add_argument("--index", action="store_true", help="Build embeddings index")
     parser.add_argument("--tag", action="store_true", help="Generate tags/concepts/summary")
     parser.add_argument("--apply", action="store_true", help="Write changes to notes")
@@ -2224,6 +2280,11 @@ def main():
             if enabled:
                 parser.error(f"argument --note: not allowed with argument {flag}")
     config_path = resolve_config_path(args.config)
+
+    if args.apple_books_preflight:
+        result = run_apple_books_preflight(config_path)
+        print(json.dumps(result, ensure_ascii=True))
+        return 0 if result.get("status") in {"success", "empty", "partial"} else 1
 
     if args.preflight:
         result = run_preflight(config_path)

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const RUNTIME_ASSET_FILES = ["mindmap.py", "mindmap_worker.py", "requirements.txt", "config.template.json"];
+const RUNTIME_ASSET_FILES = ["mindmap.py", "mindmap_worker.py", "apple_books_reader.py", "requirements.txt", "config.template.json"];
 
 export function runtimeAssetPlugin(rootDir) {
   return {
