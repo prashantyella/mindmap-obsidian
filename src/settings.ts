@@ -1,6 +1,6 @@
 export type SchedulerMode = "manual" | "interval" | "launchAgent";
 export type ReadingModeSetting = "standard" | "reading";
-export type WebResearchModeSetting = "off" | "manual";
+export type WebResearchModeSetting = "off" | "manual" | "automatic-reading";
 
 export interface MindmapSettings {
   pythonCommand: string;

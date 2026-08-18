@@ -107,6 +107,23 @@ test("confirmed enable previews, immediately syncs, and processes eligible notes
   assert.equal(clock.intervals.size, 1);
 });
 
+test("automatic hook failures are reported without blocking local Reading processing", async () => {
+  const clock = new FakeClock();
+  const automaticErrors: string[] = [];
+  const setup = deps(clock, {
+    runAutomaticResearch: async () => { throw new Error("policy store unavailable"); },
+    onAutomaticResearchError: (message) => automaticErrors.push(message),
+  });
+  const controller = new ReadingModeController(setup.options);
+
+  await controller.enable();
+
+  assert.deepEqual(setup.events, ["import-1", "process-Books/one.md", "mark-Books/one.md"]);
+  assert.deepEqual(automaticErrors, ["Automatic research paused: policy store unavailable"]);
+  assert.equal(controller.getHealth().activity, "error");
+  assert.match(controller.getHealth().lastError ?? "", /Automatic research paused/);
+});
+
 test("duplicate database triggers coalesce through one debounce and one follow-up sync", async () => {
   const clock = new FakeClock();
   const setup = deps(clock);
@@ -177,6 +194,18 @@ test("processing failure remains pending and does not mark the note processed", 
   assert.equal(controller.getHealth().activity, "error");
   assert.equal(controller.getHealth().pendingCount, 1);
   assert.match(controller.getHealth().lastError ?? "", /failed/);
+});
+
+test("Reading sync sequences automatic research before note processing", async () => {
+  const clock = new FakeClock();
+  const order: string[] = [];
+  const setup = deps(clock, {
+    runAutomaticResearch: async () => { order.push("research"); },
+    processNote: async () => { order.push("process"); return true; },
+  });
+  const controller = new ReadingModeController(setup.options);
+  await controller.enable();
+  assert.deepEqual(order, ["research", "process"]);
 });
 
 test("disabling during an in-flight note process prevents markProcessed", async () => {

@@ -3,6 +3,7 @@ import type { IconName } from "obsidian";
 import { DAILY_LAUNCH_AGENT_LABEL, WEEKLY_LAUNCH_AGENT_LABEL, type LaunchAgentHealth } from "./launchAgent";
 import type { ActiveNoteEligibility } from "./individualNote";
 import type { ReadingActivity, ReadingMode } from "./readingMode";
+import type { AutomaticPauseReason } from "./automaticResearchPolicy";
 
 export interface StatusBarSchedulerDetail {
   label: string;
@@ -31,9 +32,13 @@ export interface StatusBarMenuState {
   readingPending: number;
   readingImported: number;
   readingError: string | null;
-  webResearchMode: "off" | "manual";
+  webResearchMode: "off" | "manual" | "automatic-reading";
   webResearchActivity: string;
   webResearchError: string | null;
+  automaticResearchAttempted: number;
+  automaticResearchPauseReason: AutomaticPauseReason;
+  automaticResearchLastError: string | null;
+  automaticResearchLastErrorAt: string | null;
 }
 
 export interface StatusBarStateInput {
@@ -60,9 +65,13 @@ export interface StatusBarStateInput {
   readingPending: number;
   readingImported: number;
   readingError: string | null;
-  webResearchMode: "off" | "manual";
+  webResearchMode: "off" | "manual" | "automatic-reading";
   webResearchActivity: string;
   webResearchError: string | null;
+  automaticResearchAttempted: number;
+  automaticResearchPauseReason: AutomaticPauseReason;
+  automaticResearchLastError: string | null;
+  automaticResearchLastErrorAt: string | null;
 }
 
 export interface StatusSummaryInput {
@@ -130,6 +139,10 @@ export function buildStatusBarMenuState(input: StatusBarStateInput): StatusBarMe
     webResearchMode: input.webResearchMode,
     webResearchActivity: input.webResearchActivity,
     webResearchError: input.webResearchError,
+    automaticResearchAttempted: input.automaticResearchAttempted,
+    automaticResearchPauseReason: input.automaticResearchPauseReason,
+    automaticResearchLastError: input.automaticResearchLastError,
+    automaticResearchLastErrorAt: input.automaticResearchLastErrorAt,
   };
 }
 
@@ -148,6 +161,8 @@ export interface StatusBarMenuActions {
   researchSelectedText(): void | Promise<void>;
   researchActiveNote(): void | Promise<void>;
   researchAndReprocessActiveNote(): void | Promise<void>;
+  toggleAutomaticReadingResearch(): void | Promise<void>;
+  retryAutomaticResearch(): void | Promise<void>;
 }
 
 export interface StatusBarPresentation {
@@ -168,7 +183,8 @@ function healthLabel(health: LaunchAgentHealth): string {
 export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBarPresentation {
   const schedulerActionable = state.schedulerHealth !== null && ACTIONABLE_HEALTH.has(state.schedulerHealth);
   const readingActionable = state.readingMode === "reading" && (state.readingActivity === "error" || Boolean(state.readingError));
-  const webResearchActionable = state.webResearchActivity === "error" || Boolean(state.webResearchError);
+  const automaticPaused = state.webResearchMode === "automatic-reading" && state.automaticResearchPauseReason !== null;
+  const webResearchActionable = state.webResearchActivity === "error" || Boolean(state.webResearchError) || automaticPaused;
   const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable || webResearchActionable;
   const label = state.readingMode === "reading"
     ? state.readingActivity === "syncing" || state.readingActivity === "processing"
@@ -194,7 +210,7 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
   const ariaLabel = readingActionable
     ? `Mindmap Reading Mode: ${state.readingError ?? state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
     : webResearchActionable
-      ? `Mindmap Web Research: ${state.webResearchError ?? state.webResearchActivity}. Activate to open the Mindmap menu.`
+      ? `Mindmap Web Research: ${state.webResearchError ?? (automaticPaused ? `Automatic research paused: ${state.automaticResearchPauseReason}.` : state.webResearchActivity)} Activate to open the Mindmap menu.`
       : state.readingMode === "reading"
         ? `Mindmap Reading Mode: ${state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
         : `Mindmap standard mode: ${status}. ${state.pendingAvailable ? `${state.currentPending} current-scope pending, ${state.allPending} all-scope pending.` : "Pending scan unavailable."} Activate to open the Mindmap menu.`;
@@ -220,6 +236,15 @@ export interface StatusBarMenuItemDescriptor {
 
 export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMenuItemDescriptor[] {
   const researchBusy = ["deriving", "searching", "writing"].includes(state.webResearchActivity);
+  const automaticActive = state.webResearchMode === "automatic-reading";
+  const automaticTransientPause = automaticActive && state.automaticResearchPauseReason !== null && state.automaticResearchPauseReason !== "daily-limit";
+  const automaticPausedCopy = state.automaticResearchPauseReason === "daily-limit"
+    ? "Automatic research daily limit reached; resumes after local midnight."
+    : state.automaticResearchPauseReason
+      ? `Automatic research paused: ${state.automaticResearchPauseReason}.`
+      : state.readingMode !== "reading"
+        ? "Automatic research is waiting for Reading Mode."
+        : null;
   const items: StatusBarMenuItemDescriptor[] = [
     { title: "Mode", label: true },
     { title: "Standard Mode", icon: "orbit", checked: state.readingMode === "standard", disabled: state.readingMode === "standard" },
@@ -267,7 +292,15 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     ] : []),
     { title: "Web Research", label: true },
     { title: `Manual Web Research: ${state.webResearchMode}`, icon: "globe-2", checked: state.webResearchMode === "manual", action: "toggleWebResearchMode", disabled: researchBusy },
-    ...(state.webResearchMode === "manual" ? [
+    { title: "Automatic Reading Research", icon: "sparkles" as IconName, checked: automaticActive, action: "toggleAutomaticReadingResearch", disabled: researchBusy || (!automaticActive && state.readingMode !== "reading") },
+    ...(automaticActive ? [
+      { title: `Automatic research: ${state.automaticResearchAttempted}/10 today · max 5/sync`, disabled: true },
+      ...(automaticPausedCopy ? [{ title: automaticPausedCopy, icon: state.automaticResearchPauseReason ? "triangle-alert" as IconName : "clock-3" as IconName, disabled: true }] : []),
+      ...(state.automaticResearchLastError ? [{ title: `Automatic research error: ${state.automaticResearchLastError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
+      ...(state.automaticResearchLastErrorAt ? [{ title: `Automatic research last error: ${state.automaticResearchLastErrorAt}`, disabled: true }] : []),
+      ...(automaticTransientPause ? [{ title: "Retry automatic research", icon: "refresh-cw" as IconName, action: "retryAutomaticResearch" as const, disabled: researchBusy || state.readingMode !== "reading" }] : []),
+    ] : []),
+    ...(state.webResearchMode !== "off" ? [
       { title: "Research selected text", icon: "search" as IconName, action: "researchSelectedText" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
       { title: "Research active note", icon: "file-search" as IconName, action: "researchActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
       { title: "Research and reprocess active note", icon: "sparkles" as IconName, action: "researchAndReprocessActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },

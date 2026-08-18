@@ -52,6 +52,8 @@ export interface ReadingModeDependencies {
   readPayload(): Promise<unknown>;
   readFingerprint(): Promise<string>;
   importPayload(payload: unknown): Promise<ReadingImportResult>;
+  runAutomaticResearch?(imported: ReadingImportItem[]): Promise<void>;
+  onAutomaticResearchError?(message: string): void;
   listPendingEligibleNotes(): Promise<string[]>;
   processNote(notePath: string): Promise<boolean>;
   markProcessed(notePath: string): Promise<void>;
@@ -232,7 +234,14 @@ export class ReadingModeController {
         importedCount: this.health.importedCount + result.imported.filter((item) => item.action !== "unchanged").length,
         lastError: importError,
       });
-      await this.processPending(result.imported, importError);
+      let automaticError: string | null = null;
+      try {
+        await this.deps.runAutomaticResearch?.(result.imported);
+      } catch (error) {
+        automaticError = `Automatic research paused: ${errorMessage(error)}`;
+        this.deps.onAutomaticResearchError?.(automaticError);
+      }
+      await this.processPending(result.imported, importError ?? automaticError);
       if (this.mode === "reading") {
         this.lastFingerprint = await this.deps.readFingerprint();
       }

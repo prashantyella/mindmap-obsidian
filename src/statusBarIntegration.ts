@@ -37,6 +37,10 @@ export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: Stat
     webResearchMode: plugin.getWebResearchStatus().mode,
     webResearchActivity: plugin.getWebResearchStatus().activity,
     webResearchError: plugin.getWebResearchStatus().lastError,
+    automaticResearchAttempted: plugin.getWebResearchStatus().automatic.attempted,
+    automaticResearchPauseReason: plugin.getWebResearchStatus().automatic.pauseReason,
+    automaticResearchLastError: plugin.getWebResearchStatus().automatic.lastError,
+    automaticResearchLastErrorAt: plugin.getWebResearchStatus().automatic.lastErrorAt,
   });
 }
 
@@ -60,6 +64,8 @@ export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMe
     researchSelectedText: async () => { await plugin.researchSelectedText(); },
     researchActiveNote: async () => { await plugin.researchActiveNote(); },
     researchAndReprocessActiveNote: async () => { await plugin.researchActiveNote(true); },
+    toggleAutomaticReadingResearch: async () => { await plugin.toggleAutomaticReadingResearch(); },
+    retryAutomaticResearch: async () => { await plugin.retryAutomaticResearch(); },
   };
 }
 

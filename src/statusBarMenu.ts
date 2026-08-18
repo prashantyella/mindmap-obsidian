@@ -95,6 +95,10 @@ function addMenuItem(menu: Menu, descriptor: StatusBarMenuItemDescriptor, action
           void actions.researchActiveNote();
         } else if (action === "researchAndReprocessActiveNote") {
           void actions.researchAndReprocessActiveNote();
+        } else if (action === "toggleAutomaticReadingResearch") {
+          void actions.toggleAutomaticReadingResearch();
+        } else if (action === "retryAutomaticResearch") {
+          void actions.retryAutomaticResearch();
         }
       });
     }

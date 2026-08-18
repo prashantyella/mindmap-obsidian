@@ -10,7 +10,9 @@ import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } f
 import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { discoverAppleBooksDatabasePaths } from "./appleBooksDiscovery";
-import { importAppleBooksAnnotations } from "./appleBooksImport";
+import { completeAppleAnnotationResearchForNote, importAppleBooksAnnotations, updateAppleAnnotationResearchStatus } from "./appleBooksImport";
+import { clearTransientAutomaticPause, createAutomaticResearchPolicy, createAutomaticResearchPolicyStore, loadAutomaticResearchPolicySafely, localResearchDay, type AutomaticResearchPolicyState, type AutomaticResearchPolicyStore } from "./automaticResearchPolicy";
+import { commitAutomaticResearchAttempt, runAutomaticResearch, selectAutomaticResearchCandidates } from "./automaticResearch";
 import { ExaResearchProvider } from "./exaResearchProvider";
 import { getExaCredential } from "./keychainCredential";
 import { createConfiguredLocalResearchModel } from "./localResearchModel";
@@ -146,9 +148,11 @@ export default class MindmapPlugin extends Plugin {
   private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
   private readingModeController: ReadingModeController | null = null;
   private readingStateStore: ReadingStateStore | null = null;
+  private automaticResearchPolicyStore: AutomaticResearchPolicyStore | null = null;
+  private automaticResearchPolicyStatus: AutomaticResearchPolicyState = createAutomaticResearchPolicy(localResearchDay(new Date()));
   private webResearchActivity: "off" | "ready" | "deriving" | "searching" | "writing" | "error" = "off";
   private webResearchLastError: string | null = null;
-  private webResearchPromise: Promise<void> | null = null;
+  private webResearchPromise: Promise<boolean> | null = null;
   private semanticEnvironment: MindmapSemanticEnvironment | null = null;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
@@ -166,6 +170,14 @@ export default class MindmapPlugin extends Plugin {
     this.statusBarEl = this.addStatusBarItem();
     configureStatusBarElement(this.statusBarEl, (event) => this.openStatusMenu(event));
     this.readingStateStore = createReadingStateStore(path.join(this.getRuntimeContext().pluginDir, "data", "reading-state.json"));
+    this.automaticResearchPolicyStore = createAutomaticResearchPolicyStore(path.join(this.getRuntimeContext().pluginDir, "data", "automatic-research-policy.json"), {
+      mkdir: async (directory, options) => { await fs.promises.mkdir(directory, options); },
+      readFile: async (filePath, encoding) => await fs.promises.readFile(filePath, encoding),
+      writeFile: async (filePath, content, encoding) => await fs.promises.writeFile(filePath, content, encoding),
+      rename: async (source, target) => await fs.promises.rename(source, target),
+      unlink: async (filePath) => await fs.promises.unlink(filePath),
+    });
+    await this.refreshAutomaticResearchPolicyStatus();
     this.readingModeController = this.createReadingModeController();
     this.registerView(MINDMAP_VIEW_TYPE, (leaf) => new MindmapWorkspaceView(leaf, this));
     this.registerHoverLinkSource(MINDMAP_VIEW_TYPE, {
@@ -221,8 +233,8 @@ export default class MindmapPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.settings.readingMode = this.settings.readingMode === "reading" ? "reading" : "standard";
-    this.settings.webResearchMode = this.settings.webResearchMode === "manual" ? "manual" : "off";
-    this.webResearchActivity = this.settings.webResearchMode === "manual" ? "ready" : "off";
+    this.settings.webResearchMode = this.settings.webResearchMode === "manual" || this.settings.webResearchMode === "automatic-reading" ? this.settings.webResearchMode : "off";
+    this.webResearchActivity = this.settings.webResearchMode === "off" ? "off" : "ready";
     if (typeof this.settings.pinnedConnections !== "object" || this.settings.pinnedConnections === null || Array.isArray(this.settings.pinnedConnections)) {
       this.settings.pinnedConnections = {};
     }
@@ -354,8 +366,8 @@ export default class MindmapPlugin extends Plugin {
     await this.readingModeController?.syncNow();
   }
 
-  getWebResearchStatus(): { mode: "off" | "manual"; activity: string; lastError: string | null } {
-    return { mode: this.settings.webResearchMode, activity: this.webResearchActivity, lastError: this.webResearchLastError };
+  getWebResearchStatus(): { mode: "off" | "manual" | "automatic-reading"; activity: string; lastError: string | null; automatic: AutomaticResearchPolicyState } {
+    return { mode: this.settings.webResearchMode, activity: this.webResearchActivity, lastError: this.webResearchLastError, automatic: { ...this.automaticResearchPolicyStatus } };
   }
 
   async toggleWebResearchMode(): Promise<void> {
@@ -412,6 +424,113 @@ export default class MindmapPlugin extends Plugin {
     new Notice("Manual Web Research enabled.", 5000);
   }
 
+  async toggleAutomaticReadingResearch(): Promise<void> {
+    if (this.webResearchPromise) {
+      new Notice("Web Research is already running; automatic mode cannot change yet.", 8000);
+      return;
+    }
+    if (this.settings.webResearchMode === "automatic-reading") {
+      const previousMode = this.settings.webResearchMode;
+      const previousActivity = this.webResearchActivity;
+      const previousError = this.webResearchLastError;
+      this.settings.webResearchMode = "manual";
+      this.webResearchActivity = "ready";
+      try { await this.saveSettings(); } catch {
+        this.settings.webResearchMode = previousMode;
+        this.webResearchActivity = previousActivity;
+        this.webResearchLastError = previousError ?? "Could not save Automatic Reading Research mode.";
+        new Notice(this.webResearchLastError, 8000);
+        this.updateStatusBar();
+        return;
+      }
+      new Notice("Automatic Reading research paused; manual research remains available.", 5000);
+      this.updateStatusBar();
+      return;
+    }
+    if (this.settings.readingMode !== "reading") {
+      new Notice("Enable Reading Mode before automatic research.", 8000);
+      return;
+    }
+    const confirmed = await confirmMindmapRun(this.app, {
+      title: "Enable Automatic Reading Research?",
+      message: "Apple annotation excerpts stay local to Qwen. Exa receives only one or two derived queries and returns up to five bounded source excerpts and metadata. Automatic work is limited to five notes per sync and ten per day.",
+      confirmText: "Enable automatic research",
+      confirmClass: "mod-cta",
+    });
+    if (!confirmed) return;
+    try { await this.getWebResearchPrerequisites(); } catch (error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = error instanceof WebResearchError ? error.message : "Automatic research is not ready.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    const previousMode = this.settings.webResearchMode;
+    const previousActivity = this.webResearchActivity;
+    const previousError = this.webResearchLastError;
+    this.settings.webResearchMode = "automatic-reading";
+    this.webResearchActivity = "ready";
+    this.webResearchLastError = null;
+    try { await this.saveSettings(); } catch {
+      this.settings.webResearchMode = previousMode;
+      this.webResearchActivity = previousActivity;
+      this.webResearchLastError = previousError ?? "Could not save Automatic Reading Research mode.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    await this.refreshAutomaticResearchPolicyStatus();
+    await this.syncReadingMode();
+    new Notice("Automatic Reading research enabled.", 5000);
+  }
+
+  async retryAutomaticResearch(): Promise<void> {
+    if (!this.automaticResearchPolicyStore || this.settings.webResearchMode !== "automatic-reading" || this.readingModeController?.getMode() !== "reading") {
+      new Notice("Automatic research retry requires active Reading Mode.", 8000);
+      return;
+    }
+    const day = localResearchDay(new Date());
+    const loaded = await loadAutomaticResearchPolicySafely(this.automaticResearchPolicyStore, day);
+    const policy = loaded.state;
+    this.automaticResearchPolicyStatus = policy;
+    if (loaded.error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = loaded.error;
+      new Notice(loaded.error, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    if (policy.pauseReason === "daily-limit") {
+      new Notice("Daily automatic research limit has been reached.", 8000);
+      this.updateStatusBar();
+      return;
+    }
+    if (!policy.pauseReason) return;
+    try {
+      await this.automaticResearchPolicyStore.save(clearTransientAutomaticPause(policy));
+      await this.refreshAutomaticResearchPolicyStatus();
+      this.webResearchLastError = null;
+      this.webResearchActivity = "ready";
+    } catch (error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = error instanceof Error ? error.message : "Automatic research retry could not be saved.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    await this.syncReadingMode();
+  }
+
+  private async refreshAutomaticResearchPolicyStatus(now = new Date()): Promise<void> {
+    if (!this.automaticResearchPolicyStore) return;
+    const result = await loadAutomaticResearchPolicySafely(this.automaticResearchPolicyStore, localResearchDay(now));
+    this.automaticResearchPolicyStatus = result.state;
+    if (result.error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = result.error;
+    }
+  }
+
   async researchSelectedText(): Promise<void> {
     const selected = this.app.workspace.activeEditor?.editor?.getSelection()?.trim() ?? "";
     if (!selected) {
@@ -423,7 +542,7 @@ export default class MindmapPlugin extends Plugin {
       new Notice("Web Research requires a Markdown note.", 8000);
       return;
     }
-    await this.researchFile(file, selected, false);
+    await this.researchFile(file, selected, false, "manual");
   }
 
   async researchActiveNote(reprocess = false): Promise<void> {
@@ -437,27 +556,27 @@ export default class MindmapPlugin extends Plugin {
       new Notice("The active note is empty.", 8000);
       return;
     }
-    await this.researchFile(file, text, reprocess);
+    await this.researchFile(file, text, reprocess, "manual");
   }
 
-  private async researchFile(file: TFile, text: string, reprocess: boolean): Promise<void> {
+  private async researchFile(file: TFile, text: string, reprocess: boolean, origin: "manual" | "automatic"): Promise<boolean> {
     if (this.currentProcess) {
-      new Notice("Mindmap is already running. Web Research will not start.", 8000);
-      return;
+      if (origin === "manual") new Notice("Mindmap is already running. Web Research will not start.", 8000);
+      return false;
     }
     if (this.webResearchPromise) {
-      new Notice("Web Research is already running.", 8000);
-      return;
+      if (origin === "manual") new Notice("Web Research is already running.", 8000);
+      return false;
     }
-    const work = this.runResearchFile(file, text, reprocess);
+    const work = this.runResearchFile(file, text, reprocess, origin);
     this.webResearchPromise = work;
-    try { await work; } finally { this.webResearchPromise = null; }
+    try { return await work; } finally { this.webResearchPromise = null; }
   }
 
-  private async runResearchFile(file: TFile, text: string, reprocess: boolean): Promise<void> {
-    if (this.settings.webResearchMode !== "manual") {
+  private async runResearchFile(file: TFile, text: string, reprocess: boolean, origin: "manual" | "automatic"): Promise<boolean> {
+    if (this.settings.webResearchMode === "off") {
       new Notice("Enable Manual Web Research before starting a request.", 8000);
-      return;
+      return false;
     }
     this.webResearchActivity = "deriving";
     this.webResearchLastError = null;
@@ -471,17 +590,23 @@ export default class MindmapPlugin extends Plugin {
       this.webResearchActivity = "writing";
       const result = await researchNote({ provider: new ExaResearchProvider(credential), model, vault: createObsidianVaultApi(this.app.vault) }, note, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
       if (!result) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
+      if (origin === "manual" && this.readingStateStore) {
+        const statusResult = await completeAppleAnnotationResearchForNote(createObsidianVaultApi(this.app.vault), this.readingStateStore, file.path);
+        if (statusResult === "state-pending") this.webResearchLastError = "Research saved; annotation status will repair on next sync.";
+      }
       this.webResearchActivity = "ready";
       if (reprocess && !(await this.runMindmap("reading", "note", file.path))) {
         this.webResearchLastError = "Research was saved; Mindmap processing is retryable.";
         new Notice(this.webResearchLastError, 8000);
       } else {
-        new Notice("Web Research saved.", 5000);
+        if (origin === "manual") new Notice("Web Research saved.", 5000);
       }
+      return true;
     } catch (error) {
       this.webResearchActivity = "error";
       this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research failed without saving changes.";
-      new Notice(this.webResearchLastError, 8000);
+      if (origin === "manual") new Notice(this.webResearchLastError, 8000);
+      return false;
     } finally {
       this.updateStatusBar();
     }
@@ -1126,6 +1251,46 @@ export default class MindmapPlugin extends Plugin {
           failures: result.failures,
           lastSyncAt: result.state.lastSyncAt,
         };
+      },
+      runAutomaticResearch: async (_imported) => {
+        if (this.settings.webResearchMode !== "automatic-reading" || this.settings.readingMode !== "reading" || !this.automaticResearchPolicyStore) return;
+        const now = new Date();
+        try {
+          await this.refreshAutomaticResearchPolicyStatus(now);
+          const currentState = await state.load();
+          const candidates = selectAutomaticResearchCandidates(currentState.annotations);
+          const policyResult = await runAutomaticResearch({
+            store: this.automaticResearchPolicyStore,
+            now,
+            candidates,
+            shouldContinue: () => this.readingModeController?.getMode() === "reading" && this.settings.webResearchMode === "automatic-reading",
+            attempt: async (item) => {
+              const file = this.app.vault.getAbstractFileByPath(item.notePath);
+              if (!(file instanceof TFile)) throw new WebResearchError("NOTE_MISSING", "Automatic research note is unavailable.");
+              const text = prepareActiveNoteResearchInput(await this.app.vault.cachedRead(file), MAX_RESEARCH_INPUT_CHARS);
+              if (!text) throw new WebResearchError("RESEARCH_INPUT_EMPTY", "Automatic research note is empty.");
+              return await commitAutomaticResearchAttempt({
+                runResearch: async () => await this.researchFile(file, text, false, "automatic"),
+                updateStatus: async (status) => await updateAppleAnnotationResearchStatus(createObsidianVaultApi(this.app.vault), state, item.annotationId, status),
+              });
+            },
+          });
+          if (policyResult.pauseReason) {
+            this.webResearchLastError = policyResult.lastError ?? `Automatic research paused: ${policyResult.pauseReason}.`;
+            this.webResearchActivity = "error";
+          } else if (this.settings.webResearchMode === "automatic-reading") {
+            this.webResearchLastError = null;
+            this.webResearchActivity = "ready";
+          }
+        } finally {
+          await this.refreshAutomaticResearchPolicyStatus(now);
+          this.updateStatusBar();
+        }
+      },
+      onAutomaticResearchError: (message) => {
+        this.webResearchActivity = "error";
+        this.webResearchLastError = message;
+        this.updateStatusBar();
       },
       listPendingEligibleNotes: async () => {
         const current = await state.load();

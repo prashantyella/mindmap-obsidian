@@ -29,6 +29,10 @@ function state(overrides: Partial<StatusBarMenuState> = {}): StatusBarMenuState 
     webResearchMode: "off",
     webResearchActivity: "off",
     webResearchError: null,
+    automaticResearchAttempted: 0,
+    automaticResearchPauseReason: null,
+    automaticResearchLastError: null,
+    automaticResearchLastErrorAt: null,
     ...overrides,
   };
 }
@@ -40,6 +44,39 @@ void test("standard status stays compact and exposes the orbit icon", () => {
   assert.equal(presentation.icon, "orbit");
   assert.equal(presentation.running, false);
   assert.match(presentation.ariaLabel, /standard mode/i);
+});
+
+void test("automatic policy usage distinguishes daily limits from transient retry pauses while manual actions remain enabled", () => {
+  const daily = buildStatusBarMenuItems(state({ webResearchMode: "automatic-reading", automaticResearchAttempted: 10, automaticResearchPauseReason: "daily-limit" }));
+  assert.ok(daily.some((item) => item.title === "Automatic research: 10/10 today · max 5/sync"));
+  assert.equal(daily.some((item) => item.title === "Retry automatic research"), false);
+
+  const transient = buildStatusBarMenuItems(state({ webResearchMode: "automatic-reading", automaticResearchAttempted: 2, automaticResearchPauseReason: "provider-network", webResearchActivity: "error" }));
+  assert.ok(transient.some((item) => item.title === "Retry automatic research"));
+  assert.equal(transient.find((item) => item.title === "Research active note")?.disabled, false);
+
+  const waiting = buildStatusBarMenuItems(state({ webResearchMode: "automatic-reading", readingMode: "standard" }));
+  assert.ok(waiting.some((item) => item.title.includes("waiting for Reading Mode")));
+  assert.equal(waiting.find((item) => item.title === "Automatic Reading Research")?.disabled, false);
+
+  const persisted = buildStatusBarMenuItems(state({ webResearchMode: "automatic-reading", webResearchActivity: "ready" }));
+  assert.ok(persisted.some((item) => item.title === "Web Research: ready"));
+
+  const busy = buildStatusBarMenuItems(state({ webResearchMode: "automatic-reading", webResearchActivity: "writing" }));
+  assert.equal(busy.find((item) => item.title === "Automatic Reading Research")?.disabled, true);
+
+  const manualError = buildStatusBarMenuItems(state({ webResearchMode: "manual", webResearchActivity: "error", webResearchError: "Manual request failed." }));
+  assert.equal(manualError.some((item) => item.title === "Retry automatic research"), false);
+});
+
+void test("persisted automatic pauses stay actionable without a transient web error", () => {
+  const transient = buildStatusBarPresentation(state({ webResearchMode: "automatic-reading", webResearchActivity: "ready", automaticResearchPauseReason: "provider-network" }));
+  assert.equal(transient.actionable, true);
+  assert.equal(transient.icon, "triangle-alert");
+  assert.match(transient.ariaLabel, /provider-network/);
+  const daily = buildStatusBarMenuItems(state({ webResearchMode: "automatic-reading", automaticResearchAttempted: 10, automaticResearchPauseReason: "daily-limit" }));
+  assert.ok(daily.some((item) => item.title.includes("daily limit reached")));
+  assert.equal(daily.some((item) => item.title === "Retry automatic research"), false);
 });
 
 void test("reading status is visibly distinct and exposes experimental toggle", () => {

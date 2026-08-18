@@ -2,11 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  completeAppleAnnotationResearchForNote,
   importAppleBooksAnnotations,
   renderAnnotationNote,
+  updateAppleAnnotationResearchStatus,
   type AnnotationImportResult,
 } from "./appleBooksImport";
 import type { ReadingStateStore } from "./readingState";
+import { selectAutomaticResearchCandidates } from "./automaticResearch";
 import {
   baseAnnotationNotePath,
   annotationPathCandidate,
@@ -132,6 +135,60 @@ test("imports one note and one deterministic book index through the Vault abstra
   assert.equal(state.current.annotations["id-1"]?.notePath, notePath);
 });
 
+test("research status helper preserves CRLF prefix and suffix bytes outside the one frontmatter value", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const imported = await runImport(vault, state, [annotation("status")]);
+  const notePath = imported.imported[0]!.notePath;
+  const lf = vault.files.get(notePath)!;
+  const before = `${lf.replace(/\n/g, "\r\n").replace("---\r\n", "---\r\nprefix_key: exact bytes\r\n")}suffix bytes\r\n`;
+  vault.files.set(notePath, before);
+  state.current.annotations.status!.processedAt = "done";
+  await updateAppleAnnotationResearchStatus(vault, state, "status", "complete");
+  const after = vault.files.get(notePath)!;
+  assert.equal(after.replace(/research_status: complete/, "research_status: off"), before);
+  assert.equal(after.startsWith("---\r\nprefix_key: exact bytes\r\n"), true);
+  assert.equal(after.endsWith("suffix bytes\r\n"), true);
+  assert.equal(state.current.annotations.status!.researchStatus, "complete");
+  assert.equal(state.current.annotations.status!.processedAt, null);
+  state.current.annotations.status!.processedAt = "already-processed";
+  await updateAppleAnnotationResearchStatus(vault, state, "status", "retryable");
+  assert.equal(state.current.annotations.status!.researchStatus, "retryable");
+  assert.equal(state.current.annotations.status!.processedAt, "already-processed");
+});
+
+test("manual Apple completion updates durable status while ordinary notes do not touch Reading state", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const imported = await runImport(vault, state, [annotation("manual")]);
+  const notePath = imported.imported[0]!.notePath;
+  const beforeSaves = state.saves;
+
+  assert.equal(await completeAppleAnnotationResearchForNote(vault, state, notePath), "updated");
+  assert.equal(state.current.annotations.manual!.researchStatus, "complete");
+  assert.match(vault.files.get(notePath) ?? "", /research_status: complete/);
+
+  await vault.create("Notes/ordinary.md", "ordinary note\n");
+  assert.equal(await completeAppleAnnotationResearchForNote(vault, state, "Notes/ordinary.md"), false);
+  assert.equal(state.saves, beforeSaves + 1);
+});
+
+test("durable complete frontmatter is adopted after its state save fails and excludes provider candidates", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("adopt-complete");
+  const first = await runImport(vault, state, [source]);
+  const notePath = first.imported[0]!.notePath;
+  state.failNextSave = true;
+
+  assert.equal(await updateAppleAnnotationResearchStatus(vault, state, "adopt-complete", "complete"), "state-pending");
+  assert.equal(state.current.annotations["adopt-complete"]!.researchStatus, "off");
+  assert.match(vault.files.get(notePath) ?? "", /research_status: complete/);
+
+  await runImport(vault, state, [source]);
+  assert.equal(state.current.annotations["adopt-complete"]!.researchStatus, "complete");
+});
+
 test("rejects malformed reader payloads before any Vault or state write", async () => {
   const vault = new MemoryVault();
   const state = new MemoryState();
@@ -218,6 +275,22 @@ test("duplicate imports are no-ops, edits replace only the source block, and ind
   assert.equal(vault.modified[vault.modified.length - 1], notePath);
 });
 
+test("changed source preserves the existing research block but resets note and state research status", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const first = await runImport(vault, state, [annotation("changed-research")]);
+  const notePath = first.imported[0]!.notePath;
+  vault.files.set(notePath, `${vault.files.get(notePath)}\n<!-- mindmap:research:start -->\nOld valid research. [1]\n<!-- mindmap:research:end -->\n`);
+  await updateAppleAnnotationResearchStatus(vault, state, "changed-research", "complete");
+
+  await runImport(vault, state, [annotation("changed-research", { quote: "Changed quote one two three four five six seven eight nine" })]);
+  const changed = vault.files.get(notePath) ?? "";
+  assert.match(changed, /Old valid research\. \[1\]/);
+  assert.match(changed, /research_status: off/);
+  assert.equal(state.current.annotations["changed-research"]!.researchStatus, "off");
+  assert.equal(state.current.annotations["changed-research"]!.processedAt, null);
+});
+
 test("imports too-short annotations without queue eligibility and retains notes after source deletion", async () => {
   const vault = new MemoryVault();
   const state = new MemoryState();
@@ -233,6 +306,21 @@ test("imports too-short annotations without queue eligibility and retains notes 
   assert.equal(deleted.failures.length, 0);
   assert.equal(deleted.state.annotations.short?.notePath, notePath);
   assert.equal(vault.files.has(notePath), true);
+});
+
+test("unchanged too-short annotations reject a manually completed durable status and remain excluded", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("short-complete", { quote: "one two", user_note: "three" });
+  const first = await runImport(vault, state, [source]);
+  const notePath = first.imported[0]!.notePath;
+  vault.files.set(notePath, vault.files.get(notePath)!.replace("research_status: too-short", "research_status: complete"));
+
+  await runImport(vault, state, [source]);
+
+  assert.equal(state.current.annotations["short-complete"]!.researchStatus, "too-short");
+  assert.match(vault.files.get(notePath) ?? "", /research_status: too-short/);
+  assert.deepEqual(selectAutomaticResearchCandidates(state.current.annotations), []);
 });
 
 test("preserves unrelated frontmatter and marker-like annotation text safely", () => {

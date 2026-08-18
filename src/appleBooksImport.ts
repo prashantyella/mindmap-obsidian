@@ -46,6 +46,48 @@ export interface AnnotationImporterOptions {
   now?: () => string;
 }
 
+export async function updateAppleAnnotationResearchStatus(
+  vault: ReadingVault,
+  stateStore: ReadingStateStore,
+  annotationId: string,
+  status: Extract<ResearchStatus, "complete" | "retryable">,
+): Promise<"updated" | "state-pending" | false> {
+  const state = await stateStore.load();
+  const entry = state.annotations[annotationId];
+  if (!entry) return false;
+  const note = vault.get(entry.notePath);
+  if (!note) return false;
+  const text = await vault.read(note);
+  if (readFrontmatterValue(text, "annotation_id") !== annotationId) return false;
+  const next = replaceFrontmatterScalar(text, "research_status", status);
+  const noteChanged = next !== text;
+  if (noteChanged) await vault.modify(note, next);
+  entry.researchStatus = status;
+  if (status === "complete") entry.processedAt = null;
+  try {
+    await stateStore.save(state);
+    return "updated";
+  } catch (error) {
+    // The frontmatter is the durable, user-visible half of this transition.
+    // A retryable state write must not turn a committed complete status back
+    // into a provider retry on the next sync.
+    if (noteChanged || readFrontmatterValue(next, "research_status") === status) return "state-pending";
+    throw error;
+  }
+}
+
+/** Completes a tracked Apple annotation without affecting ordinary notes. */
+export async function completeAppleAnnotationResearchForNote(
+  vault: ReadingVault,
+  stateStore: ReadingStateStore,
+  notePath: string,
+): Promise<"updated" | "state-pending" | false> {
+  const state = await stateStore.load();
+  const annotationId = Object.entries(state.annotations).find(([, entry]) => entry.notePath === notePath)?.[0];
+  if (!annotationId) return false;
+  return await updateAppleAnnotationResearchStatus(vault, stateStore, annotationId, "complete");
+}
+
 interface FrontmatterParts {
   frontmatter: string;
   body: string;
@@ -126,12 +168,24 @@ export async function importAppleBooksAnnotations(
     const previous = currentState.annotations[annotation.annotation_id];
     const existing = options.vault.get(notePath);
     if (previous?.contentHash === contentHash && existing) {
+      const existingText = await options.vault.read(existing);
+      const durableStatus = readFrontmatterValue(existingText, "research_status");
+      if (previous.researchStatus === "too-short" || annotationIsTooShort(annotation)) {
+        if (durableStatus !== "too-short") {
+          await options.vault.modify(existing, replaceFrontmatterScalar(existingText, "research_status", "too-short"));
+        }
+      } else if (durableStatus === "complete" && previous.researchStatus !== "complete") {
+        const adopted = cloneState(currentState);
+        adopted.annotations[annotation.annotation_id] = { ...previous, researchStatus: "complete", processedAt: null };
+        await options.state.save(adopted);
+        currentState = adopted;
+      }
       imported.push({
         annotationId: annotation.annotation_id,
         notePath,
         action: "unchanged",
-        tooShort: previous.researchStatus === "too-short",
-        eligible: previous.researchStatus !== "too-short",
+        tooShort: currentState.annotations[annotation.annotation_id]?.researchStatus === "too-short",
+        eligible: currentState.annotations[annotation.annotation_id]?.researchStatus !== "too-short",
       });
       continue;
     }
@@ -140,7 +194,8 @@ export async function importAppleBooksAnnotations(
       const existingText = existing ? await options.vault.read(existing) : "";
       const tooShort = annotationIsTooShort(annotation);
       const importedAt = previous?.importedAt ?? readFrontmatterValue(existingText, "imported_at") ?? syncAt;
-      const researchStatus = chooseResearchStatus(annotation, previous, existingText);
+      const sourceChanged = Boolean(previous && previous.contentHash !== contentHash);
+      const researchStatus = sourceChanged && !tooShort ? "off" : chooseResearchStatus(annotation, previous, existingText);
       const processedAt = previous && previous.contentHash !== contentHash ? null : previous?.processedAt ?? null;
       const noteText = renderAnnotationNote(existingText, annotation, {
         importedAt,
@@ -337,6 +392,11 @@ function readFrontmatterValue(text: string, key: string): string | undefined {
   }
   const raw = line.replace(new RegExp(`^${key}\\s*:`), "").trim();
   return raw.replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1") || undefined;
+}
+
+function replaceFrontmatterScalar(text: string, key: string, value: string): string {
+  const pattern = new RegExp(`(^${key}\\s*:)\\s*[^\\r\\n]*`, "m");
+  return text.replace(pattern, `$1 ${yamlScalar(value)}`);
 }
 
 function yamlScalar(value: string): string {

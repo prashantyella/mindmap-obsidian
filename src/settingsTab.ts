@@ -51,7 +51,7 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderResearchSettings(): void {
-    this.renderSection("Web Research", "Manual-only web research. It never runs in scheduled Mindmap jobs.");
+    this.renderSection("Web Research", "Manual research is available on demand; automatic work runs only in Reading Mode.");
     const status = this.plugin.getWebResearchStatus();
     new Setting(this.containerEl)
       .setName("Manual Web Research")
@@ -62,6 +62,27 @@ export class MindmapSettingTab extends PluginSettingTab {
           await this.plugin.toggleWebResearchMode();
           this.display();
         }));
+    new Setting(this.containerEl)
+      .setName("Automatic Reading Research")
+      .setDesc(status.mode === "automatic-reading"
+        ? `${status.automatic.attempted}/10 today · max 5/sync.${status.automatic.pauseReason === "daily-limit" ? " Daily limit reached; resumes after local midnight." : status.automatic.pauseReason ? ` Paused: ${status.automatic.pauseReason}.` : this.plugin.getReadingHealth().mode === "reading" ? " Active in Reading Mode." : " Waiting for Reading Mode."}`
+        : "Requires Reading Mode and separate consent.")
+      .addButton((button) => button
+        .setButtonText(status.mode === "automatic-reading" ? "Pause" : "Enable")
+        .setDisabled(["deriving", "searching", "writing"].includes(status.activity))
+        .onClick(async () => {
+          await this.plugin.toggleAutomaticReadingResearch();
+          this.display();
+        }));
+    if (status.mode === "automatic-reading" && status.automatic.pauseReason && status.automatic.pauseReason !== "daily-limit") {
+      new Setting(this.containerEl)
+        .setName("Automatic research")
+        .setDesc(status.automatic.lastError ?? status.lastError ?? `Paused: ${status.automatic.pauseReason}.`)
+        .addButton((button) => button.setButtonText("Retry").onClick(async () => {
+          await this.plugin.retryAutomaticResearch();
+          this.display();
+        }));
+    }
   }
 
   private renderSection(title: string, description: string): void {
