@@ -33,6 +33,7 @@ except ModuleNotFoundError as exc:
     YAML_IMPORT_ERROR = exc
 
 DEPENDENCY_INSTALL_COMMAND = "python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt"
+READING_NOTES_ROOT = "Books/Apple Books"
 
 
 @dataclass
@@ -206,7 +207,9 @@ def validate_individual_note_target(
             guidance="Select a .md note.",
             context={"path": target_text},
         )
-    if not is_relpath_in_scope(normalized_target, all_scope_paths):
+    outside_scope = not is_relpath_in_scope(normalized_target, all_scope_paths)
+    under_reading_root = normalized_target == READING_NOTES_ROOT or normalized_target.startswith(f"{READING_NOTES_ROOT}/")
+    if outside_scope and not under_reading_root:
         return None, build_runtime_issue(
             "error",
             "NOTE_TARGET_OUT_OF_SCOPE",
@@ -214,7 +217,6 @@ def validate_individual_note_target(
             guidance="Move the note into an all-scope folder or update the configured scope.",
             context={"path": target_text},
         )
-
     target, issue = resolve_vault_markdown_write_target(vault_root, normalized_target)
     if issue:
         return None, issue
@@ -226,6 +228,20 @@ def validate_individual_note_target(
             guidance="Use one existing vault-relative Markdown path.",
             context={"path": target_text},
         )
+    if outside_scope:
+        try:
+            frontmatter, _body = parse_frontmatter(target.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            frontmatter = {}
+        is_reading_annotation = under_reading_root and frontmatter.get("type") == "apple-books-annotation"
+        if not is_reading_annotation:
+            return None, build_runtime_issue(
+                "error",
+                "NOTE_TARGET_OUT_OF_SCOPE",
+                "Individual note is outside the configured all-scope folders.",
+                guidance="Move the note into an all-scope folder or update the configured scope.",
+                context={"path": target_text},
+            )
     return target, None
 
 

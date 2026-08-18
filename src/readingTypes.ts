@@ -19,7 +19,7 @@ const RESERVED_COMPONENTS = new Set([
 ]);
 
 export type ReaderPayloadStatus = "success" | "partial" | "empty";
-export type ResearchStatus = "off" | "too-short" | "retryable" | "complete";
+export type ResearchStatus = "off" | "too-short" | "retryable" | "unresearchable" | "complete";
 
 export interface AppleBooksSourceMetadata {
   role: string;
@@ -222,7 +222,7 @@ export function parseReadingState(value: unknown): ReadingState {
       || typeof rawEntry.notePath !== "string"
       || !isSafeReadingPath(rawEntry.notePath)
       || typeof rawEntry.importedAt !== "string"
-      || (rawEntry.researchStatus !== "off" && rawEntry.researchStatus !== "too-short" && rawEntry.researchStatus !== "retryable" && rawEntry.researchStatus !== "complete")
+      || (rawEntry.researchStatus !== "off" && rawEntry.researchStatus !== "too-short" && rawEntry.researchStatus !== "retryable" && rawEntry.researchStatus !== "unresearchable" && rawEntry.researchStatus !== "complete")
       || (rawEntry.processedAt !== null && typeof rawEntry.processedAt !== "string")) {
       throw new Error(`Invalid Reading Mode state: annotation ${id} is malformed.`);
     }

@@ -54,3 +54,11 @@ void test("active note scope and thresholds are explicit", () => {
   assert.equal(assessActiveNote("Notes/empty.md", "", { allScopeFolders: ["Notes"], minimumWords: 1 }).code, "too-short");
   assert.equal(assessActiveNote("Notes/note.md", `${annotation} seven eight`, { allScopeFolders: ["Notes"], minimumWords: 30 }).eligible, true);
 });
+
+void test("Reading-root Apple annotations are eligible outside all scope while spoofed and ordinary notes remain blocked", () => {
+  const annotation = "---\ntype: apple-books-annotation\n---\none two three four five six seven eight";
+  assert.equal(assessActiveNote("Books/Apple Books/Author/Book/Annotations/note.md", annotation, { allScopeFolders: ["Notes"], minimumWords: 30 }).eligible, true);
+  assert.equal(assessActiveNote("Books/Apple Books/Author/Book/Annotations/note.md", "---\ntype: note\n---\none two three four five six seven eight", { allScopeFolders: ["Notes"], minimumWords: 1 }).code, "out-of-scope");
+  assert.equal(assessActiveNote("Books/Apple Books Spoof/note.md", annotation, { allScopeFolders: ["Notes"], minimumWords: 1 }).code, "out-of-scope");
+  assert.equal(assessActiveNote("Other/note.md", annotation, { allScopeFolders: ["Notes"], minimumWords: 1 }).code, "out-of-scope");
+});

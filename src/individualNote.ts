@@ -1,6 +1,7 @@
 import path from "node:path";
 
 export const APPLE_BOOKS_ANNOTATION_MIN_WORDS = 8;
+export const READING_NOTES_ROOT = "Books/Apple Books";
 
 export interface IndividualNoteConfig {
   allScopeFolders: string[];
@@ -59,7 +60,7 @@ function frontmatterBody(text: string): { type: string; body: string } {
     return { type: "", body: text };
   }
   const typeLine = lines.slice(1, end).find((line) => /^\s*type\s*:/i.test(line));
-  const type = typeLine?.replace(/^\s*type\s*:\s*/i, "").trim().replace(/^['"]|['"]$/g, "").toLowerCase() ?? "";
+  const type = typeLine?.replace(/^\s*type\s*:\s*/i, "").trim().replace(/^['"]|['"]$/g, "") ?? "";
   return { type, body: lines.slice(end + 1).join("\n") };
 }
 
@@ -71,6 +72,11 @@ export function minimumWordsForNote(text: string, configuredMinimum: number): nu
 
 export function isAppleBooksAnnotation(text: string): boolean {
   return frontmatterBody(text).type === "apple-books-annotation";
+}
+
+export function isReadingAnnotationPath(relpath: string, text: string): boolean {
+  const normalized = normalizePath(relpath).replace(/^\/+/, "");
+  return (normalized === READING_NOTES_ROOT || normalized.startsWith(`${READING_NOTES_ROOT}/`)) && isAppleBooksAnnotation(text);
 }
 
 export function normalizedWordCount(text: string): number {
@@ -95,7 +101,7 @@ export function assessActiveNote(
   if (!isSafeIndividualNotePath(normalized)) {
     return { path: normalized, eligible: false, reason: "The active note path is not safe to process.", code: "unsafe-path" };
   }
-  if (!isWithinScope(normalized, config.allScopeFolders)) {
+  if (!isWithinScope(normalized, config.allScopeFolders) && !isReadingAnnotationPath(normalized, text)) {
     return { path: normalized, eligible: false, reason: "The active note is outside the configured all-scope folders.", code: "out-of-scope" };
   }
 

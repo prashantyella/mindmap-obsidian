@@ -12,11 +12,12 @@ import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { discoverAppleBooksDatabasePaths } from "./appleBooksDiscovery";
 import { completeAppleAnnotationResearchForNote, importAppleBooksAnnotations, updateAppleAnnotationResearchStatus } from "./appleBooksImport";
 import { clearTransientAutomaticPause, createAutomaticResearchPolicy, createAutomaticResearchPolicyStore, loadAutomaticResearchPolicySafely, localResearchDay, type AutomaticResearchPolicyState, type AutomaticResearchPolicyStore } from "./automaticResearchPolicy";
-import { commitAutomaticResearchAttempt, runAutomaticResearch, selectAutomaticResearchCandidates } from "./automaticResearch";
+import { persistAutomaticResearchOutcome, runAutomaticResearch, selectAutomaticResearchCandidates } from "./automaticResearch";
 import { ExaResearchProvider } from "./exaResearchProvider";
 import { getExaCredential } from "./keychainCredential";
 import { createConfiguredLocalResearchModel } from "./localResearchModel";
 import { researchNote } from "./webResearch";
+import { startAppleBooksReaderProcess } from "./appleBooksReaderProcess";
 import { prepareActiveNoteResearchInput } from "./researchInput";
 import { MAX_RESEARCH_INPUT_CHARS, WebResearchError } from "./webResearchTypes";
 import { createReadingStateStore, type ReadingStateStore } from "./readingState";
@@ -152,7 +153,8 @@ export default class MindmapPlugin extends Plugin {
   private automaticResearchPolicyStatus: AutomaticResearchPolicyState = createAutomaticResearchPolicy(localResearchDay(new Date()));
   private webResearchActivity: "off" | "ready" | "deriving" | "searching" | "writing" | "error" = "off";
   private webResearchLastError: string | null = null;
-  private webResearchPromise: Promise<boolean> | null = null;
+  private webResearchPromise: Promise<ResearchFileResult> | null = null;
+  private activeReaderChild: ChildProcess | null = null;
   private semanticEnvironment: MindmapSemanticEnvironment | null = null;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
@@ -218,6 +220,8 @@ export default class MindmapPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.activeReaderChild?.kill();
+    this.activeReaderChild = null;
     this.pendingScanService?.dispose();
     void this.readingModeController?.dispose();
     void this.semanticEnvironment?.shutdown();
@@ -559,24 +563,29 @@ export default class MindmapPlugin extends Plugin {
     await this.researchFile(file, text, reprocess, "manual");
   }
 
-  private async researchFile(file: TFile, text: string, reprocess: boolean, origin: "manual" | "automatic"): Promise<boolean> {
+  private async researchFile(file: TFile, text: string, reprocess: boolean, origin: "manual" | "automatic"): Promise<ResearchFileResult> {
+    const readingActivity = this.readingModeController?.getHealth().activity;
+    if (origin === "manual" && (readingActivity === "syncing" || readingActivity === "processing")) {
+      new Notice("Reading Mode is updating notes; try Web Research again when the sync finishes.", 8000);
+      return { ok: false, code: "READING_BUSY", message: "Reading Mode is updating notes." };
+    }
     if (this.currentProcess) {
       if (origin === "manual") new Notice("Mindmap is already running. Web Research will not start.", 8000);
-      return false;
+      return { ok: false, code: "MINDMAP_BUSY", message: "Mindmap is already running." };
     }
     if (this.webResearchPromise) {
       if (origin === "manual") new Notice("Web Research is already running.", 8000);
-      return false;
+      return { ok: false, code: "RESEARCH_BUSY", message: "Web Research is already running." };
     }
     const work = this.runResearchFile(file, text, reprocess, origin);
     this.webResearchPromise = work;
     try { return await work; } finally { this.webResearchPromise = null; }
   }
 
-  private async runResearchFile(file: TFile, text: string, reprocess: boolean, origin: "manual" | "automatic"): Promise<boolean> {
+  private async runResearchFile(file: TFile, text: string, reprocess: boolean, origin: "manual" | "automatic"): Promise<ResearchFileResult> {
     if (this.settings.webResearchMode === "off") {
       new Notice("Enable Manual Web Research before starting a request.", 8000);
-      return false;
+      return { ok: false, code: "RESEARCH_DISABLED", message: "Web Research is disabled." };
     }
     this.webResearchActivity = "deriving";
     this.webResearchLastError = null;
@@ -601,12 +610,13 @@ export default class MindmapPlugin extends Plugin {
       } else {
         if (origin === "manual") new Notice("Web Research saved.", 5000);
       }
-      return true;
+      return { ok: true };
     } catch (error) {
       this.webResearchActivity = "error";
-      this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research failed without saving changes.";
+      const researchError = error instanceof WebResearchError ? error : new WebResearchError("RESEARCH_FAILED", "Web Research failed without saving changes.");
+      this.webResearchLastError = researchError.message;
       if (origin === "manual") new Notice(this.webResearchLastError, 8000);
-      return false;
+      return { ok: false, code: researchError.code, message: researchError.message };
     } finally {
       this.updateStatusBar();
     }
@@ -1252,6 +1262,9 @@ export default class MindmapPlugin extends Plugin {
           lastSyncAt: result.state.lastSyncAt,
         };
       },
+      waitForManualResearch: async () => {
+        if (this.webResearchPromise) await this.webResearchPromise;
+      },
       runAutomaticResearch: async (_imported) => {
         if (this.settings.webResearchMode !== "automatic-reading" || this.settings.readingMode !== "reading" || !this.automaticResearchPolicyStore) return;
         const now = new Date();
@@ -1268,9 +1281,15 @@ export default class MindmapPlugin extends Plugin {
               const file = this.app.vault.getAbstractFileByPath(item.notePath);
               if (!(file instanceof TFile)) throw new WebResearchError("NOTE_MISSING", "Automatic research note is unavailable.");
               const text = prepareActiveNoteResearchInput(await this.app.vault.cachedRead(file), MAX_RESEARCH_INPUT_CHARS);
-              if (!text) throw new WebResearchError("RESEARCH_INPUT_EMPTY", "Automatic research note is empty.");
-              return await commitAutomaticResearchAttempt({
-                runResearch: async () => await this.researchFile(file, text, false, "automatic"),
+              if (!text) {
+                return await persistAutomaticResearchOutcome({
+                  outcome: { ok: false, code: "RESEARCH_INPUT_EMPTY", message: "Automatic research note is empty." },
+                  updateStatus: async (status) => await updateAppleAnnotationResearchStatus(createObsidianVaultApi(this.app.vault), state, item.annotationId, status),
+                });
+              }
+              const outcome = await this.researchFile(file, text, false, "automatic");
+              return await persistAutomaticResearchOutcome({
+                outcome,
                 updateStatus: async (status) => await updateAppleAnnotationResearchStatus(createObsidianVaultApi(this.app.vault), state, item.annotationId, status),
               });
             },
@@ -1375,27 +1394,14 @@ export default class MindmapPlugin extends Plugin {
   }
 
   private async runReaderProcess(command: string, args: string[], cwd: string): Promise<unknown> {
-    return await new Promise((resolve, reject) => {
-      let stdout = "";
-      let stderr = "";
-      const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
-      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-      child.on("error", reject);
-      child.on("close", () => {
-        const lines = stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
-        const line = lines[lines.length - 1];
-        if (!line) {
-          reject(new Error(stderr.trim() || "Apple Books reader did not produce structured output."));
-          return;
-        }
-        try {
-          resolve(JSON.parse(line) as unknown);
-        } catch {
-          reject(new Error("Apple Books reader output was not valid JSON."));
-        }
-      });
+    if (this.activeReaderChild) throw new Error("Apple Books reader is already running.");
+    const started = startAppleBooksReaderProcess({
+      spawn: () => spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] }),
     });
+    this.activeReaderChild = started.child as ChildProcess;
+    try { return await started.promise; } finally {
+      if (this.activeReaderChild === started.child) this.activeReaderChild = null;
+    }
   }
 
   async runMindmap(trigger: RunTrigger, scope: RunScope = "current", notePath?: string): Promise<boolean> {
@@ -1622,3 +1628,7 @@ export default class MindmapPlugin extends Plugin {
   }
 
 }
+
+type ResearchFileResult =
+  | { ok: true }
+  | { ok: false; code: string; message: string };

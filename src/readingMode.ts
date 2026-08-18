@@ -52,6 +52,7 @@ export interface ReadingModeDependencies {
   readPayload(): Promise<unknown>;
   readFingerprint(): Promise<string>;
   importPayload(payload: unknown): Promise<ReadingImportResult>;
+  waitForManualResearch?(): Promise<void>;
   runAutomaticResearch?(imported: ReadingImportItem[]): Promise<void>;
   onAutomaticResearchError?(message: string): void;
   listPendingEligibleNotes(): Promise<string[]>;
@@ -218,6 +219,8 @@ export class ReadingModeController {
   private async performSync(): Promise<void> {
     this.setHealth({ activity: "syncing", lastError: null });
     try {
+      await this.deps.waitForManualResearch?.();
+      if (this.mode !== "reading") return;
       const rawPayload = await this.deps.readPayload();
       const payload = validateAppleBooksReaderPayload(rawPayload) as AppleBooksReaderPayload;
       const tooShortCount = payload.annotations.filter(annotationIsTooShort).length;

@@ -2,6 +2,33 @@ import { AUTOMATIC_RESEARCH_MAX_ERROR_CHARS, AUTOMATIC_RESEARCH_PER_SYNC_LIMIT, 
 import type { ReadingStateEntry } from "./readingTypes";
 import { WebResearchError } from "./webResearchTypes";
 
+export class TerminalAutomaticResearchError extends Error {
+  constructor(message: string) { super(message); this.name = "TerminalAutomaticResearchError"; }
+}
+
+export type AutomaticResearchOutcome =
+  | { ok: true }
+  | { ok: false; code: string; message: string };
+
+export function isTerminalAutomaticResearchCode(code: string): boolean {
+  return code === "NO_USABLE_SOURCES" || code === "RESEARCH_INPUT_EMPTY";
+}
+
+export async function persistAutomaticResearchOutcome(options: {
+  outcome: AutomaticResearchOutcome;
+  updateStatus(status: "complete" | "retryable" | "unresearchable"): Promise<"updated" | "state-pending" | false>;
+}): Promise<true> {
+  if (options.outcome.ok) {
+    return await commitAutomaticResearchAttempt({ runResearch: async () => true, updateStatus: options.updateStatus });
+  }
+  const status = isTerminalAutomaticResearchCode(options.outcome.code) ? "unresearchable" : "retryable";
+  if ((await options.updateStatus(status)) === false) {
+    throw new WebResearchError("RESEARCH_STATUS_NOT_APPLIED", "Automatic research status could not be applied.");
+  }
+  if (status === "unresearchable") throw new TerminalAutomaticResearchError(options.outcome.message);
+  throw new WebResearchError(options.outcome.code, options.outcome.message);
+}
+
 export interface AutomaticResearchCandidate {
   annotationId: string;
   notePath: string;
@@ -72,6 +99,7 @@ export async function runAutomaticResearch<T>(options: {
     try {
       await options.attempt(candidate);
     } catch (error) {
+      if (error instanceof TerminalAutomaticResearchError) continue;
       const pauseReason = policy.pauseReason === "daily-limit" ? "daily-limit" : pauseReasonFor(error);
       const message = error instanceof Error ? error.message : "Automatic research failed.";
       policy = { ...policy, pauseReason, lastError: message.slice(0, AUTOMATIC_RESEARCH_MAX_ERROR_CHARS), lastErrorAt: options.now.toISOString() };

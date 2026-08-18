@@ -124,6 +124,45 @@ test("automatic hook failures are reported without blocking local Reading proces
   assert.match(controller.getHealth().lastError ?? "", /Automatic research paused/);
 });
 
+test("Reading sync waits for an existing manual research operation before importing and processing", async () => {
+  const clock = new FakeClock();
+  const order: string[] = [];
+  const deferred = { release: () => {} };
+  const manual = new Promise<void>((resolve) => { deferred.release = resolve; });
+  const setup = deps(clock, {
+    initiallyEnabled: true,
+    waitForManualResearch: async () => { order.push("wait"); await manual; },
+    importPayload: async () => { order.push("import"); return { imported: [{ annotationId: "one", notePath: "Books/one.md", action: "created", eligible: true }], failures: [], lastSyncAt: "now" }; },
+    processNote: async (notePath) => { order.push(`process-${notePath}`); return true; },
+  });
+  const controller = new ReadingModeController(setup.options);
+  const enabling = controller.start();
+  await Promise.resolve();
+  assert.deepEqual(order, ["wait"]);
+  deferred.release();
+  await enabling;
+  assert.deepEqual(order, ["wait", "import", "process-Books/one.md"]);
+});
+
+test("a reader timeout/error releases sync state so a later Reading sync can recover", async () => {
+  const clock = new FakeClock();
+  let reads = 0;
+  const setup = deps(clock, {
+    initiallyEnabled: true,
+    readPayload: async () => {
+      reads += 1;
+      if (reads === 1) throw new Error("Apple Books reader timed out after 60 seconds.");
+      return payload;
+    },
+  });
+  const controller = new ReadingModeController(setup.options);
+  await controller.start();
+  assert.equal(controller.getHealth().activity, "error");
+  await controller.syncNow();
+  assert.equal(setup.getImports(), 1);
+  assert.equal(controller.getHealth().activity, "ready");
+});
+
 test("duplicate database triggers coalesce through one debounce and one follow-up sync", async () => {
   const clock = new FakeClock();
   const setup = deps(clock);

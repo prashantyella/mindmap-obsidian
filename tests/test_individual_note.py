@@ -64,6 +64,30 @@ class IndividualNoteTests(unittest.TestCase):
         self.assertIsNotNone(issue)
         self.assertEqual(issue["code"], "NOTE_TARGET_MISSING")
 
+    def test_reading_annotation_target_is_allowed_without_expanding_all_scope(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vault = Path(tmpdir) / "vault"
+            reading = vault / "Books" / "Apple Books" / "Book" / "Annotations"
+            reading.mkdir(parents=True)
+            annotation = reading / "annotation.md"
+            annotation.write_text("---\ntype: apple-books-annotation\n---\none two three four five six seven eight", encoding="utf-8")
+            wrong_type = reading / "wrong.md"
+            wrong_type.write_text("---\ntype: note\n---\nordinary", encoding="utf-8")
+            spoof = vault / "Books" / "Apple Books Spoof" / "spoof.md"
+            spoof.parent.mkdir(parents=True)
+            spoof.write_text("---\ntype: apple-books-annotation\n---\nspoof", encoding="utf-8")
+
+            target, issue = validate_individual_note_target(vault, "Books/Apple Books/Book/Annotations/annotation.md", ["Notes"])
+            _wrong, wrong_issue = validate_individual_note_target(vault, "Books/Apple Books/Book/Annotations/wrong.md", ["Notes"])
+            _spoof, spoof_issue = validate_individual_note_target(vault, "Books/Apple Books Spoof/spoof.md", ["Notes"])
+            all_scope = list_notes(vault, ["Notes"], 1, "## Mindmap")
+
+        self.assertEqual(target, annotation.resolve())
+        self.assertIsNone(issue)
+        self.assertEqual(wrong_issue["code"], "NOTE_TARGET_OUT_OF_SCOPE")
+        self.assertEqual(spoof_issue["code"], "NOTE_TARGET_OUT_OF_SCOPE")
+        self.assertEqual(all_scope, [])
+
     def test_annotation_threshold_is_eight_and_ordinary_threshold_is_unchanged(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             vault = Path(tmpdir) / "vault"

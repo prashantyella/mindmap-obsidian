@@ -50,7 +50,7 @@ export async function updateAppleAnnotationResearchStatus(
   vault: ReadingVault,
   stateStore: ReadingStateStore,
   annotationId: string,
-  status: Extract<ResearchStatus, "complete" | "retryable">,
+  status: Extract<ResearchStatus, "complete" | "retryable" | "unresearchable">,
 ): Promise<"updated" | "state-pending" | false> {
   const state = await stateStore.load();
   const entry = state.annotations[annotationId];

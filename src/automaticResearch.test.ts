@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { commitAutomaticResearchAttempt, pauseReasonFor, runAutomaticResearch, selectAutomaticResearchCandidates } from "./automaticResearch";
+import { commitAutomaticResearchAttempt, pauseReasonFor, persistAutomaticResearchOutcome, runAutomaticResearch, selectAutomaticResearchCandidates, TerminalAutomaticResearchError } from "./automaticResearch";
 import { createAutomaticResearchPolicy, type AutomaticResearchPolicyState } from "./automaticResearchPolicy";
 import { WebResearchError } from "./webResearchTypes";
 
@@ -44,6 +44,42 @@ test("automatic error codes map to stable pause reasons", () => {
     ["CREDENTIAL_UNAVAILABLE", "credential"], ["LOCAL_MODEL_TIMEOUT", "local-model"], ["EXA_HTTP_401", "provider-auth"], ["EXA_HTTP_403", "provider-auth"], ["EXA_HTTP_429", "provider-quota"], ["EXA_TIMEOUT", "provider-timeout"], ["EXA_NETWORK", "provider-network"], ["OTHER", "invalid-result"],
   ];
   for (const [code, expected] of cases) assert.equal(pauseReasonFor(new WebResearchError(code, "redacted")), expected);
+});
+
+test("terminal automatic result is counted, skipped next sync, and does not block later candidates", async () => {
+  const store = new MemoryPolicy();
+  const attempted: string[] = [];
+  const result = await runAutomaticResearch({
+    store,
+    now: new Date("2026-08-17T12:00:00Z"),
+    candidates: ["terminal", "later"],
+    attempt: async (candidate) => {
+      attempted.push(candidate);
+      if (candidate === "terminal") throw new TerminalAutomaticResearchError("No usable sources.");
+      return true;
+    },
+  });
+  assert.deepEqual(attempted, ["terminal", "later"]);
+  assert.equal(result.pauseReason, null);
+  assert.equal(result.attempted, 2);
+  assert.deepEqual(selectAutomaticResearchCandidates({ terminal: { notePath: "t.md", contentHash: "a", importedAt: "now", researchStatus: "unresearchable", processedAt: null }, later: { notePath: "l.md", contentHash: "b", importedAt: "now", researchStatus: "off", processedAt: null } }).map((item) => item.annotationId), ["later"]);
+});
+
+test("typed automatic outcomes mark terminal results and preserve transient provider codes for pause mapping", async () => {
+  const statuses: string[] = [];
+  await assert.rejects(
+    () => persistAutomaticResearchOutcome({ outcome: { ok: false, code: "NO_USABLE_SOURCES", message: "redacted terminal" }, updateStatus: async (status) => { statuses.push(status); return "updated"; } }),
+    TerminalAutomaticResearchError,
+  );
+  assert.deepEqual(statuses, ["unresearchable"]);
+  const store = new MemoryPolicy();
+  await runAutomaticResearch({
+    store,
+    now: new Date("2026-08-17T12:00:00Z"),
+    candidates: ["network"],
+    attempt: async () => await persistAutomaticResearchOutcome({ outcome: { ok: false, code: "EXA_NETWORK", message: "redacted network" }, updateStatus: async () => "updated" }),
+  });
+  assert.equal(store.state.pauseReason, "provider-network");
 });
 
 test("a failing tenth pre-counted attempt remains daily-limited and cannot be retried past the cap", async () => {
