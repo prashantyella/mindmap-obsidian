@@ -81,6 +81,30 @@ Default LaunchAgent schedules:
 - Daily Mon-Sat 02:30: `--all --apply`
 - Weekly Sunday 03:00: `--all --refresh-all --apply`
 
+Scheduled maintenance runs Mindmap only. It never starts Web Research.
+
+## Reading Mode and Apple Books
+
+Reading Mode is an experimental, opt-in workflow for Apple Books annotations. The first enablement previews access and eligible-note counts before any import. Mindmap reads the supported Apple Books annotation database and its WAL/SHM companions without modifying Apple Books or your source database.
+
+Imported annotation notes retain their Apple Books source block and your own note content. The native status menu shows Reading Mode, sync time, pending notes, and actionable import or processing errors. Turn Reading Mode off to stop its watcher and automatic work.
+
+## Web Research
+
+Web Research has three modes in the status menu and Settings:
+
+- `Off`: no research requests.
+- `Manual`: research selected text or an active Markdown note on demand.
+- `Automatic for Reading`: includes the Manual actions and may research eligible Apple Books annotations while Reading Mode is active.
+
+Before either research mode is enabled, Mindmap shows consent. Annotation or note excerpts stay on your machine for local Qwen query derivation and synthesis. Exa receives only one or two derived queries; it returns up to five bounded source excerpts and metadata. Unrelated vault content is never sent to Exa.
+
+Automatic for Reading is capped at five attempts per sync and ten per local calendar day. The status menu and Settings show current usage, pauses, errors, and retry controls. A daily cap resumes after local midnight; scheduled maintenance does not use Web Research.
+
+### Exa Keychain setup
+
+Store the Exa API key in macOS Keychain under service `com.mindmap-ai.web-research` and account `exa-api-key`. Mindmap reads it through macOS Keychain; it does not persist the key in plugin settings, note frontmatter, logs, or diagnostics.
+
 ## Vault Path Safety
 
 By default, Mindmap stores runtime data under `.obsidian/plugins/mindmap-ai/` inside your current vault; if you customize runtime paths, keep them vault-relative and inside the same vault.
@@ -108,7 +132,7 @@ For metadata extraction, confirm oMLX exposes `Qwen3.5-9B-MLX-4bit` from `http:/
 
 - Desktop only (`isDesktopOnly: true`)
 - Mobile is not supported
-- All processing is local (Python + Ollama/oMLX on your machine)
+- Mindmap processing and Qwen research preparation run locally. Optional Exa Web Research sends only derived queries as described above.
 
 ## Release Metadata
 

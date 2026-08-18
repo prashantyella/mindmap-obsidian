@@ -36,6 +36,7 @@ export function configureStatusBarElement(element: HTMLElement, onOpen: (event?:
 export function renderStatusBarElement(element: HTMLElement, state: StatusBarMenuState): StatusBarPresentation {
   const presentation = buildStatusBarPresentation(state);
   element.classList.toggle("is-running", presentation.running);
+  element.classList.toggle("is-animating", presentation.animateIcon);
   element.classList.toggle("is-actionable", presentation.actionable);
   element.replaceChildren();
 

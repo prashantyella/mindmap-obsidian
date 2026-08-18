@@ -765,6 +765,8 @@
 
 .mindmap-status {
   display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
   gap: 6px;
   align-items: center;
   cursor: pointer;
@@ -797,9 +799,17 @@
   height: 14px;
   align-items: center;
   justify-content: center;
+  flex: 0 0 14px;
 }
 
-.mindmap-status.is-running .mindmap-status-icon svg {
+.mindmap-status > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mindmap-status.is-animating .mindmap-status-icon svg {
   animation: mindmap-status-spin 0.9s linear infinite;
 }
 
@@ -852,7 +862,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .mindmap-status,
-  .mindmap-status.is-running .mindmap-status-icon svg {
+  .mindmap-status.is-animating .mindmap-status-icon svg {
     transition: none;
     animation: none;
   }

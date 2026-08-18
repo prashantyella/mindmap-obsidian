@@ -171,6 +171,8 @@ export interface StatusBarPresentation {
   title: string;
   icon: IconName;
   running: boolean;
+  busy: boolean;
+  animateIcon: boolean;
   actionable: boolean;
 }
 
@@ -185,11 +187,15 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
   const readingActionable = state.readingMode === "reading" && (state.readingActivity === "error" || Boolean(state.readingError));
   const automaticPaused = state.webResearchMode === "automatic-reading" && state.automaticResearchPauseReason !== null;
   const webResearchActionable = state.webResearchActivity === "error" || Boolean(state.webResearchError) || automaticPaused;
+  const researchBusy = ["deriving", "searching", "writing"].includes(state.webResearchActivity);
+  const busy = state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy;
   const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable || webResearchActionable;
   const label = state.readingMode === "reading"
     ? state.readingActivity === "syncing" || state.readingActivity === "processing"
       ? `Reading · ${state.readingActivity}`
       : `Reading · ${state.readingPending}`
+    : researchBusy
+    ? `Research · ${state.webResearchActivity}`
     : state.running
     ? "Mindmap · running"
     : state.preflightInProgress
@@ -206,20 +212,25 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
         : state.currentPending > 0
           ? `${state.currentPending} pending note${state.currentPending === 1 ? "" : "s"}`
           : "ready";
-  const status = state.running && state.runStatus ? state.runStatus : attention;
+  const status = state.running ? state.runStatus ?? "running" : attention;
   const ariaLabel = readingActionable
     ? `Mindmap Reading Mode: ${state.readingError ?? state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
     : webResearchActionable
       ? `Mindmap Web Research: ${state.webResearchError ?? (automaticPaused ? `Automatic research paused: ${state.automaticResearchPauseReason}.` : state.webResearchActivity)} Activate to open the Mindmap menu.`
+      : researchBusy
+        ? `Mindmap Web Research: ${state.webResearchActivity}. Activate to open the Mindmap menu.`
       : state.readingMode === "reading"
         ? `Mindmap Reading Mode: ${state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
         : `Mindmap standard mode: ${status}. ${state.pendingAvailable ? `${state.currentPending} current-scope pending, ${state.allPending} all-scope pending.` : "Pending scan unavailable."} Activate to open the Mindmap menu.`;
+  const icon = readingActionable || webResearchActionable ? "triangle-alert" : busy ? "loader-circle" : state.readingMode === "reading" ? "book-open" : actionable ? "triangle-alert" : "orbit";
   return {
     label,
     ariaLabel,
     title: ariaLabel,
-    icon: readingActionable || webResearchActionable ? "triangle-alert" : state.readingMode === "reading" ? (state.readingActivity === "syncing" || state.readingActivity === "processing" ? "loader-circle" : "book-open") : state.running ? "loader-circle" : actionable ? "triangle-alert" : "orbit",
-    running: state.running,
+    icon,
+    running: busy,
+    busy,
+    animateIcon: icon === "loader-circle",
     actionable,
   };
 }
@@ -245,6 +256,8 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       : state.readingMode !== "reading"
         ? "Automatic research is waiting for Reading Mode."
         : null;
+  const automaticError = state.automaticResearchLastError ?? state.webResearchError;
+  const modeLabel = state.webResearchMode === "automatic-reading" ? "Automatic for Reading" : state.webResearchMode === "manual" ? "Manual" : "Off";
   const items: StatusBarMenuItemDescriptor[] = [
     { title: "Mode", label: true },
     { title: "Standard Mode", icon: "orbit", checked: state.readingMode === "standard", disabled: state.readingMode === "standard" },
@@ -291,12 +304,15 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       ...(state.readingError ? [{ title: `Reading error: ${state.readingError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
     ] : []),
     { title: "Web Research", label: true },
-    { title: `Manual Web Research: ${state.webResearchMode}`, icon: "globe-2", checked: state.webResearchMode === "manual", action: "toggleWebResearchMode", disabled: researchBusy },
-    { title: "Automatic Reading Research", icon: "sparkles" as IconName, checked: automaticActive, action: "toggleAutomaticReadingResearch", disabled: researchBusy || (!automaticActive && state.readingMode !== "reading") },
+    { title: `Research mode: ${modeLabel}`, icon: "globe-2", disabled: true },
+    automaticActive
+      ? { title: "Manual research is included with Automatic for Reading", icon: "check" as IconName, disabled: true }
+      : { title: "Use Manual research", icon: "globe-2", checked: state.webResearchMode === "manual", action: "toggleWebResearchMode", disabled: researchBusy },
+    { title: automaticActive ? "Pause Automatic for Reading" : "Enable Automatic for Reading", icon: "sparkles" as IconName, checked: automaticActive, action: "toggleAutomaticReadingResearch", disabled: researchBusy || (!automaticActive && state.readingMode !== "reading") },
     ...(automaticActive ? [
       { title: `Automatic research: ${state.automaticResearchAttempted}/10 today · max 5/sync`, disabled: true },
       ...(automaticPausedCopy ? [{ title: automaticPausedCopy, icon: state.automaticResearchPauseReason ? "triangle-alert" as IconName : "clock-3" as IconName, disabled: true }] : []),
-      ...(state.automaticResearchLastError ? [{ title: `Automatic research error: ${state.automaticResearchLastError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
+      ...(automaticError ? [{ title: `Automatic research: ${automaticError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
       ...(state.automaticResearchLastErrorAt ? [{ title: `Automatic research last error: ${state.automaticResearchLastErrorAt}`, disabled: true }] : []),
       ...(automaticTransientPause ? [{ title: "Retry automatic research", icon: "refresh-cw" as IconName, action: "retryAutomaticResearch" as const, disabled: researchBusy || state.readingMode !== "reading" }] : []),
     ] : []),
@@ -304,8 +320,8 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       { title: "Research selected text", icon: "search" as IconName, action: "researchSelectedText" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
       { title: "Research active note", icon: "file-search" as IconName, action: "researchActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
       { title: "Research and reprocess active note", icon: "sparkles" as IconName, action: "researchAndReprocessActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
-      { title: `Web Research: ${state.webResearchActivity}`, disabled: true },
-      ...(state.webResearchError ? [{ title: `Web Research error: ${state.webResearchError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
+      ...(state.webResearchMode === "manual" && researchBusy ? [{ title: `Research: ${state.webResearchActivity}`, disabled: true }] : []),
+      ...(state.webResearchMode === "manual" && state.webResearchError ? [{ title: `Research error: ${state.webResearchError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
     ] : [{ title: state.webResearchError ? `Web Research error: ${state.webResearchError}` : "Web Research is not enabled", icon: state.webResearchError ? "triangle-alert" as IconName : "globe-2" as IconName, disabled: true }]),
     { title: "Health", label: true },
     {

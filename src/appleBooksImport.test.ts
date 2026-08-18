@@ -275,6 +275,25 @@ test("duplicate imports are no-ops, edits replace only the source block, and ind
   assert.equal(vault.modified[vault.modified.length - 1], notePath);
 });
 
+test("ten annotation import cycles keep one stable note and preserve state and research content", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const initial = annotation("ten-cycle");
+  const first = await runImport(vault, state, [initial]);
+  const notePath = first.imported[0]!.notePath;
+  vault.files.set(notePath, `${vault.files.get(notePath)}\nUser detail.\n<!-- mindmap:research:start -->\nStable research. [1]\n<!-- mindmap:research:end -->\n`);
+
+  for (let cycle = 0; cycle < 10; cycle += 1) {
+    const source = annotation("ten-cycle", { quote: cycle % 2 === 0 ? initial.quote : `Cycle ${cycle} quote one two three four five six seven eight nine` });
+    await runImport(vault, state, [source], `2026-08-17T0${cycle}:00:00Z`);
+    const annotationPaths = [...vault.files.keys()].filter((candidate) => candidate.includes("/Annotations/") && candidate.endsWith(".md"));
+    assert.deepEqual(annotationPaths, [notePath]);
+    assert.equal(state.current.annotations["ten-cycle"]?.notePath, notePath);
+    assert.match(vault.files.get(notePath) ?? "", /Stable research\. \[1\]/);
+    assert.match(vault.files.get(notePath) ?? "", /User detail\./);
+  }
+});
+
 test("changed source preserves the existing research block but resets note and state research status", async () => {
   const vault = new MemoryVault();
   const state = new MemoryState();

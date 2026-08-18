@@ -51,19 +51,20 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderResearchSettings(): void {
-    this.renderSection("Web Research", "Manual research is available on demand; automatic work runs only in Reading Mode.");
+    this.renderSection("Web Research", "Off, Manual, or Automatic for Reading. Automatic keeps manual research available.");
     const status = this.plugin.getWebResearchStatus();
     new Setting(this.containerEl)
-      .setName("Manual Web Research")
-      .setDesc(status.mode === "manual" ? "Enabled. Selected text and bounded active-note excerpts only." : "Off by default.")
+      .setName("Manual research")
+      .setDesc(status.mode === "automatic-reading" ? "Included with Automatic for Reading; selected text and active notes remain available on demand." : status.mode === "manual" ? "Enabled for selected text and bounded active-note excerpts." : "Off. Enable it for on-demand research only.")
       .addButton((button) => button
-        .setButtonText(status.mode === "manual" ? "Disable" : "Enable")
+        .setButtonText(status.mode === "automatic-reading" ? "Included" : status.mode === "manual" ? "Disable" : "Enable")
+        .setDisabled(status.mode === "automatic-reading" || ["deriving", "searching", "writing"].includes(status.activity))
         .onClick(async () => {
           await this.plugin.toggleWebResearchMode();
           this.display();
         }));
     new Setting(this.containerEl)
-      .setName("Automatic Reading Research")
+      .setName("Automatic for Reading")
       .setDesc(status.mode === "automatic-reading"
         ? `${status.automatic.attempted}/10 today · max 5/sync.${status.automatic.pauseReason === "daily-limit" ? " Daily limit reached; resumes after local midnight." : status.automatic.pauseReason ? ` Paused: ${status.automatic.pauseReason}.` : this.plugin.getReadingHealth().mode === "reading" ? " Active in Reading Mode." : " Waiting for Reading Mode."}`
         : "Requires Reading Mode and separate consent.")

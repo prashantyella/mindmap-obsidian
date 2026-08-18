@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 import { buildStatusBarMenuItems, buildStatusBarPresentation, buildStatusSummary, type StatusBarMenuState } from "./statusBarState";
 import { NO_ACTIVE_NOTE } from "./individualNote";
@@ -43,7 +44,26 @@ void test("standard status stays compact and exposes the orbit icon", () => {
   assert.equal(presentation.label, "Mindmap · 0");
   assert.equal(presentation.icon, "orbit");
   assert.equal(presentation.running, false);
+  assert.equal(presentation.busy, false);
   assert.match(presentation.ariaLabel, /standard mode/i);
+});
+
+void test("status presentation gives real work a loader while warnings retain precedence", () => {
+  const research = buildStatusBarPresentation(state({ webResearchMode: "manual", webResearchActivity: "deriving" }));
+  assert.equal(research.label, "Research · deriving");
+  assert.equal(research.icon, "loader-circle");
+  assert.equal(research.busy, true);
+  assert.equal(research.animateIcon, true);
+  assert.match(research.ariaLabel, /Web Research: deriving/);
+  const reading = buildStatusBarPresentation(state({ readingMode: "reading", readingActivity: "syncing" }));
+  assert.equal(reading.icon, "loader-circle");
+  const warning = buildStatusBarPresentation(state({ webResearchMode: "automatic-reading", webResearchActivity: "writing", automaticResearchPauseReason: "provider-network" }));
+  assert.equal(warning.icon, "triangle-alert");
+  assert.equal(warning.busy, true);
+  assert.equal(warning.animateIcon, false);
+  const css = fs.readFileSync("styles.css", "utf8");
+  assert.match(css, /\.mindmap-status\.is-animating \.mindmap-status-icon svg/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.mindmap-status\.is-animating \.mindmap-status-icon svg/);
 });
 
 void test("automatic policy usage distinguishes daily limits from transient retry pauses while manual actions remain enabled", () => {
@@ -57,13 +77,13 @@ void test("automatic policy usage distinguishes daily limits from transient retr
 
   const waiting = buildStatusBarMenuItems(state({ webResearchMode: "automatic-reading", readingMode: "standard" }));
   assert.ok(waiting.some((item) => item.title.includes("waiting for Reading Mode")));
-  assert.equal(waiting.find((item) => item.title === "Automatic Reading Research")?.disabled, false);
+  assert.equal(waiting.find((item) => item.title === "Pause Automatic for Reading")?.disabled, false);
 
   const persisted = buildStatusBarMenuItems(state({ webResearchMode: "automatic-reading", webResearchActivity: "ready" }));
-  assert.ok(persisted.some((item) => item.title === "Web Research: ready"));
+  assert.ok(persisted.some((item) => item.title === "Research mode: Automatic for Reading"));
 
   const busy = buildStatusBarMenuItems(state({ webResearchMode: "automatic-reading", webResearchActivity: "writing" }));
-  assert.equal(busy.find((item) => item.title === "Automatic Reading Research")?.disabled, true);
+  assert.equal(busy.find((item) => item.title === "Pause Automatic for Reading")?.disabled, true);
 
   const manualError = buildStatusBarMenuItems(state({ webResearchMode: "manual", webResearchActivity: "error", webResearchError: "Manual request failed." }));
   assert.equal(manualError.some((item) => item.title === "Retry automatic research"), false);
@@ -111,7 +131,7 @@ void test("web research errors are actionable and busy actions are disabled", ()
   const items = buildStatusBarMenuItems(state({ webResearchMode: "manual", webResearchActivity: "searching", running: true }));
   assert.equal(items.find((item) => item.title === "Research selected text")?.disabled, true);
   assert.equal(items.find((item) => item.title === "Research active note")?.disabled, true);
-  assert.equal(items.find((item) => item.title.startsWith("Manual Web Research"))?.disabled, true);
+  assert.equal(items.find((item) => item.title === "Use Manual research")?.disabled, true);
   assert.equal(items.find((item) => item.title.startsWith("Run active"))?.disabled, true);
   const offError = buildStatusBarMenuItems(state({ webResearchMode: "off", webResearchError: "Keychain unavailable." }));
   assert.ok(offError.some((item) => item.title.includes("Keychain unavailable.")));
