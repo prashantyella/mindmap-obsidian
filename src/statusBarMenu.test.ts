@@ -26,6 +26,7 @@ function state(overrides: Partial<StatusBarMenuState> = {}): StatusBarMenuState 
     readingLastSyncAt: null,
     readingPending: 0,
     readingImported: 0,
+    readingUnresearchable: 0,
     readingError: null,
     webResearchMode: "off",
     webResearchActivity: "off",
@@ -104,10 +105,11 @@ void test("reading status is visibly distinct and exposes experimental toggle", 
   assert.equal(presentation.label, "Reading · 3");
   assert.equal(presentation.icon, "book-open");
   assert.match(presentation.ariaLabel, /Reading Mode/);
-  const titles = buildStatusBarMenuItems(state({ readingMode: "reading", readingPending: 3 })).map((item) => item.title);
+  const titles = buildStatusBarMenuItems(state({ readingMode: "reading", readingPending: 3, readingUnresearchable: 2 })).map((item) => item.title);
   assert.ok(titles.includes("Reading Mode (experimental)"));
   assert.ok(titles.includes("Sync Reading Mode now"));
   assert.ok(titles.includes("Reading pending: 3"));
+  assert.ok(titles.includes("Reading unresearchable: 2"));
 });
 
 void test("reading errors are actionable and Web Research copy matches Reading Mode", () => {

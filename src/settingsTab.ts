@@ -66,7 +66,7 @@ export class MindmapSettingTab extends PluginSettingTab {
     new Setting(this.containerEl)
       .setName("Automatic for Reading")
       .setDesc(status.mode === "automatic-reading"
-        ? `${status.automatic.attempted}/10 today · max 5/sync.${status.automatic.pauseReason === "daily-limit" ? " Daily limit reached; resumes after local midnight." : status.automatic.pauseReason ? ` Paused: ${status.automatic.pauseReason}.` : this.plugin.getReadingHealth().mode === "reading" ? " Active in Reading Mode." : " Waiting for Reading Mode."}`
+        ? `${status.automatic.attempted}/10 today · max 5/sync · ${this.plugin.getReadingHealth().unresearchableCount} unresearchable.${status.automatic.pauseReason === "daily-limit" ? " Daily limit reached; resumes after local midnight." : status.automatic.pauseReason ? ` Paused: ${status.automatic.pauseReason}.` : this.plugin.getReadingHealth().mode === "reading" ? " Active in Reading Mode." : " Waiting for Reading Mode."}`
         : "Requires Reading Mode and separate consent.")
       .addButton((button) => button
         .setButtonText(status.mode === "automatic-reading" ? "Pause" : "Enable")

@@ -84,6 +84,13 @@ class MemoryState implements ReadingStateStore {
     this.current = cloneState(state);
     this.saves += 1;
   }
+
+  async mutate<T>(fn: (state: ReadingState) => T | Promise<T>): Promise<{ state: ReadingState; result: T }> {
+    const state = await this.load();
+    const result = await fn(state);
+    await this.save(state);
+    return { state, result };
+  }
 }
 
 function annotation(id: string, overrides: Partial<AppleBooksAnnotation> = {}): AppleBooksAnnotation {

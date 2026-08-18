@@ -52,21 +52,25 @@ export async function updateAppleAnnotationResearchStatus(
   annotationId: string,
   status: Extract<ResearchStatus, "complete" | "retryable" | "unresearchable">,
 ): Promise<"updated" | "state-pending" | false> {
-  const state = await stateStore.load();
-  const entry = state.annotations[annotationId];
-  if (!entry) return false;
-  const note = vault.get(entry.notePath);
+  const preview = await stateStore.load();
+  const previewEntry = preview.annotations[annotationId];
+  if (!previewEntry) return false;
+  const note = vault.get(previewEntry.notePath);
   if (!note) return false;
   const text = await vault.read(note);
   if (readFrontmatterValue(text, "annotation_id") !== annotationId) return false;
   const next = replaceFrontmatterScalar(text, "research_status", status);
   const noteChanged = next !== text;
   if (noteChanged) await vault.modify(note, next);
-  entry.researchStatus = status;
-  if (status === "complete") entry.processedAt = null;
   try {
-    await stateStore.save(state);
-    return "updated";
+    const { result: found } = await stateStore.mutate((state) => {
+      const entry = state.annotations[annotationId];
+      if (!entry) return false;
+      entry.researchStatus = status;
+      if (status === "complete") entry.processedAt = null;
+      return true;
+    });
+    return found ? "updated" : false;
   } catch (error) {
     // The frontmatter is the durable, user-visible half of this transition.
     // A retryable state write must not turn a committed complete status back
@@ -175,9 +179,13 @@ export async function importAppleBooksAnnotations(
           await options.vault.modify(existing, replaceFrontmatterScalar(existingText, "research_status", "too-short"));
         }
       } else if (durableStatus === "complete" && previous.researchStatus !== "complete") {
-        const adopted = cloneState(currentState);
-        adopted.annotations[annotation.annotation_id] = { ...previous, researchStatus: "complete", processedAt: null };
-        await options.state.save(adopted);
+        const { state: adopted } = await options.state.mutate((state) => {
+          const entry = state.annotations[annotation.annotation_id];
+          if (entry && entry.researchStatus !== "complete") {
+            entry.researchStatus = "complete";
+            entry.processedAt = null;
+          }
+        });
         currentState = adopted;
       }
       imported.push({
@@ -213,23 +221,22 @@ export async function importAppleBooksAnnotations(
         await options.vault.create(notePath, noteText);
       }
 
-      const nextState = cloneState(currentState);
-      nextState.annotations[annotation.annotation_id] = {
-        contentHash,
-        notePath,
-        importedAt,
-        researchStatus,
-        processedAt,
-      };
-      nextState.lastSyncAt = state.lastSyncAt;
       try {
-        await options.state.save(nextState);
+        const { state: nextState } = await options.state.mutate((freshState) => {
+          freshState.annotations[annotation.annotation_id] = {
+            contentHash,
+            notePath,
+            importedAt,
+            researchStatus,
+            processedAt,
+          };
+        });
+        currentState = nextState;
       } catch (error) {
         annotationFailure = true;
         failures.push({ annotationId: annotation.annotation_id, stage: "state", message: errorMessage(error) });
         continue;
       }
-      currentState = nextState;
       statePersisted = true;
       imported.push({
         annotationId: annotation.annotation_id,
@@ -245,10 +252,10 @@ export async function importAppleBooksAnnotations(
   }
 
   if (!annotationFailure && (!statePersisted || currentState.lastSyncAt !== syncAt)) {
-    const nextState = cloneState(currentState);
-    nextState.lastSyncAt = syncAt;
     try {
-      await options.state.save(nextState);
+      const { state: nextState } = await options.state.mutate((freshState) => {
+        freshState.lastSyncAt = syncAt;
+      });
       currentState = nextState;
     } catch (error) {
       failures.push({ stage: "state", message: errorMessage(error) });
@@ -327,14 +334,6 @@ function chooseResearchStatus(
   }
   const existing = readFrontmatterValue(existingText, "research_status");
   return existing === "retryable" ? "retryable" : "off";
-}
-
-function cloneState(state: ReadingState): ReadingState {
-  return {
-    version: state.version,
-    lastSyncAt: state.lastSyncAt,
-    annotations: Object.fromEntries(Object.entries(state.annotations).map(([id, entry]) => [id, { ...entry }])),
-  };
 }
 
 async function ensureVaultFolders(vault: ReadingVault, filePath: string): Promise<void> {

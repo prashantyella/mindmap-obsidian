@@ -31,6 +31,7 @@ export interface StatusBarMenuState {
   readingLastSyncAt: string | null;
   readingPending: number;
   readingImported: number;
+  readingUnresearchable: number;
   readingError: string | null;
   webResearchMode: "off" | "manual" | "automatic-reading";
   webResearchActivity: string;
@@ -64,6 +65,7 @@ export interface StatusBarStateInput {
   readingLastSyncAt: string | null;
   readingPending: number;
   readingImported: number;
+  readingUnresearchable: number;
   readingError: string | null;
   webResearchMode: "off" | "manual" | "automatic-reading";
   webResearchActivity: string;
@@ -135,6 +137,7 @@ export function buildStatusBarMenuState(input: StatusBarStateInput): StatusBarMe
     readingLastSyncAt: input.readingLastSyncAt,
     readingPending: input.readingPending,
     readingImported: input.readingImported,
+    readingUnresearchable: input.readingUnresearchable,
     readingError: input.readingError,
     webResearchMode: input.webResearchMode,
     webResearchActivity: input.webResearchActivity,
@@ -300,6 +303,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     ...(state.readingMode === "reading" ? [
       { title: "Sync Reading Mode now", icon: "refresh-cw" as IconName, action: "syncReadingMode" as const, disabled: state.readingActivity === "syncing" || state.readingActivity === "processing" },
       { title: `Reading pending: ${state.readingPending}`, disabled: true },
+      { title: `Reading unresearchable: ${state.readingUnresearchable}`, disabled: true },
       { title: state.readingLastSyncAt ? `Reading last sync: ${state.readingLastSyncAt}` : "Reading has not synced yet", disabled: true },
       ...(state.readingError ? [{ title: `Reading error: ${state.readingError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
     ] : []),

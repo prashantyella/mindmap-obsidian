@@ -66,6 +66,7 @@ function deps(clock: FakeClock, overrides: Partial<ConstructorParameters<typeof 
       };
     },
     listPendingEligibleNotes: async () => [],
+    countUnresearchable: async () => 0,
     processNote: async (notePath) => { events.push(`process-${notePath}`); return true; },
     markProcessed: async (notePath) => { events.push(`mark-${notePath}`); },
     confirmSetup: async (_preview: ReadingPreview) => { confirmations += 1; return true; },
@@ -233,6 +234,16 @@ test("processing failure remains pending and does not mark the note processed", 
   assert.equal(controller.getHealth().activity, "error");
   assert.equal(controller.getHealth().pendingCount, 1);
   assert.match(controller.getHealth().lastError ?? "", /failed/);
+});
+
+test("unresearchable count is surfaced on health after a sync completes", async () => {
+  const clock = new FakeClock();
+  const setup = deps(clock, { countUnresearchable: async () => 2 });
+  const controller = new ReadingModeController(setup.options);
+
+  await controller.enable();
+
+  assert.equal(controller.getHealth().unresearchableCount, 2);
 });
 
 test("Reading sync sequences automatic research before note processing", async () => {

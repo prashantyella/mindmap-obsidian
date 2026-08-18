@@ -33,6 +33,7 @@ export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: Stat
     readingLastSyncAt: plugin.getReadingHealth().lastSyncAt,
     readingPending: plugin.getReadingHealth().pendingCount,
     readingImported: plugin.getReadingHealth().importedCount,
+    readingUnresearchable: plugin.getReadingHealth().unresearchableCount,
     readingError: plugin.getReadingHealth().lastError,
     webResearchMode: plugin.getWebResearchStatus().mode,
     webResearchActivity: plugin.getWebResearchStatus().activity,

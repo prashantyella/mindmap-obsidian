@@ -352,6 +352,7 @@ export default class MindmapPlugin extends Plugin {
       eligibleCount: 0,
       pendingCount: 0,
       importedCount: 0,
+      unresearchableCount: 0,
       lastSyncAt: null,
       lastError: null,
     };
@@ -1328,17 +1329,23 @@ export default class MindmapPlugin extends Plugin {
           .map((entry) => entry.notePath)
           .sort();
       },
+      countUnresearchable: async () => {
+        const current = await state.load();
+        return Object.values(current.annotations).filter((entry) => entry.researchStatus === "unresearchable").length;
+      },
       processNote: async (notePath) => {
         return await this.runMindmap("reading", "note", notePath);
       },
       markProcessed: async (notePath) => {
-        const current = await state.load();
-        const entry = Object.entries(current.annotations).find(([, value]) => value.notePath === notePath)?.[1];
-        if (!entry) {
+        const { result: found } = await state.mutate((current) => {
+          const entry = Object.values(current.annotations).find((value) => value.notePath === notePath);
+          if (!entry) return false;
+          entry.processedAt = new Date().toISOString();
+          return true;
+        });
+        if (!found) {
           throw new Error(`Reading state entry not found for ${notePath}.`);
         }
-        entry.processedAt = new Date().toISOString();
-        await state.save(current);
       },
       confirmSetup: (preview) => this.confirmReadingSetup(preview),
       onModeChange: async (mode) => {

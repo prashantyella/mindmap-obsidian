@@ -15,9 +15,22 @@ export interface ReadingStateFileSystem {
   unlink?(filePath: string): Promise<void>;
 }
 
+export interface ReadingStateMutation<T> {
+  state: ReadingState;
+  result: T;
+}
+
 export interface ReadingStateStore {
   load(): Promise<ReadingState>;
   save(state: ReadingState): Promise<void>;
+  /**
+   * Runs `fn` against a freshly loaded state and persists whatever `fn`
+   * left behind, queued behind every other in-flight mutate() call on this
+   * store. This is the only way to avoid losing concurrent updates: two
+   * bare load()/save() pairs from different call sites can race, each
+   * overwriting the other's change, because save() replaces the whole file.
+   */
+  mutate<T>(fn: (state: ReadingState) => T | Promise<T>): Promise<ReadingStateMutation<T>>;
 }
 
 const defaultFileSystem: ReadingStateFileSystem = {
@@ -37,37 +50,53 @@ export function createReadingStateStore(
   fileSystem: ReadingStateFileSystem = defaultFileSystem,
 ): ReadingStateStore {
   const temporaryPath = `${statePath}.tmp`;
-  return {
-    async load(): Promise<ReadingState> {
-      try {
-        const raw = await fileSystem.readFile(statePath, "utf8");
-        return parseReadingState(JSON.parse(raw) as unknown);
-      } catch (error) {
-        if (isMissingFile(error)) {
-          return createEmptyReadingState();
-        }
-        throw error;
+  let queue: Promise<unknown> = Promise.resolve();
+
+  async function load(): Promise<ReadingState> {
+    try {
+      const raw = await fileSystem.readFile(statePath, "utf8");
+      return parseReadingState(JSON.parse(raw) as unknown);
+    } catch (error) {
+      if (isMissingFile(error)) {
+        return createEmptyReadingState();
       }
-    },
-    async save(state: ReadingState): Promise<void> {
-      const serialized = serializeReadingState(state);
-      await fileSystem.mkdir(path.dirname(statePath), { recursive: true });
-      let renamed = false;
-      try {
-        await fileSystem.writeFile(temporaryPath, serialized, "utf8");
-        await fileSystem.rename(temporaryPath, statePath);
-        renamed = true;
-      } finally {
-        if (!renamed && fileSystem.unlink) {
-          try {
-            await fileSystem.unlink(temporaryPath);
-          } catch {
-            // Preserve the original failure; the target state was not replaced.
-          }
+      throw error;
+    }
+  }
+
+  async function save(state: ReadingState): Promise<void> {
+    const serialized = serializeReadingState(state);
+    await fileSystem.mkdir(path.dirname(statePath), { recursive: true });
+    let renamed = false;
+    try {
+      await fileSystem.writeFile(temporaryPath, serialized, "utf8");
+      await fileSystem.rename(temporaryPath, statePath);
+      renamed = true;
+    } finally {
+      if (!renamed && fileSystem.unlink) {
+        try {
+          await fileSystem.unlink(temporaryPath);
+        } catch {
+          // Preserve the original failure; the target state was not replaced.
         }
       }
-    },
-  };
+    }
+  }
+
+  function mutate<T>(fn: (state: ReadingState) => T | Promise<T>): Promise<ReadingStateMutation<T>> {
+    const turn = queue.then(async () => {
+      const state = await load();
+      const result = await fn(state);
+      await save(state);
+      return { state, result };
+    });
+    // A failed turn must not wedge the queue for the next caller; the
+    // rejection itself is still delivered to whoever awaited `turn`.
+    queue = turn.catch(() => undefined);
+    return turn;
+  }
+
+  return { load, save, mutate };
 }
 
 function isMissingFile(error: unknown): boolean {

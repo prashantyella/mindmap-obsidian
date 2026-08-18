@@ -78,6 +78,41 @@ test("write failure and rename failure never replace the committed state", async
   assert.equal(fs.files.has("runtime/reading-state.json.tmp"), false);
 });
 
+test("concurrent mutate() calls queue instead of losing one another's updates", async () => {
+  const fs = new MemoryStateFs();
+  const store = createReadingStateStore("runtime/reading-state.json", fs);
+
+  // Both mutations start from a load() that resolves before either has
+  // saved, which is exactly the interleaving that a bare load()/save()
+  // pair at each call site would lose: whichever save() lands last would
+  // silently discard the other's change.
+  const first = store.mutate(async (state) => {
+    await Promise.resolve();
+    state.annotations.first = {
+      contentHash: "hash-first",
+      notePath: "Books/Apple Books/A/B/Annotations/first.md",
+      importedAt: "2026-08-17T00:00:00Z",
+      researchStatus: "off",
+      processedAt: null,
+    };
+  });
+  const second = store.mutate(async (state) => {
+    state.annotations.second = {
+      contentHash: "hash-second",
+      notePath: "Books/Apple Books/A/B/Annotations/second.md",
+      importedAt: "2026-08-17T00:00:00Z",
+      researchStatus: "off",
+      processedAt: null,
+    };
+  });
+
+  await Promise.all([first, second]);
+
+  const state = await store.load();
+  assert.ok(state.annotations.first, "first mutation must not be lost");
+  assert.ok(state.annotations.second, "second mutation must not be lost");
+});
+
 test("state parser rejects unsafe or malformed entries", () => {
   assert.throws(() => parseReadingState({
     version: 1,

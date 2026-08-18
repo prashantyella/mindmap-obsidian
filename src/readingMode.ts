@@ -23,6 +23,7 @@ export interface ReadingHealth {
   eligibleCount: number;
   pendingCount: number;
   importedCount: number;
+  unresearchableCount: number;
   lastSyncAt: string | null;
   lastError: string | null;
 }
@@ -56,6 +57,7 @@ export interface ReadingModeDependencies {
   runAutomaticResearch?(imported: ReadingImportItem[]): Promise<void>;
   onAutomaticResearchError?(message: string): void;
   listPendingEligibleNotes(): Promise<string[]>;
+  countUnresearchable(): Promise<number>;
   processNote(notePath: string): Promise<boolean>;
   markProcessed(notePath: string): Promise<void>;
   confirmSetup(preview: ReadingPreview): Promise<boolean>;
@@ -96,6 +98,7 @@ export class ReadingModeController {
       eligibleCount: 0,
       pendingCount: 0,
       importedCount: 0,
+      unresearchableCount: 0,
       lastSyncAt: null,
       lastError: null,
     };
@@ -289,10 +292,12 @@ export class ReadingModeController {
         }
       }
       const remaining = await this.deps.listPendingEligibleNotes();
+      const unresearchableCount = await this.deps.countUnresearchable();
       const actionableError = firstFailure ?? initialError;
       this.setHealth({
         activity: actionableError ? "error" : "ready",
         pendingCount: remaining.length,
+        unresearchableCount,
         lastError: actionableError,
       });
     })().finally(() => {
