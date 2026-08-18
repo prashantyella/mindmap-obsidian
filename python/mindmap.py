@@ -32,7 +32,7 @@ except ModuleNotFoundError as exc:
     YAML = None
     YAML_IMPORT_ERROR = exc
 
-DEPENDENCY_INSTALL_COMMAND = "python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt"
+DEPENDENCY_INSTALL_ARGS = "-m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt"
 READING_NOTES_ROOT = "Books/Apple Books"
 
 
@@ -92,7 +92,12 @@ def emit_stderr(level: str, code: str, message: str, guidance: Optional[str] = N
 
 
 def dependency_install_guidance() -> str:
-    return f"Install dependencies with `{DEPENDENCY_INSTALL_COMMAND}`."
+    # Obsidian is a GUI app and does not read the user's shell PATH, so a bare
+    # `python3` in this guidance can silently name a different interpreter
+    # than the one that just ran this check (e.g. Apple's /usr/bin/python3
+    # instead of a Framework/venv install). Name the interpreter that is
+    # actually running so the command is copy-pasteable and correct.
+    return f"Install dependencies with `{sys.executable} {DEPENDENCY_INSTALL_ARGS}`."
 
 
 def build_runtime_issue(
@@ -1655,13 +1660,22 @@ def run_preflight(config_path: Path) -> Dict:
         )
     ]
 
+    # Context alone does not reach the user on the TS side (formatPreflightNotice
+    # and the diagnostics pane only render message/guidance), so the running
+    # interpreter is named directly in the message, not just tucked into context.
+    dependency_context = {
+        "python_executable": sys.executable,
+        "python_version": tuple(sys.version_info[:3]),
+    }
+
     if YAML_IMPORT_ERROR is None:
         checks.append(
             build_preflight_check(
                 "DEPENDENCY_RUAMEL_OK",
                 "Python dependency",
                 "ok",
-                "Imported ruamel.yaml successfully.",
+                f"Imported ruamel.yaml successfully with {sys.executable}.",
+                context=dependency_context,
             )
         )
     else:
@@ -1670,8 +1684,9 @@ def run_preflight(config_path: Path) -> Dict:
                 "DEPENDENCY_RUAMEL_MISSING",
                 "Python dependency",
                 "error",
-                f"ruamel.yaml import failed: {YAML_IMPORT_ERROR}",
+                f"ruamel.yaml import failed under {sys.executable}: {YAML_IMPORT_ERROR}",
                 guidance=dependency_install_guidance(),
+                context=dependency_context,
             )
         )
 
@@ -1683,7 +1698,8 @@ def run_preflight(config_path: Path) -> Dict:
                 "DEPENDENCY_CHROMADB_OK",
                 "Python dependency",
                 "ok",
-                "Imported chromadb successfully.",
+                f"Imported chromadb successfully with {sys.executable}.",
+                context=dependency_context,
             )
         )
     except ModuleNotFoundError as exc:
@@ -1692,8 +1708,9 @@ def run_preflight(config_path: Path) -> Dict:
                 "DEPENDENCY_CHROMADB_MISSING",
                 "Python dependency",
                 "error",
-                f"chromadb import failed: {exc}",
+                f"chromadb import failed under {sys.executable}: {exc}",
                 guidance=dependency_install_guidance(),
+                context=dependency_context,
             )
         )
 

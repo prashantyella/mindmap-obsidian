@@ -94,8 +94,30 @@ class PreflightHelperTests(unittest.TestCase):
     def test_dependency_install_guidance_uses_installed_plugin_path(self):
         self.assertEqual(
             dependency_install_guidance(),
-            "Install dependencies with `python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt`.",
+            f"Install dependencies with `{sys.executable} -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt`.",
         )
+
+    def test_dependency_missing_checks_name_the_running_interpreter(self):
+        with patch("mindmap.YAML_IMPORT_ERROR", ImportError("boom")):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config_path = Path(tmpdir) / "config.json"
+                result = run_preflight(config_path)
+
+        checks = {check["code"]: check for check in result["checks"]}
+        ruamel_check = checks["DEPENDENCY_RUAMEL_MISSING"]
+        self.assertIn(sys.executable, ruamel_check["message"])
+        self.assertIn(sys.executable, ruamel_check["guidance"])
+        self.assertEqual(ruamel_check["context"]["python_executable"], sys.executable)
+
+    def test_dependency_ok_checks_name_the_running_interpreter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            result = run_preflight(config_path)
+
+        checks = {check["code"]: check for check in result["checks"]}
+        chromadb_check = checks["DEPENDENCY_CHROMADB_OK"]
+        self.assertIn(sys.executable, chromadb_check["message"])
+        self.assertEqual(chromadb_check["context"]["python_executable"], sys.executable)
 
     def test_provider_settings_fall_back_to_legacy_ollama_base_url(self):
         config = {
