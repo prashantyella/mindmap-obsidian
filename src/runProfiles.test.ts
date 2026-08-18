@@ -12,7 +12,7 @@ void test("getRunProfile returns current-scope apply arguments", () => {
 
 void test("getRunProfile returns one-note apply arguments", () => {
   assert.deepEqual(getRunProfile("note", "Notes/one.md"), {
-    args: ["--note", "Notes/one.md", "--apply"],
+    args: ["--note=Notes/one.md", "--apply"],
     label: "individual note Notes/one.md",
   });
 });

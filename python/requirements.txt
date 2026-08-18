@@ -1,2 +1,2 @@
-chromadb>=0.5.0
+chromadb==1.4.0
 ruamel.yaml>=0.18.10

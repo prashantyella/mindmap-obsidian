@@ -6,6 +6,7 @@ import {
   aggregateLaunchAgentHealth,
   buildPluginLaunchAgentSpecs,
   getSuccessfulRunAt,
+  isLaunchctlResultLoaded,
   type LaunchAgentObservation,
 } from "./launchAgentHealth";
 
@@ -17,26 +18,9 @@ void test("only treats a log mtime as a successful heartbeat after exit 0", () =
 });
 
 void test("plugin-managed agents use protected-independent working and log paths", () => {
-  const command = {
-    command: "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
-    args: ["/vault/.obsidian/plugins/mindmap-ai/python/mindmap.py", "--config", "/vault/.obsidian/plugins/mindmap-ai/python/config.json"],
-    cwd: "/vault/.obsidian/plugins/mindmap-ai/python",
-  };
+  const command = { command: "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3", args: ["/vault/.obsidian/plugins/mindmap-ai/python/mindmap.py", "--config", "/vault/.obsidian/plugins/mindmap-ai/python/config.json"], cwd: "/vault/.obsidian/plugins/mindmap-ai/python" };
   const homeDirectory = "/Users/me";
-  const specs = buildPluginLaunchAgentSpecs({
-    command,
-    homeDirectory,
-    plistDirectory: path.join(homeDirectory, "Library", "LaunchAgents"),
-    pathEnvironment: "/usr/bin:/bin",
-    settings: {
-      launchAgentDailyHour: 2,
-      launchAgentDailyMinute: 30,
-      launchAgentWeeklyEnabled: true,
-      launchAgentWeeklyHour: 3,
-      launchAgentWeeklyMinute: 0,
-    },
-  });
-
+  const specs = buildPluginLaunchAgentSpecs({ command, homeDirectory, plistDirectory: path.join(homeDirectory, "Library", "LaunchAgents"), pathEnvironment: "/usr/bin:/bin", settings: { launchAgentDailyHour: 2, launchAgentDailyMinute: 30, launchAgentWeeklyEnabled: true, launchAgentWeeklyHour: 3, launchAgentWeeklyMinute: 0 } });
   assert.equal(specs.length, 2);
   for (const spec of specs) {
     assert.equal(spec.workingDirectory, path.join(homeDirectory, "Library", "Application Support", "Mindmap"));
@@ -52,23 +36,19 @@ void test("plugin-managed agents use protected-independent working and log paths
 
 void test("aggregates agent health and keeps the latest successful heartbeat", () => {
   const observations: LaunchAgentObservation[] = [
-    {
-      label: "com.mindmap.daily",
-      launchctl: { loaded: true, state: "exited", lastExitCode: 0 },
-      health: "healthy",
-      lastSuccessfulRunAt: 100,
-    },
-    {
-      label: "com.mindmap.weekly",
-      launchctl: { loaded: false, state: null, lastExitCode: 78 },
-      health: "failing",
-      lastSuccessfulRunAt: null,
-    },
+    { label: "com.mindmap.daily", launchctl: { loaded: true, state: "exited", lastExitCode: 0 }, health: "healthy", lastSuccessfulRunAt: 100 },
+    { label: "com.mindmap.weekly", launchctl: { loaded: false, state: null, lastExitCode: 78 }, health: "failing", lastSuccessfulRunAt: null },
   ];
-
   const summary = aggregateLaunchAgentHealth(observations);
   assert.equal(summary.health, "failing");
   assert.equal(summary.lastSuccessfulRunAt, 100);
   assert.equal(summary.lastExitCode, 78);
   assert.match(summary.message, /com\.mindmap\.weekly: failing, not loaded, exit 78/);
+});
+
+void test("launchctl execution errors and unfamiliar output are not treated as loaded", () => {
+  const positive = "gui/501/com.mindmap.daily = {\n\tstate = exited\n}";
+  assert.equal(isLaunchctlResultLoaded(null, positive, ""), true);
+  assert.equal(isLaunchctlResultLoaded(new Error("permission denied"), positive, ""), false);
+  assert.equal(isLaunchctlResultLoaded(null, "", "future launchctl error text"), false);
 });

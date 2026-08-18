@@ -9,6 +9,21 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.2.0
+
+### Added
+- Native status-menu controls for pending notes, individual-note runs, Reading Mode sync health, scheduler health, preflight, and Web Research state.
+- Reading Mode imports Apple Books annotations through read-only source access and preserves source/user note content.
+- Manual and Automatic for Reading Web Research with explicit consent, local Qwen preparation/synthesis, bounded Exa queries, Keychain credentials, and five-per-sync / ten-per-day limits.
+
+### Fixed
+- Individual Reading annotation notes can run explicitly without widening scheduled all-scope maintenance.
+- Reader cancellation, automatic-research retry/terminal handling, state recovery, and LaunchAgent reconciliation are guarded against stalled or unsafe states.
+- Preflight, scheduler, and status errors remain actionable without exposing credentials or raw provider responses.
+
+### Security
+- `chromadb==1.4.0` is pinned for the tested embedded `PersistentClient` datastore. CVE-2026-45829 / PYSEC-2026-311 concerns the Python FastAPI server; Mindmap never starts or exposes that server. This does not claim the package itself is unflagged.
+
 ## 0.1.3
 
 ### Changed

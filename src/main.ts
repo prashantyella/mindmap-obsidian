@@ -16,6 +16,8 @@ import { persistAutomaticResearchOutcome, runAutomaticResearch, selectAutomaticR
 import { ExaResearchProvider } from "./exaResearchProvider";
 import { getExaCredential } from "./keychainCredential";
 import { createConfiguredLocalResearchModel } from "./localResearchModel";
+import { resolveLocalModelApiKey } from "./localModelApiKey";
+import { isSafeManualResearchPath } from "./manualResearchGuard";
 import { researchNote } from "./webResearch";
 import { startAppleBooksReaderProcess } from "./appleBooksReaderProcess";
 import { prepareActiveNoteResearchInput } from "./researchInput";
@@ -546,6 +548,10 @@ export default class MindmapPlugin extends Plugin {
       new Notice("Web Research requires a Markdown note.", 8000);
       return;
     }
+    if (!isSafeManualResearchPath(file.path)) {
+      new Notice("Web Research cannot write to this note path.", 8000);
+      return;
+    }
     await this.researchFile(file, selected, false, "manual");
   }
 
@@ -553,6 +559,10 @@ export default class MindmapPlugin extends Plugin {
     const file = this.app.workspace.getActiveFile();
     if (!file || file.extension.toLowerCase() !== "md") {
       new Notice("Open an eligible Markdown note to research.", 8000);
+      return;
+    }
+    if (!isSafeManualResearchPath(file.path)) {
+      new Notice("Web Research cannot write to this note path.", 8000);
       return;
     }
     const text = prepareActiveNoteResearchInput(await this.app.vault.cachedRead(file), MAX_RESEARCH_INPUT_CHARS);
@@ -633,7 +643,7 @@ export default class MindmapPlugin extends Plugin {
       provider,
       baseUrl: String(config.llm_base_url ?? config.ollama_base_url ?? ""),
       model: String(config.llm_model ?? ""),
-      ...(typeof config.llm_api_key === "string" && config.llm_api_key ? { apiKey: config.llm_api_key } : {}),
+      ...(resolveLocalModelApiKey(config, process.env) ? { apiKey: resolveLocalModelApiKey(config, process.env) } : {}),
       ...(chatTemplateKwargs ? { chatTemplateKwargs } : {}),
       temperature: 0.2,
     });

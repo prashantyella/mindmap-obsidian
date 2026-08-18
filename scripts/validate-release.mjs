@@ -109,6 +109,12 @@ const changelog = fs.readFileSync("CHANGELOG.md", "utf8");
 if (!changelog.includes("## Unreleased")) {
   throw new Error("CHANGELOG.md must include an Unreleased section");
 }
+if (!new RegExp(`^## ${manifest.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`, "m").test(changelog)) {
+  throw new Error(`CHANGELOG.md must include a section for ${manifest.version}`);
+}
+if (!fs.readFileSync("python/requirements.txt", "utf8").split(/\r?\n/).includes("chromadb==1.4.0")) {
+  throw new Error("python/requirements.txt must pin chromadb==1.4.0 for the embedded client.");
+}
 
 const workflow = fs.readFileSync(".github/workflows/release.yml", "utf8");
 for (const asset of ["release/main.js", "release/manifest.json", "release/styles.css", "release/mindmap-python.zip"]) {

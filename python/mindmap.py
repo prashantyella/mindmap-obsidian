@@ -2472,9 +2472,9 @@ def main():
     do_tag = args.tag or (not args.index and not args.tag)
 
     configured_min_words = config.get("min_note_words", 30)
-    all_scope_notes = list_notes(vault_root, all_scope_paths, configured_min_words, mindmap_heading)
     individual_target = None
     if args.note:
+        all_scope_notes = list_notes(vault_root, all_scope_paths, configured_min_words, mindmap_heading)
         individual_target, target_issue = validate_individual_note_target(vault_root, args.note, all_scope_paths)
         if target_issue:
             emit_stderr(

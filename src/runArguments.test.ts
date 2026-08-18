@@ -17,6 +17,7 @@ void test("assertAllowedPluginArgs rejects unexpected flags", () => {
 
 void test("assertAllowedPluginArgs validates individual note values", () => {
   assert.doesNotThrow(() => assertAllowedPluginArgs(["--note", "Notes/one.md", "--apply", "--index", "--tag", "--quiet"]));
+  assert.doesNotThrow(() => assertAllowedPluginArgs(["--note=Notes/-draft.md", "--apply"]));
   assert.throws(() => assertAllowedPluginArgs(["--note", "../outside.md"]), /traversal/i);
   assert.throws(() => assertAllowedPluginArgs(["--note", "/vault/one.md"]), /vault-relative/i);
   assert.throws(() => assertAllowedPluginArgs(["--note", ".obsidian/plugins/mindmap-ai/data.md"]), /runtime/i);
@@ -26,6 +27,9 @@ void test("assertAllowedPluginArgs validates individual note values", () => {
 void test("assertAllowedPluginArgs rejects repeated and incompatible individual note flags", () => {
   for (const args of [
     ["--note", "Notes/one.md", "--note", "Notes/two.md"],
+    ["--note=", "--apply"],
+    ["--note=../outside.md", "--apply"],
+    ["--note=Notes/one.md", "--current"],
     ["--note", "Notes/one.md", "--current"],
     ["--note", "Notes/one.md", "--all"],
     ["--note", "Notes/one.md", "--refresh-all"],

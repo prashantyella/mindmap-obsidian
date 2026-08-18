@@ -89,10 +89,14 @@ export async function isLaunchAgentLoaded(label: string): Promise<boolean> {
     return false;
   }
   return await new Promise<boolean>((resolve) => {
-    execFile("/bin/launchctl", ["print", `gui/${uid}/${label}`], { maxBuffer: 256 * 1024 }, (_error, stdout, stderr) => {
-      resolve(parseLaunchctlPrintOutput(String(stdout ?? ""), String(stderr ?? "")).loaded);
+    execFile("/bin/launchctl", ["print", `gui/${uid}/${label}`], { maxBuffer: 256 * 1024 }, (error, stdout, stderr) => {
+      resolve(isLaunchctlResultLoaded(error, String(stdout ?? ""), String(stderr ?? "")));
     });
   });
+}
+
+export function isLaunchctlResultLoaded(error: Error | null, stdout: string, stderr: string): boolean {
+  return error === null && parseLaunchctlPrintOutput(stdout, stderr).loaded;
 }
 
 export interface LaunchAgentCatchUpStatus {

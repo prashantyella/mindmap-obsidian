@@ -42,17 +42,18 @@ export function assertAllowedPluginArgs(args: string[]): void {
   let noteSeen = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg === "--note") {
+    if (arg === "--note" || arg.startsWith("--note=")) {
       if (noteSeen) {
         throw new Error("Blocked unexpected Mindmap CLI argument: --note may be provided only once.");
       }
-      const value = args[index + 1];
-      if (!value || value.startsWith("--")) {
+      const inline = arg.startsWith("--note=");
+      const value = inline ? arg.slice("--note=".length) : args[index + 1];
+      if (!value || (!inline && value.startsWith("--"))) {
         throw new Error("Blocked unexpected Mindmap CLI argument: --note requires one path value.");
       }
       assertSafeNoteArgument(value);
       noteSeen = true;
-      index += 1;
+      if (!inline) index += 1;
       continue;
     }
     if (noteSeen && NOTE_INCOMPATIBLE_FLAGS.has(arg)) {

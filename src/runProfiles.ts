@@ -60,7 +60,7 @@ export function getRunProfile(scope: RunScope, notePath?: string): RunProfile {
       throw new Error("An individual note path is required.");
     }
     return {
-      args: ["--note", notePath, "--apply"],
+      args: [`--note=${notePath}`, "--apply"],
       label: `individual note ${notePath}`,
     };
   }

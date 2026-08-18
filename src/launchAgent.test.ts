@@ -51,6 +51,8 @@ void test("parses loaded launchctl state and exit code", () => {
     state: null,
     lastExitCode: null,
   });
+  assert.equal(parseLaunchctlPrintOutput("operation denied", "future launchctl wording").loaded, false);
+  assert.equal(parseLaunchctlPrintOutput("permission denied", "unknown nonempty stderr").loaded, false);
 });
 
 void test("parses launchctl exit codes with descriptive suffixes", () => {

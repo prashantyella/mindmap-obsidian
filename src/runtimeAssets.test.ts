@@ -35,7 +35,7 @@ const assets: BundledRuntimeAssets = {
   "mindmap.py": "print('mindmap')\n",
   "mindmap_worker.py": "print('worker')\n",
   "apple_books_reader.py": "print('reader')\n",
-  "requirements.txt": "chromadb\n",
+  "requirements.txt": "chromadb==1.4.0\n",
   "config.template.json": '{"vault_root":"../../../../"}\n',
 };
 

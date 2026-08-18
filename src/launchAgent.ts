@@ -79,14 +79,13 @@ export function normalizeClockTime(time: ClockTime): ClockTime {
 }
 
 /** Extract the small, useful subset of `launchctl print` output. */
-export function parseLaunchctlPrintOutput(output: string, errorOutput = ""): LaunchAgentLaunchctlStatus {
-  const text = `${output}\n${errorOutput}`.trim();
-  const stateMatch = text.match(/^\s*state\s*=\s*(.+?)\s*$/im);
-  const exitMatch = text.match(/^\s*last exit code\s*=\s*(-?\d+)(?:\s*:\s*.*)?\s*$/im);
-  const notLoaded = /could not find service|service not found|unknown service|no such process/i.test(text);
+export function parseLaunchctlPrintOutput(output: string, _errorOutput = ""): LaunchAgentLaunchctlStatus {
+  const stateMatch = output.match(/^\s*state\s*=\s*(.+?)\s*$/im);
+  const exitMatch = output.match(/^\s*last exit code\s*=\s*(-?\d+)(?:\s*:\s*.*)?\s*$/im);
+  const serviceRecord = /^\s*gui\/\d+\/[A-Za-z0-9._-]+\s*=\s*\{/m.test(output);
 
   return {
-    loaded: text.length > 0 && !notLoaded,
+    loaded: serviceRecord && Boolean(stateMatch),
     state: stateMatch?.[1] ?? null,
     lastExitCode: exitMatch ? Number(exitMatch[1]) : null,
   };
