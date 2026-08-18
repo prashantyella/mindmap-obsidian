@@ -44,9 +44,24 @@ export class MindmapSettingTab extends PluginSettingTab {
     this.renderScopeSetupSettings();
     this.renderProviderSettings();
     this.renderSchedulerSettings();
+    this.renderResearchSettings();
     this.renderDiagnosticsSettings();
     this.renderAdvancedRuntimeSettings();
     this.renderSummary(this.plugin.getResolvedRuntime());
+  }
+
+  private renderResearchSettings(): void {
+    this.renderSection("Web Research", "Manual-only web research. It never runs in scheduled Mindmap jobs.");
+    const status = this.plugin.getWebResearchStatus();
+    new Setting(this.containerEl)
+      .setName("Manual Web Research")
+      .setDesc(status.mode === "manual" ? "Enabled. Selected text and bounded active-note excerpts only." : "Off by default.")
+      .addButton((button) => button
+        .setButtonText(status.mode === "manual" ? "Disable" : "Enable")
+        .onClick(async () => {
+          await this.plugin.toggleWebResearchMode();
+          this.display();
+        }));
   }
 
   private renderSection(title: string, description: string): void {

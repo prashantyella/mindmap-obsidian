@@ -9,6 +9,10 @@ export function registerMindmapCommands(plugin: MindmapPlugin): void {
     },
   });
 
+  plugin.addCommand({ id: "mindmap-research-selected-text", name: "Research selected text", callback: () => { void plugin.researchSelectedText(); } });
+  plugin.addCommand({ id: "mindmap-research-active-note", name: "Research active note", callback: () => { void plugin.researchActiveNote(); } });
+  plugin.addCommand({ id: "mindmap-research-reprocess-active-note", name: "Research and reprocess active note", callback: () => { void plugin.researchActiveNote(true); } });
+
   plugin.addCommand({
     id: "mindmap-open-lookup",
     name: "Open Mindmap lookup",

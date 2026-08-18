@@ -31,6 +31,9 @@ export interface StatusBarMenuState {
   readingPending: number;
   readingImported: number;
   readingError: string | null;
+  webResearchMode: "off" | "manual";
+  webResearchActivity: string;
+  webResearchError: string | null;
 }
 
 export interface StatusBarStateInput {
@@ -57,6 +60,9 @@ export interface StatusBarStateInput {
   readingPending: number;
   readingImported: number;
   readingError: string | null;
+  webResearchMode: "off" | "manual";
+  webResearchActivity: string;
+  webResearchError: string | null;
 }
 
 export interface StatusSummaryInput {
@@ -121,6 +127,9 @@ export function buildStatusBarMenuState(input: StatusBarStateInput): StatusBarMe
     readingPending: input.readingPending,
     readingImported: input.readingImported,
     readingError: input.readingError,
+    webResearchMode: input.webResearchMode,
+    webResearchActivity: input.webResearchActivity,
+    webResearchError: input.webResearchError,
   };
 }
 
@@ -135,6 +144,10 @@ export interface StatusBarMenuActions {
   openSettings(): void;
   toggleReadingMode(): void | Promise<void>;
   syncReadingMode(): void | Promise<void>;
+  toggleWebResearchMode(): void | Promise<void>;
+  researchSelectedText(): void | Promise<void>;
+  researchActiveNote(): void | Promise<void>;
+  researchAndReprocessActiveNote(): void | Promise<void>;
 }
 
 export interface StatusBarPresentation {
@@ -155,7 +168,8 @@ function healthLabel(health: LaunchAgentHealth): string {
 export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBarPresentation {
   const schedulerActionable = state.schedulerHealth !== null && ACTIONABLE_HEALTH.has(state.schedulerHealth);
   const readingActionable = state.readingMode === "reading" && (state.readingActivity === "error" || Boolean(state.readingError));
-  const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable;
+  const webResearchActionable = state.webResearchActivity === "error" || Boolean(state.webResearchError);
+  const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable || webResearchActionable;
   const label = state.readingMode === "reading"
     ? state.readingActivity === "syncing" || state.readingActivity === "processing"
       ? `Reading · ${state.readingActivity}`
@@ -177,14 +191,18 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
           ? `${state.currentPending} pending note${state.currentPending === 1 ? "" : "s"}`
           : "ready";
   const status = state.running && state.runStatus ? state.runStatus : attention;
-  const ariaLabel = state.readingMode === "reading"
+  const ariaLabel = readingActionable
     ? `Mindmap Reading Mode: ${state.readingError ?? state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
-    : `Mindmap standard mode: ${status}. ${state.pendingAvailable ? `${state.currentPending} current-scope pending, ${state.allPending} all-scope pending.` : "Pending scan unavailable."} Activate to open the Mindmap menu.`;
+    : webResearchActionable
+      ? `Mindmap Web Research: ${state.webResearchError ?? state.webResearchActivity}. Activate to open the Mindmap menu.`
+      : state.readingMode === "reading"
+        ? `Mindmap Reading Mode: ${state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
+        : `Mindmap standard mode: ${status}. ${state.pendingAvailable ? `${state.currentPending} current-scope pending, ${state.allPending} all-scope pending.` : "Pending scan unavailable."} Activate to open the Mindmap menu.`;
   return {
     label,
     ariaLabel,
     title: ariaLabel,
-    icon: state.readingMode === "reading" ? (readingActionable ? "triangle-alert" : state.readingActivity === "syncing" || state.readingActivity === "processing" ? "loader-circle" : "book-open") : state.running ? "loader-circle" : actionable ? "triangle-alert" : "orbit",
+    icon: readingActionable || webResearchActionable ? "triangle-alert" : state.readingMode === "reading" ? (state.readingActivity === "syncing" || state.readingActivity === "processing" ? "loader-circle" : "book-open") : state.running ? "loader-circle" : actionable ? "triangle-alert" : "orbit",
     running: state.running,
     actionable,
   };
@@ -201,6 +219,7 @@ export interface StatusBarMenuItemDescriptor {
 }
 
 export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMenuItemDescriptor[] {
+  const researchBusy = ["deriving", "searching", "writing"].includes(state.webResearchActivity);
   const items: StatusBarMenuItemDescriptor[] = [
     { title: "Mode", label: true },
     { title: "Standard Mode", icon: "orbit", checked: state.readingMode === "standard", disabled: state.readingMode === "standard" },
@@ -213,19 +232,19 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
         ? "Run Mindmap for active note"
         : `Run active note (${state.activeNote.reason})`,
       icon: "file-play",
-      disabled: state.running || !state.scopeReady || !state.activeNote.eligible,
+      disabled: state.running || researchBusy || !state.scopeReady || !state.activeNote.eligible,
       action: state.running || !state.activeNote.eligible ? undefined : "runActiveNote",
     },
     {
       title: state.running ? `Run active${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope",
       icon: state.running ? "loader-circle" : "play",
-      disabled: state.running || !state.scopeReady,
+      disabled: state.running || researchBusy || !state.scopeReady,
       action: state.running ? undefined : "runCurrent",
     },
     {
       title: state.pendingAvailable ? `Process all pending notes (${state.allPending})` : "Process all pending notes (unavailable)",
       icon: "list-checks",
-      disabled: state.running || !state.scopeReady || !state.pendingAvailable || state.allPending === 0,
+      disabled: state.running || researchBusy || !state.scopeReady || !state.pendingAvailable || state.allPending === 0,
       action: "runAll",
     },
     {
@@ -233,7 +252,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       disabled: true,
     },
     ...state.pendingPaths.flatMap((path) => [
-      { title: `Process ${path}`, icon: "file-play" as IconName, path, disabled: state.running || !state.scopeReady, action: "processPendingNote" as const },
+      { title: `Process ${path}`, icon: "file-play" as IconName, path, disabled: state.running || researchBusy || !state.scopeReady, action: "processPendingNote" as const },
       { title: `Open ${path}`, icon: "file-text" as IconName, path, action: "openNote" as const },
     ]),
     { title: "Reading", label: true },
@@ -247,7 +266,14 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       ...(state.readingError ? [{ title: `Reading error: ${state.readingError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
     ] : []),
     { title: "Web Research", label: true },
-    { title: state.readingMode === "reading" ? "Web Research is not enabled in Reading Mode" : "Web Research is off in Standard Mode", icon: "globe-2", disabled: true },
+    { title: `Manual Web Research: ${state.webResearchMode}`, icon: "globe-2", checked: state.webResearchMode === "manual", action: "toggleWebResearchMode", disabled: researchBusy },
+    ...(state.webResearchMode === "manual" ? [
+      { title: "Research selected text", icon: "search" as IconName, action: "researchSelectedText" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
+      { title: "Research active note", icon: "file-search" as IconName, action: "researchActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
+      { title: "Research and reprocess active note", icon: "sparkles" as IconName, action: "researchAndReprocessActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
+      { title: `Web Research: ${state.webResearchActivity}`, disabled: true },
+      ...(state.webResearchError ? [{ title: `Web Research error: ${state.webResearchError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
+    ] : [{ title: state.webResearchError ? `Web Research error: ${state.webResearchError}` : "Web Research is not enabled", icon: state.webResearchError ? "triangle-alert" as IconName : "globe-2" as IconName, disabled: true }]),
     { title: "Health", label: true },
     {
       title: state.preflightInProgress ? "Preflight is running" : state.preflightOk === false ? "Run preflight (failed)" : "Run preflight checks",

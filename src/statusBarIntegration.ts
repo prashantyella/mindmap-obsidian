@@ -34,6 +34,9 @@ export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: Stat
     readingPending: plugin.getReadingHealth().pendingCount,
     readingImported: plugin.getReadingHealth().importedCount,
     readingError: plugin.getReadingHealth().lastError,
+    webResearchMode: plugin.getWebResearchStatus().mode,
+    webResearchActivity: plugin.getWebResearchStatus().activity,
+    webResearchError: plugin.getWebResearchStatus().lastError,
   });
 }
 
@@ -53,6 +56,10 @@ export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMe
     },
     toggleReadingMode: async () => { await plugin.toggleReadingMode(); },
     syncReadingMode: async () => { await plugin.syncReadingMode(); },
+    toggleWebResearchMode: async () => { await plugin.toggleWebResearchMode(); },
+    researchSelectedText: async () => { await plugin.researchSelectedText(); },
+    researchActiveNote: async () => { await plugin.researchActiveNote(); },
+    researchAndReprocessActiveNote: async () => { await plugin.researchActiveNote(true); },
   };
 }
 

@@ -87,6 +87,14 @@ function addMenuItem(menu: Menu, descriptor: StatusBarMenuItemDescriptor, action
           void actions.toggleReadingMode();
         } else if (action === "syncReadingMode") {
           void actions.syncReadingMode();
+        } else if (action === "toggleWebResearchMode") {
+          void actions.toggleWebResearchMode();
+        } else if (action === "researchSelectedText") {
+          void actions.researchSelectedText();
+        } else if (action === "researchActiveNote") {
+          void actions.researchActiveNote();
+        } else if (action === "researchAndReprocessActiveNote") {
+          void actions.researchAndReprocessActiveNote();
         }
       });
     }

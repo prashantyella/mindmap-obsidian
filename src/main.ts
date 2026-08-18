@@ -11,6 +11,12 @@ import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type Resolve
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { discoverAppleBooksDatabasePaths } from "./appleBooksDiscovery";
 import { importAppleBooksAnnotations } from "./appleBooksImport";
+import { ExaResearchProvider } from "./exaResearchProvider";
+import { getExaCredential } from "./keychainCredential";
+import { createConfiguredLocalResearchModel } from "./localResearchModel";
+import { researchNote } from "./webResearch";
+import { prepareActiveNoteResearchInput } from "./researchInput";
+import { MAX_RESEARCH_INPUT_CHARS, WebResearchError } from "./webResearchTypes";
 import { createReadingStateStore, type ReadingStateStore } from "./readingState";
 import { createObsidianVaultApi } from "./readingVault";
 import { ReadingModeController, type ReadingHealth, type ReadingPreview } from "./readingMode";
@@ -140,6 +146,9 @@ export default class MindmapPlugin extends Plugin {
   private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
   private readingModeController: ReadingModeController | null = null;
   private readingStateStore: ReadingStateStore | null = null;
+  private webResearchActivity: "off" | "ready" | "deriving" | "searching" | "writing" | "error" = "off";
+  private webResearchLastError: string | null = null;
+  private webResearchPromise: Promise<void> | null = null;
   private semanticEnvironment: MindmapSemanticEnvironment | null = null;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
@@ -212,6 +221,8 @@ export default class MindmapPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.settings.readingMode = this.settings.readingMode === "reading" ? "reading" : "standard";
+    this.settings.webResearchMode = this.settings.webResearchMode === "manual" ? "manual" : "off";
+    this.webResearchActivity = this.settings.webResearchMode === "manual" ? "ready" : "off";
     if (typeof this.settings.pinnedConnections !== "object" || this.settings.pinnedConnections === null || Array.isArray(this.settings.pinnedConnections)) {
       this.settings.pinnedConnections = {};
     }
@@ -341,6 +352,157 @@ export default class MindmapPlugin extends Plugin {
 
   async syncReadingMode(): Promise<void> {
     await this.readingModeController?.syncNow();
+  }
+
+  getWebResearchStatus(): { mode: "off" | "manual"; activity: string; lastError: string | null } {
+    return { mode: this.settings.webResearchMode, activity: this.webResearchActivity, lastError: this.webResearchLastError };
+  }
+
+  async toggleWebResearchMode(): Promise<void> {
+    if (this.webResearchPromise) {
+      new Notice("Web Research is already running; mode cannot change yet.", 8000);
+      return;
+    }
+    if (this.settings.webResearchMode === "manual") {
+      const previous = this.settings.webResearchMode;
+      this.settings.webResearchMode = "off";
+      this.webResearchActivity = "off";
+      this.webResearchLastError = null;
+      try { await this.saveSettings(); } catch {
+        this.settings.webResearchMode = previous;
+        this.webResearchActivity = "error";
+        this.webResearchLastError = "Could not save Web Research mode.";
+        new Notice(this.webResearchLastError, 8000);
+        this.updateStatusBar();
+        return;
+      }
+      this.updateStatusBar();
+      new Notice("Manual Web Research disabled.", 5000);
+      return;
+    }
+    const confirmed = await confirmMindmapRun(this.app, {
+      title: "Enable Manual Web Research?",
+      message: "Selected text or a bounded active-note excerpt is processed locally by Qwen. Exa receives only one or two derived queries and returns up to five bounded source excerpts and metadata. Unrelated vault content is never sent externally.",
+      confirmText: "Enable manual research",
+      confirmClass: "mod-cta",
+    });
+    if (!confirmed) return;
+    try {
+      await this.getWebResearchPrerequisites();
+    } catch (error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research is not ready.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    const previous = this.settings.webResearchMode;
+    this.settings.webResearchMode = "manual";
+    this.webResearchActivity = "ready";
+    this.webResearchLastError = null;
+    try { await this.saveSettings(); } catch {
+      this.settings.webResearchMode = previous;
+      this.webResearchActivity = "error";
+      this.webResearchLastError = "Could not save Web Research mode.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    this.updateStatusBar();
+    new Notice("Manual Web Research enabled.", 5000);
+  }
+
+  async researchSelectedText(): Promise<void> {
+    const selected = this.app.workspace.activeEditor?.editor?.getSelection()?.trim() ?? "";
+    if (!selected) {
+      new Notice("Select text in a Markdown note to research.", 8000);
+      return;
+    }
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension.toLowerCase() !== "md") {
+      new Notice("Web Research requires a Markdown note.", 8000);
+      return;
+    }
+    await this.researchFile(file, selected, false);
+  }
+
+  async researchActiveNote(reprocess = false): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension.toLowerCase() !== "md") {
+      new Notice("Open an eligible Markdown note to research.", 8000);
+      return;
+    }
+    const text = prepareActiveNoteResearchInput(await this.app.vault.cachedRead(file), MAX_RESEARCH_INPUT_CHARS);
+    if (!text.trim()) {
+      new Notice("The active note is empty.", 8000);
+      return;
+    }
+    await this.researchFile(file, text, reprocess);
+  }
+
+  private async researchFile(file: TFile, text: string, reprocess: boolean): Promise<void> {
+    if (this.currentProcess) {
+      new Notice("Mindmap is already running. Web Research will not start.", 8000);
+      return;
+    }
+    if (this.webResearchPromise) {
+      new Notice("Web Research is already running.", 8000);
+      return;
+    }
+    const work = this.runResearchFile(file, text, reprocess);
+    this.webResearchPromise = work;
+    try { await work; } finally { this.webResearchPromise = null; }
+  }
+
+  private async runResearchFile(file: TFile, text: string, reprocess: boolean): Promise<void> {
+    if (this.settings.webResearchMode !== "manual") {
+      new Notice("Enable Manual Web Research before starting a request.", 8000);
+      return;
+    }
+    this.webResearchActivity = "deriving";
+    this.webResearchLastError = null;
+    this.updateStatusBar();
+    try {
+      const { credential, model } = await this.getWebResearchPrerequisites();
+      this.webResearchActivity = "searching";
+      this.updateStatusBar();
+      const note = createObsidianVaultApi(this.app.vault).get(file.path);
+      if (!note) throw new WebResearchError("NOTE_MISSING", "The active note is unavailable.");
+      this.webResearchActivity = "writing";
+      const result = await researchNote({ provider: new ExaResearchProvider(credential), model, vault: createObsidianVaultApi(this.app.vault) }, note, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
+      if (!result) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
+      this.webResearchActivity = "ready";
+      if (reprocess && !(await this.runMindmap("reading", "note", file.path))) {
+        this.webResearchLastError = "Research was saved; Mindmap processing is retryable.";
+        new Notice(this.webResearchLastError, 8000);
+      } else {
+        new Notice("Web Research saved.", 5000);
+      }
+    } catch (error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research failed without saving changes.";
+      new Notice(this.webResearchLastError, 8000);
+    } finally {
+      this.updateStatusBar();
+    }
+  }
+
+  private async getWebResearchPrerequisites(): Promise<{ credential: string; model: ReturnType<typeof createConfiguredLocalResearchModel> }> {
+    const credential = await getExaCredential({ allowDevelopmentOverride: false });
+    const config = JSON.parse(await fs.promises.readFile(this.getResolvedRuntime().configPath, "utf8")) as Record<string, unknown>;
+    const provider = config.llm_provider === "ollama" ? "ollama" : "openai_compatible";
+    const chatTemplateKwargs = config.llm_chat_template_kwargs && typeof config.llm_chat_template_kwargs === "object" && !Array.isArray(config.llm_chat_template_kwargs)
+      ? config.llm_chat_template_kwargs as Record<string, unknown>
+      : undefined;
+    const model = createConfiguredLocalResearchModel({
+      provider,
+      baseUrl: String(config.llm_base_url ?? config.ollama_base_url ?? ""),
+      model: String(config.llm_model ?? ""),
+      ...(typeof config.llm_api_key === "string" && config.llm_api_key ? { apiKey: config.llm_api_key } : {}),
+      ...(chatTemplateKwargs ? { chatTemplateKwargs } : {}),
+      temperature: 0.2,
+    });
+    return { credential, model };
   }
 
   async runLaunchAgentCatchUp(): Promise<void> {
@@ -1072,6 +1234,13 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async runMindmap(trigger: RunTrigger, scope: RunScope = "current", notePath?: string): Promise<boolean> {
+    if (["deriving", "searching", "writing"].includes(this.webResearchActivity)) {
+      const message = "Web Research is using the local model. Mindmap run skipped.";
+      this.appendLog(message);
+      if (trigger === "manual") new Notice(message, 8000);
+      this.updateStatusBar();
+      return false;
+    }
     if (this.currentProcess) {
       const message = "Mindmap is already running. Skipping the new request.";
       this.appendLog(message);

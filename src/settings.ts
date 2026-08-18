@@ -1,11 +1,13 @@
 export type SchedulerMode = "manual" | "interval" | "launchAgent";
 export type ReadingModeSetting = "standard" | "reading";
+export type WebResearchModeSetting = "off" | "manual";
 
 export interface MindmapSettings {
   pythonCommand: string;
   scriptPath: string;
   configPath: string;
   readingMode: ReadingModeSetting;
+  webResearchMode: WebResearchModeSetting;
   schedulerMode: SchedulerMode;
   schedulerIntervalMinutes: number;
   launchAgentDailyHour: number;
@@ -23,6 +25,7 @@ export const DEFAULT_SETTINGS: MindmapSettings = {
   scriptPath: "",
   configPath: "",
   readingMode: "standard",
+  webResearchMode: "off",
   schedulerMode: "manual",
   schedulerIntervalMinutes: 60,
   launchAgentDailyHour: 2,

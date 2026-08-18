@@ -26,6 +26,9 @@ function state(overrides: Partial<StatusBarMenuState> = {}): StatusBarMenuState 
     readingPending: 0,
     readingImported: 0,
     readingError: null,
+    webResearchMode: "off",
+    webResearchActivity: "off",
+    webResearchError: null,
     ...overrides,
   };
 }
@@ -60,7 +63,21 @@ void test("reading errors are actionable and Web Research copy matches Reading M
   assert.equal(presentation.actionable, true);
   assert.match(presentation.ariaLabel, /Apple Books unavailable/);
   const webResearch = buildStatusBarMenuItems(state({ readingMode: "reading" })).find((item) => item.title.includes("not enabled"));
-  assert.equal(webResearch?.title, "Web Research is not enabled in Reading Mode");
+  assert.equal(webResearch?.title, "Web Research is not enabled");
+});
+
+void test("web research errors are actionable and busy actions are disabled", () => {
+  const presentation = buildStatusBarPresentation(state({ webResearchMode: "manual", webResearchActivity: "error", webResearchError: "Credential unavailable." }));
+  assert.equal(presentation.icon, "triangle-alert");
+  assert.equal(presentation.actionable, true);
+  assert.match(presentation.ariaLabel, /Credential unavailable/);
+  const items = buildStatusBarMenuItems(state({ webResearchMode: "manual", webResearchActivity: "searching", running: true }));
+  assert.equal(items.find((item) => item.title === "Research selected text")?.disabled, true);
+  assert.equal(items.find((item) => item.title === "Research active note")?.disabled, true);
+  assert.equal(items.find((item) => item.title.startsWith("Manual Web Research"))?.disabled, true);
+  assert.equal(items.find((item) => item.title.startsWith("Run active"))?.disabled, true);
+  const offError = buildStatusBarMenuItems(state({ webResearchMode: "off", webResearchError: "Keychain unavailable." }));
+  assert.ok(offError.some((item) => item.title.includes("Keychain unavailable.")));
 });
 
 void test("actionable scheduler health is announced without contradictory schedule copy", () => {
