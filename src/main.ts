@@ -9,6 +9,11 @@ import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput, t
 import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } from "./onboarding";
 import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
+import { discoverAppleBooksDatabasePaths } from "./appleBooksDiscovery";
+import { importAppleBooksAnnotations } from "./appleBooksImport";
+import { createReadingStateStore, type ReadingStateStore } from "./readingState";
+import { createObsidianVaultApi } from "./readingVault";
+import { ReadingModeController, type ReadingHealth, type ReadingPreview } from "./readingMode";
 import { registerMindmapCommands } from "./pluginCommands";
 import {
   getLlmProviderConfigStatus as resolveLlmProviderConfigStatus,
@@ -87,7 +92,7 @@ function splitLogLines(text: string): string[] {
     .filter(Boolean);
 }
 
-type RunTrigger = "manual" | "scheduled";
+type RunTrigger = "manual" | "scheduled" | "reading";
 
 interface SchedulerState extends SchedulerSummaryState {
   nextRunAt: number | null;
@@ -133,6 +138,8 @@ export default class MindmapPlugin extends Plugin {
   private activeRunStatus: string | null = null;
   private activeNoteEligibility: ActiveNoteEligibility = NO_ACTIVE_NOTE;
   private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
+  private readingModeController: ReadingModeController | null = null;
+  private readingStateStore: ReadingStateStore | null = null;
   private semanticEnvironment: MindmapSemanticEnvironment | null = null;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
@@ -149,6 +156,8 @@ export default class MindmapPlugin extends Plugin {
 
     this.statusBarEl = this.addStatusBarItem();
     configureStatusBarElement(this.statusBarEl, (event) => this.openStatusMenu(event));
+    this.readingStateStore = createReadingStateStore(path.join(this.getRuntimeContext().pluginDir, "data", "reading-state.json"));
+    this.readingModeController = this.createReadingModeController();
     this.registerView(MINDMAP_VIEW_TYPE, (leaf) => new MindmapWorkspaceView(leaf, this));
     this.registerHoverLinkSource(MINDMAP_VIEW_TYPE, {
       display: "Mindmap AI",
@@ -182,10 +191,14 @@ export default class MindmapPlugin extends Plugin {
     if (this.settings.liveSemanticLookupEnabled) {
       void this.startSemanticEnvironment(false);
     }
+    if (this.settings.readingMode === "reading") {
+      void this.readingModeController.start();
+    }
   }
 
   onunload(): void {
     this.pendingScanService?.dispose();
+    void this.readingModeController?.dispose();
     void this.semanticEnvironment?.shutdown();
     this.stopScheduler("Plugin unloaded. Internal scheduler stopped.");
     if (this.currentProcess) {
@@ -198,6 +211,7 @@ export default class MindmapPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings.readingMode = this.settings.readingMode === "reading" ? "reading" : "standard";
     if (typeof this.settings.pinnedConnections !== "object" || this.settings.pinnedConnections === null || Array.isArray(this.settings.pinnedConnections)) {
       this.settings.pinnedConnections = {};
     }
@@ -299,6 +313,34 @@ export default class MindmapPlugin extends Plugin {
       schedulerHealth: this.schedulerState.launchAgentHealth,
       schedulerDetails: this.schedulerState.launchAgentDetails,
     };
+  }
+
+  getReadingHealth(): ReadingHealth {
+    return this.readingModeController?.getHealth() ?? {
+      mode: this.settings.readingMode,
+      activity: this.settings.readingMode === "reading" ? "ready" : "disabled",
+      annotationCount: 0,
+      eligibleCount: 0,
+      pendingCount: 0,
+      importedCount: 0,
+      lastSyncAt: null,
+      lastError: null,
+    };
+  }
+
+  async toggleReadingMode(): Promise<void> {
+    if (!this.readingModeController) {
+      return;
+    }
+    if (this.settings.readingMode === "reading") {
+      await this.readingModeController.disable();
+      return;
+    }
+    await this.readingModeController.enable();
+  }
+
+  async syncReadingMode(): Promise<void> {
+    await this.readingModeController?.syncNow();
   }
 
   async runLaunchAgentCatchUp(): Promise<void> {
@@ -903,14 +945,140 @@ export default class MindmapPlugin extends Plugin {
     this.updateStatusBar();
   }
 
-  async runMindmap(trigger: RunTrigger, scope: RunScope = "current", notePath?: string): Promise<void> {
+  private createReadingModeController(): ReadingModeController {
+    const state = this.readingStateStore;
+    if (!state) {
+      throw new Error("Reading state store is not initialized.");
+    }
+    return new ReadingModeController({
+      initiallyEnabled: this.settings.readingMode === "reading",
+      readPayload: () => this.readAppleBooksPayload(),
+      readFingerprint: () => this.readAppleBooksFingerprint(),
+      importPayload: async (payload) => {
+        const result = await importAppleBooksAnnotations(payload, {
+          vault: createObsidianVaultApi(this.app.vault),
+          state,
+        });
+        return {
+          imported: result.imported,
+          failures: result.failures,
+          lastSyncAt: result.state.lastSyncAt,
+        };
+      },
+      listPendingEligibleNotes: async () => {
+        const current = await state.load();
+        return Object.values(current.annotations)
+          .filter((entry) => entry.researchStatus !== "too-short" && entry.processedAt === null)
+          .map((entry) => entry.notePath)
+          .sort();
+      },
+      processNote: async (notePath) => {
+        return await this.runMindmap("reading", "note", notePath);
+      },
+      markProcessed: async (notePath) => {
+        const current = await state.load();
+        const entry = Object.entries(current.annotations).find(([, value]) => value.notePath === notePath)?.[1];
+        if (!entry) {
+          throw new Error(`Reading state entry not found for ${notePath}.`);
+        }
+        entry.processedAt = new Date().toISOString();
+        await state.save(current);
+      },
+      confirmSetup: (preview) => this.confirmReadingSetup(preview),
+      onModeChange: async (mode) => {
+        const previous = this.settings.readingMode;
+        this.settings.readingMode = mode;
+        try {
+          await this.saveSettings();
+        } catch (error) {
+          this.settings.readingMode = previous;
+          throw error;
+        }
+      },
+      onHealthChange: () => this.updateStatusBar(),
+    });
+  }
+
+  private async confirmReadingSetup(preview: ReadingPreview): Promise<boolean> {
+    return await confirmMindmapRun(this.app, {
+      title: "Enable Reading Mode?",
+      message: `Apple Books access is ready. Found ${preview.annotationCount} annotations; ${preview.eligibleCount} meet the eight-word processing threshold and ${preview.tooShortCount} will be imported as too-short. No annotations will be imported unless you confirm this sync.`,
+      confirmText: "Enable and sync",
+      confirmClass: "mod-cta",
+    });
+  }
+
+  private async readAppleBooksPayload(): Promise<unknown> {
+    const runtime = this.getResolvedRuntime();
+    if (!runtime.valid) {
+      throw new Error("Mindmap runtime is not ready for Apple Books reading.");
+    }
+    const readerPath = path.join(getPluginRuntimeDir(this.getRuntimeContext()), "apple_books_reader.py");
+    return await this.runReaderProcess(runtime.command.command, [readerPath, "--config", runtime.configPath], path.dirname(readerPath));
+  }
+
+  private async readAppleBooksFingerprint(): Promise<string> {
+    const runtime = this.getResolvedRuntime();
+    if (!runtime.valid) {
+      throw new Error("Mindmap runtime is not ready for Apple Books watching.");
+    }
+    let config: Record<string, unknown> = {};
+    try {
+      config = JSON.parse(await fs.promises.readFile(runtime.configPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      // The reader will provide the actionable config diagnostic during sync.
+    }
+    const candidates = await discoverAppleBooksDatabasePaths({
+      config,
+      homeDirectory: os.homedir(),
+      fileSystem: { readdir: async (directory) => await fs.promises.readdir(directory) },
+    });
+    const fingerprints: string[] = [];
+    for (const candidate of candidates) {
+      for (const sidecar of [candidate, `${candidate}-wal`, `${candidate}-shm`]) {
+        try {
+          const stat = await fs.promises.stat(sidecar);
+          fingerprints.push(`${sidecar}:${stat.size}:${stat.mtimeMs}`);
+        } catch {
+          fingerprints.push(`${sidecar}:missing`);
+        }
+      }
+    }
+    return fingerprints.join("|");
+  }
+
+  private async runReaderProcess(command: string, args: string[], cwd: string): Promise<unknown> {
+    return await new Promise((resolve, reject) => {
+      let stdout = "";
+      let stderr = "";
+      const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+      child.on("error", reject);
+      child.on("close", () => {
+        const lines = stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+        const line = lines[lines.length - 1];
+        if (!line) {
+          reject(new Error(stderr.trim() || "Apple Books reader did not produce structured output."));
+          return;
+        }
+        try {
+          resolve(JSON.parse(line) as unknown);
+        } catch {
+          reject(new Error("Apple Books reader output was not valid JSON."));
+        }
+      });
+    });
+  }
+
+  async runMindmap(trigger: RunTrigger, scope: RunScope = "current", notePath?: string): Promise<boolean> {
     if (this.currentProcess) {
       const message = "Mindmap is already running. Skipping the new request.";
       this.appendLog(message);
       if (trigger === "manual") {
         new Notice(message, 8000);
       }
-      return;
+      return false;
     }
 
     const runtime = this.getResolvedRuntime();
@@ -921,7 +1089,7 @@ export default class MindmapPlugin extends Plugin {
       this.appendLog(message);
       new Notice(message, 12000);
       this.updateStatusBar();
-      return;
+      return false;
     }
 
     const scopeSetup = this.getScopeSetupStatus();
@@ -931,7 +1099,7 @@ export default class MindmapPlugin extends Plugin {
       this.appendLog(message);
       new Notice(message, 12000);
       this.updateStatusBar();
-      return;
+      return false;
     }
 
     let command: { command: string; args: string[]; cwd: string };
@@ -942,7 +1110,7 @@ export default class MindmapPlugin extends Plugin {
       const message = error instanceof Error ? error.message : "An individual note path is required.";
       this.appendLog(message);
       new Notice(message, 8000);
-      return;
+      return false;
     }
 
     if (trigger === "manual" && profile.confirmation) {
@@ -952,7 +1120,7 @@ export default class MindmapPlugin extends Plugin {
         this.schedulerState.lastMessage = message;
         this.appendLog(message);
         this.updateStatusBar();
-        return;
+        return false;
       }
     }
 
@@ -963,7 +1131,7 @@ export default class MindmapPlugin extends Plugin {
         new Notice(message, 8000);
       }
       this.updateStatusBar();
-      return;
+      return false;
     }
 
     try {
@@ -974,7 +1142,7 @@ export default class MindmapPlugin extends Plugin {
       this.appendLog(message);
       new Notice(message, 12000);
       this.updateStatusBar();
-      return;
+      return false;
     }
 
     const preview = formatCommandPreview(runtime, profile.args);
@@ -983,7 +1151,7 @@ export default class MindmapPlugin extends Plugin {
       new Notice(`Mindmap run started (${profile.label}). ${preview}`, 8000);
     }
 
-    await new Promise<void>((resolve) => {
+    return await new Promise<boolean>((resolve) => {
       const child = spawn(command.command, command.args, {
         cwd: command.cwd,
         stdio: ["ignore", "pipe", "pipe"],
@@ -1021,9 +1189,11 @@ export default class MindmapPlugin extends Plugin {
         this.schedulerState.lastExitCode = -1;
         this.schedulerState.lastMessage = message;
         this.appendLog(message);
-        new Notice(message, 12000);
+        if (trigger === "manual") {
+          new Notice(message, 12000);
+        }
         this.updateStatusBar();
-        resolve();
+        resolve(false);
       });
 
       child.on("close", (code) => {
@@ -1041,7 +1211,7 @@ export default class MindmapPlugin extends Plugin {
         }
         this.pendingScanService?.requestRefresh("run completed");
         this.updateStatusBar();
-        resolve();
+        resolve(code === 0);
       });
     });
   }

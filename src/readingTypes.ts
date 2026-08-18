@@ -18,7 +18,7 @@ const RESERVED_COMPONENTS = new Set([
   ...Array.from({ length: 9 }, (_, index) => `lpt${index + 1}`),
 ]);
 
-export type ReaderPayloadStatus = "success" | "partial";
+export type ReaderPayloadStatus = "success" | "partial" | "empty";
 export type ResearchStatus = "off" | "too-short" | "retryable";
 
 export interface AppleBooksSourceMetadata {
@@ -147,7 +147,7 @@ export function validateAppleBooksReaderPayload(value: unknown): AppleBooksReade
   if (value.version !== READING_RESPONSE_VERSION) {
     throw new Error(`Unsupported Apple Books payload version: ${String(value.version)}.`);
   }
-  if (value.status !== "success" && value.status !== "partial") {
+  if (value.status !== "success" && value.status !== "partial" && value.status !== "empty") {
     throw new Error(`Apple Books payload is not usable: ${String(value.status)}.`);
   }
   if (!Array.isArray(value.annotations)) {
@@ -165,6 +165,9 @@ export function validateAppleBooksReaderPayload(value: unknown): AppleBooksReade
   }
   if (value.status === "partial" && (typeof skippedRows !== "number" || skippedRows < 1)) {
     throw new Error("Invalid Apple Books payload: partial results must report skipped rows.");
+  }
+  if (value.status === "empty" && (value.count !== 0 || value.annotations.length !== 0)) {
+    throw new Error("Invalid Apple Books payload: empty results must contain zero annotations.");
   }
   const diagnostics = value.diagnostics.map((diagnostic, index) => {
     if (!isRecord(diagnostic)) {

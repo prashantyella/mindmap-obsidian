@@ -2,6 +2,7 @@ import type { IconName } from "obsidian";
 
 import { DAILY_LAUNCH_AGENT_LABEL, WEEKLY_LAUNCH_AGENT_LABEL, type LaunchAgentHealth } from "./launchAgent";
 import type { ActiveNoteEligibility } from "./individualNote";
+import type { ReadingActivity, ReadingMode } from "./readingMode";
 
 export interface StatusBarSchedulerDetail {
   label: string;
@@ -24,6 +25,12 @@ export interface StatusBarMenuState {
   schedulerDetails: StatusBarSchedulerDetail[];
   semanticState: string;
   activeNote: ActiveNoteEligibility;
+  readingMode: ReadingMode;
+  readingActivity: ReadingActivity;
+  readingLastSyncAt: string | null;
+  readingPending: number;
+  readingImported: number;
+  readingError: string | null;
 }
 
 export interface StatusBarStateInput {
@@ -44,6 +51,12 @@ export interface StatusBarStateInput {
   weeklyEnabled: boolean;
   semanticState: string;
   activeNote: ActiveNoteEligibility;
+  readingMode: ReadingMode;
+  readingActivity: ReadingActivity;
+  readingLastSyncAt: string | null;
+  readingPending: number;
+  readingImported: number;
+  readingError: string | null;
 }
 
 export interface StatusSummaryInput {
@@ -102,6 +115,12 @@ export function buildStatusBarMenuState(input: StatusBarStateInput): StatusBarMe
     ],
     semanticState: input.semanticState,
     activeNote: input.activeNote,
+    readingMode: input.readingMode,
+    readingActivity: input.readingActivity,
+    readingLastSyncAt: input.readingLastSyncAt,
+    readingPending: input.readingPending,
+    readingImported: input.readingImported,
+    readingError: input.readingError,
   };
 }
 
@@ -114,6 +133,8 @@ export interface StatusBarMenuActions {
   openNote(path: string): void | Promise<void>;
   openMindmap(): void | Promise<void>;
   openSettings(): void;
+  toggleReadingMode(): void | Promise<void>;
+  syncReadingMode(): void | Promise<void>;
 }
 
 export interface StatusBarPresentation {
@@ -133,8 +154,13 @@ function healthLabel(health: LaunchAgentHealth): string {
 
 export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBarPresentation {
   const schedulerActionable = state.schedulerHealth !== null && ACTIONABLE_HEALTH.has(state.schedulerHealth);
-  const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable;
-  const label = state.running
+  const readingActionable = state.readingMode === "reading" && (state.readingActivity === "error" || Boolean(state.readingError));
+  const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable;
+  const label = state.readingMode === "reading"
+    ? state.readingActivity === "syncing" || state.readingActivity === "processing"
+      ? `Reading · ${state.readingActivity}`
+      : `Reading · ${state.readingPending}`
+    : state.running
     ? "Mindmap · running"
     : state.preflightInProgress
       ? "Mindmap · checking"
@@ -151,12 +177,14 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
           ? `${state.currentPending} pending note${state.currentPending === 1 ? "" : "s"}`
           : "ready";
   const status = state.running && state.runStatus ? state.runStatus : attention;
-  const ariaLabel = `Mindmap standard mode: ${status}. ${state.pendingAvailable ? `${state.currentPending} current-scope pending, ${state.allPending} all-scope pending.` : "Pending scan unavailable."} Activate to open the Mindmap menu.`;
+  const ariaLabel = state.readingMode === "reading"
+    ? `Mindmap Reading Mode: ${state.readingError ?? state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
+    : `Mindmap standard mode: ${status}. ${state.pendingAvailable ? `${state.currentPending} current-scope pending, ${state.allPending} all-scope pending.` : "Pending scan unavailable."} Activate to open the Mindmap menu.`;
   return {
     label,
     ariaLabel,
     title: ariaLabel,
-    icon: state.running ? "loader-circle" : actionable ? "triangle-alert" : "orbit",
+    icon: state.readingMode === "reading" ? (readingActionable ? "triangle-alert" : state.readingActivity === "syncing" || state.readingActivity === "processing" ? "loader-circle" : "book-open") : state.running ? "loader-circle" : actionable ? "triangle-alert" : "orbit",
     running: state.running,
     actionable,
   };
@@ -175,7 +203,8 @@ export interface StatusBarMenuItemDescriptor {
 export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMenuItemDescriptor[] {
   const items: StatusBarMenuItemDescriptor[] = [
     { title: "Mode", label: true },
-    { title: "Standard Mode", icon: "orbit", checked: true },
+    { title: "Standard Mode", icon: "orbit", checked: state.readingMode === "standard", disabled: state.readingMode === "standard" },
+    { title: "Reading Mode (experimental)", icon: "book-open", checked: state.readingMode === "reading", action: "toggleReadingMode" },
     { title: "Queue", label: true },
     {
       title: state.running
@@ -208,9 +237,17 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       { title: `Open ${path}`, icon: "file-text" as IconName, path, action: "openNote" as const },
     ]),
     { title: "Reading", label: true },
-    { title: "Reading Mode is not enabled", icon: "book-open", disabled: true },
+    state.readingMode === "reading"
+      ? { title: `Reading Mode: ${state.readingActivity}`, icon: "book-open", disabled: true }
+      : { title: "Reading Mode is off (experimental)", icon: "book-open", disabled: true },
+    ...(state.readingMode === "reading" ? [
+      { title: "Sync Reading Mode now", icon: "refresh-cw" as IconName, action: "syncReadingMode" as const, disabled: state.readingActivity === "syncing" || state.readingActivity === "processing" },
+      { title: `Reading pending: ${state.readingPending}`, disabled: true },
+      { title: state.readingLastSyncAt ? `Reading last sync: ${state.readingLastSyncAt}` : "Reading has not synced yet", disabled: true },
+      ...(state.readingError ? [{ title: `Reading error: ${state.readingError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
+    ] : []),
     { title: "Web Research", label: true },
-    { title: "Web Research is off in Standard Mode", icon: "globe-2", disabled: true },
+    { title: state.readingMode === "reading" ? "Web Research is not enabled in Reading Mode" : "Web Research is off in Standard Mode", icon: "globe-2", disabled: true },
     { title: "Health", label: true },
     {
       title: state.preflightInProgress ? "Preflight is running" : state.preflightOk === false ? "Run preflight (failed)" : "Run preflight checks",

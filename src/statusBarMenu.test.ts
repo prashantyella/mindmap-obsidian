@@ -20,6 +20,12 @@ function state(overrides: Partial<StatusBarMenuState> = {}): StatusBarMenuState 
     schedulerDetails: [],
     semanticState: "off",
     activeNote: NO_ACTIVE_NOTE,
+    readingMode: "standard",
+    readingActivity: "disabled",
+    readingLastSyncAt: null,
+    readingPending: 0,
+    readingImported: 0,
+    readingError: null,
     ...overrides,
   };
 }
@@ -31,6 +37,30 @@ void test("standard status stays compact and exposes the orbit icon", () => {
   assert.equal(presentation.icon, "orbit");
   assert.equal(presentation.running, false);
   assert.match(presentation.ariaLabel, /standard mode/i);
+});
+
+void test("reading status is visibly distinct and exposes experimental toggle", () => {
+  const presentation = buildStatusBarPresentation(state({ readingMode: "reading", readingActivity: "ready", readingPending: 3 }));
+  assert.equal(presentation.label, "Reading · 3");
+  assert.equal(presentation.icon, "book-open");
+  assert.match(presentation.ariaLabel, /Reading Mode/);
+  const titles = buildStatusBarMenuItems(state({ readingMode: "reading", readingPending: 3 })).map((item) => item.title);
+  assert.ok(titles.includes("Reading Mode (experimental)"));
+  assert.ok(titles.includes("Sync Reading Mode now"));
+  assert.ok(titles.includes("Reading pending: 3"));
+});
+
+void test("reading errors are actionable and Web Research copy matches Reading Mode", () => {
+  const presentation = buildStatusBarPresentation(state({
+    readingMode: "reading",
+    readingActivity: "error",
+    readingError: "Apple Books unavailable.",
+  }));
+  assert.equal(presentation.icon, "triangle-alert");
+  assert.equal(presentation.actionable, true);
+  assert.match(presentation.ariaLabel, /Apple Books unavailable/);
+  const webResearch = buildStatusBarMenuItems(state({ readingMode: "reading" })).find((item) => item.title.includes("not enabled"));
+  assert.equal(webResearch?.title, "Web Research is not enabled in Reading Mode");
 });
 
 void test("actionable scheduler health is announced without contradictory schedule copy", () => {

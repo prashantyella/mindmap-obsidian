@@ -28,14 +28,20 @@ export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: Stat
     weeklyEnabled: plugin.settings.launchAgentWeeklyEnabled,
     semanticState: plugin.getSemanticStatus().state,
     activeNote: plugin.getActiveNoteEligibility(),
+    readingMode: plugin.getReadingHealth().mode,
+    readingActivity: plugin.getReadingHealth().activity,
+    readingLastSyncAt: plugin.getReadingHealth().lastSyncAt,
+    readingPending: plugin.getReadingHealth().pendingCount,
+    readingImported: plugin.getReadingHealth().importedCount,
+    readingError: plugin.getReadingHealth().lastError,
   });
 }
 
 export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMenuActions {
   return {
-    runCurrent: () => plugin.runMindmap("manual", "current"),
+    runCurrent: async () => { await plugin.runMindmap("manual", "current"); },
     runActiveNote: () => plugin.runActiveNote(),
-    runAll: () => plugin.runMindmap("manual", "all"),
+    runAll: async () => { await plugin.runMindmap("manual", "all"); },
     processPendingNote: (notePath) => plugin.processPendingNote(notePath),
     runPreflight: async () => { await plugin.runPreflight("manual"); },
     openNote: (notePath) => plugin.app.workspace.openLinkText(notePath, "", false),
@@ -45,6 +51,8 @@ export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMe
       appWithSettings.setting?.open();
       appWithSettings.setting?.openTabById?.(plugin.manifest.id);
     },
+    toggleReadingMode: async () => { await plugin.toggleReadingMode(); },
+    syncReadingMode: async () => { await plugin.syncReadingMode(); },
   };
 }
 

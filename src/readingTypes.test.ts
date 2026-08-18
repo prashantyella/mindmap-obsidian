@@ -39,6 +39,8 @@ test("validates reader payloads and rejects malformed or duplicate annotations",
   assert.throws(() => validateAppleBooksReaderPayload({ ...payload, annotations: [{ ...annotation(), created_at: "not-a-date" }] }), /created_at.*ISO date-time/);
   assert.throws(() => validateAppleBooksReaderPayload({ ...payload, annotations: [{ ...annotation(), modified_at: "2026-99-99T00:00:00Z" }] }), /modified_at.*ISO date-time/);
   assert.throws(() => validateAppleBooksReaderPayload({ ...payload, status: "partial", skipped_rows: 0 }), /skipped_rows/);
+  assert.equal(validateAppleBooksReaderPayload({ ...payload, status: "empty", count: 0, annotations: [] }).status, "empty");
+  assert.throws(() => validateAppleBooksReaderPayload({ ...payload, status: "empty" }), /empty results must contain zero annotations/);
 });
 
 test("sanitizes Unicode, reserved, empty, and traversal-like path components", () => {
