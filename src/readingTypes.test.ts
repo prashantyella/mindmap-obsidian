@@ -48,6 +48,10 @@ test("sanitizes Unicode, reserved, empty, and traversal-like path components", (
   assert.equal(sanitizePathComponent("../", "Fallback"), "Fallback");
   assert.equal(sanitizePathComponent("   ", "Fallback"), "Fallback");
   assert.match(sanitizePathComponent("  Café 📚  ", "Fallback"), /Café 📚/);
+  assert.equal(sanitizePathComponent(".obsidian", "Fallback"), "obsidian");
+  assert.equal(sanitizePathComponent(".git", "Fallback"), "git");
+  assert.equal(sanitizePathComponent(".trash", "Fallback"), "trash");
+  assert.equal(sanitizePathComponent("...", "Fallback"), "Fallback");
 
   const path = baseAnnotationNotePath(annotation({ author: "../CON", book_title: "A/B" }));
   assert.equal(isSafeReadingPath(path), true);

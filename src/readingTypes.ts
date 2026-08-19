@@ -256,7 +256,9 @@ export function sanitizePathComponent(value: string | undefined, fallback: strin
     .replace(/-+/g, "-")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/[. ]+$/g, "");
+    .replace(/[. ]+$/g, "")
+    .replace(/^\.+/, "")
+    .trim();
   const bounded = Array.from(normalized).slice(0, MAX_COMPONENT_LENGTH).join("");
   if (!bounded || bounded === "." || bounded === ".." || !/[\p{L}\p{N}]/u.test(bounded)) {
     return fallback;

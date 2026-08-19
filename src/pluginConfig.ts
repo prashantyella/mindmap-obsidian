@@ -167,7 +167,9 @@ export function saveLlmProviderConfig(status: LlmProviderConfigStatus, providerC
   config.llm_base_url = providerConfig.baseUrl.trim();
   config.llm_model = providerConfig.model.trim();
   config.llm_api_key = providerConfig.apiKey;
-  config.llm_api_key_env = "";
+  if (providerConfig.apiKey.trim() !== "") {
+    config.llm_api_key_env = "";
+  }
   config.llm_max_tokens = Number.isFinite(providerConfig.maxTokens) && providerConfig.maxTokens > 0
     ? Math.trunc(providerConfig.maxTokens)
     : 1024;

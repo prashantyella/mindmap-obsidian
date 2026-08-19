@@ -64,7 +64,7 @@ export function createReadingStateStore(
     }
   }
 
-  async function save(state: ReadingState): Promise<void> {
+  async function writeState(state: ReadingState): Promise<void> {
     const serialized = serializeReadingState(state);
     await fileSystem.mkdir(path.dirname(statePath), { recursive: true });
     let renamed = false;
@@ -83,17 +83,28 @@ export function createReadingStateStore(
     }
   }
 
-  function mutate<T>(fn: (state: ReadingState) => T | Promise<T>): Promise<ReadingStateMutation<T>> {
-    const turn = queue.then(async () => {
-      const state = await load();
-      const result = await fn(state);
-      await save(state);
-      return { state, result };
-    });
+  // Serializes every write against `temporaryPath` (shared with mutate())
+  // behind one queue, so a bare save() can't race a concurrent mutate() and
+  // lose either side's update.
+  function enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const turn = queue.then(work);
     // A failed turn must not wedge the queue for the next caller; the
     // rejection itself is still delivered to whoever awaited `turn`.
     queue = turn.catch(() => undefined);
     return turn;
+  }
+
+  function save(state: ReadingState): Promise<void> {
+    return enqueue(() => writeState(state));
+  }
+
+  function mutate<T>(fn: (state: ReadingState) => T | Promise<T>): Promise<ReadingStateMutation<T>> {
+    return enqueue(async () => {
+      const state = await load();
+      const result = await fn(state);
+      await writeState(state);
+      return { state, result };
+    });
   }
 
   return { load, save, mutate };

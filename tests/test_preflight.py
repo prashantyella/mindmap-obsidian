@@ -205,6 +205,33 @@ class PreflightHelperTests(unittest.TestCase):
 
         self.assertFalse(should_manage_omlx_server(config, llm_settings))
 
+    def test_omlx_auto_manage_string_off_variants_disable_regardless_of_heuristic(self):
+        llm_settings = {
+            "provider": "openai_compatible",
+            "base_url": "http://localhost:8000/v1",
+            "model": "Qwen3.5-9B-MLX-4bit",
+        }
+
+        for value in ["off", "Off", " FALSE ", "never", "no", "0", "disabled"]:
+            self.assertFalse(
+                should_manage_omlx_server({"omlx_auto_manage": value}, llm_settings),
+                msg=f"omlx_auto_manage={value!r} should disable oMLX management",
+            )
+
+    def test_omlx_auto_manage_string_on_variants_force_enable(self):
+        llm_settings = {
+            "provider": "openai_compatible",
+            "base_url": "http://localhost:9000/v1",
+            "model": "gpt-4",
+        }
+        self.assertFalse(should_manage_omlx_server({"omlx_auto_manage": "auto"}, llm_settings))
+
+        for value in ["on", "True", " yes ", "1"]:
+            self.assertTrue(
+                should_manage_omlx_server({"omlx_auto_manage": value}, llm_settings),
+                msg=f"omlx_auto_manage={value!r} should force oMLX management on",
+            )
+
     def test_build_omlx_server_command_uses_configured_python_and_base_path(self):
         config = {
             "omlx_python_command": "/tmp/omlx-python",

@@ -1415,6 +1415,14 @@ def openai_compatible_url_port(base_url: str, default: int = 8000) -> int:
 
 def should_manage_omlx_server(config: Dict, llm_settings: Dict) -> bool:
     raw_setting = config.get("omlx_auto_manage", "auto")
+    if isinstance(raw_setting, str):
+        normalized = raw_setting.strip().lower()
+        if normalized in {"off", "false", "never", "no", "0", "disabled"}:
+            return False
+        if normalized in {"on", "true", "yes", "1"}:
+            raw_setting = True
+        else:
+            raw_setting = "auto"
     if raw_setting is False:
         return False
     if llm_settings.get("provider") != "openai_compatible":
@@ -2379,6 +2387,7 @@ def main():
     llm_model = llm_settings["model"]
     mindmap_heading = config.get("mindmap_heading", config.get("related_heading", "## Mindmap"))
     write_mindmap_section = config.get("write_mindmap_section", config.get("write_related_section", False))
+    remove_mindmap_section = config.get("remove_mindmap_section", False)
     controlled_tags_path = config.get("controlled_tags_path")
     tag_aliases_path = config.get("tag_aliases_path")
     allow_free_tags = config.get("allow_free_tags", True)
@@ -2465,7 +2474,7 @@ def main():
                 updated = update_frontmatter(original, updates, config["frontmatter_keys"])
                 if write_mindmap_section:
                     updated = update_related_section(updated, mindmap_heading, updates["related"])
-                else:
+                elif remove_mindmap_section:
                     updated = strip_related_section(updated, mindmap_heading)
                 file_path.write_text(updated, encoding="utf-8")
                 log_lines.append(f"Applied preview: {relpath}")
@@ -2642,7 +2651,7 @@ def main():
         if write_mindmap_section:
             links = related_items or updates.get("related", [])
             updated = update_related_section(updated, mindmap_heading, links)
-        else:
+        elif remove_mindmap_section:
             updated = strip_related_section(updated, mindmap_heading)
         if updated != original:
             target_path.write_text(updated, encoding="utf-8")

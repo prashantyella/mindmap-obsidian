@@ -4,6 +4,9 @@ All notable changes to this project should be documented in this file.
 
 ## Unreleased
 
+### Fixed
+- Notes no longer lose hand-authored `## Related` / `## Mindmap` sections when `write_mindmap_section` is `false`. Stripping now requires the explicit `remove_mindmap_section` option (default `false`).
+
 ### Release process
 - Update this changelog for every user-visible plugin release.
 - Keep `manifest.json` and `versions.json` in sync.
