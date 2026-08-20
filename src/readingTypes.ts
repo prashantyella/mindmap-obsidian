@@ -82,7 +82,10 @@ function requireString(value: unknown, field: string, allowEmpty = false): strin
 }
 
 function optionalString(value: unknown, field: string): string | undefined {
-  if (value === undefined) {
+  // The Apple Books reader emits absent optional fields as JSON null (not by
+  // omitting the key), so null must be treated the same as undefined. Every
+  // real annotation without a note/chapter carries user_note: null.
+  if (value === undefined || value === null) {
     return undefined;
   }
   return requireString(value, field, true);

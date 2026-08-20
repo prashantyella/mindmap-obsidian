@@ -41,6 +41,16 @@ test("validates reader payloads and rejects malformed or duplicate annotations",
   assert.throws(() => validateAppleBooksReaderPayload({ ...payload, status: "partial", skipped_rows: 0 }), /skipped_rows/);
   assert.equal(validateAppleBooksReaderPayload({ ...payload, status: "empty", count: 0, annotations: [] }).status, "empty");
   assert.throws(() => validateAppleBooksReaderPayload({ ...payload, status: "empty" }), /empty results must contain zero annotations/);
+
+  // Regression: the reader emits absent optional fields as JSON null (every
+  // highlight without a note carries user_note: null, chapter: null). These
+  // must be accepted as "field absent", not rejected as a non-empty string.
+  const withNulls = validateAppleBooksReaderPayload({
+    ...payload,
+    annotations: [{ ...annotation(), user_note: null, chapter: null, location: null }],
+  });
+  assert.equal(withNulls.annotations[0]?.user_note, undefined);
+  assert.equal(withNulls.annotations[0]?.chapter, undefined);
 });
 
 test("sanitizes Unicode, reserved, empty, and traversal-like path components", () => {

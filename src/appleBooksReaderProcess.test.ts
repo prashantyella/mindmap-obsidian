@@ -57,3 +57,38 @@ test("reader timeout kills once, settles once, and a later reader can start", as
   retry.emit("close", 0);
   assert.deepEqual(await next.promise, {});
 });
+
+test("default timer calls global setTimeout with correct receiver (no Illegal invocation)", async () => {
+  // Regression: Electron's renderer throws "Illegal invocation" when native
+  // setTimeout/clearTimeout are called with a receiver other than the global.
+  // The `{ setTimeout, clearTimeout }` shorthand default did exactly that.
+  // Node does not enforce the receiver, so we install a strict stand-in that
+  // mimics the browser check, then exercise the DEFAULT timer path.
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const strictSetTimeout = function (this: unknown, callback: () => void, delayMs?: number): ReturnType<typeof setTimeout> {
+    if (this !== globalThis && this !== undefined) {
+      throw new TypeError("Illegal invocation");
+    }
+    return realSetTimeout(callback, delayMs);
+  } as unknown as typeof setTimeout;
+  const strictClearTimeout = function (this: unknown, handle: unknown): void {
+    if (this !== globalThis && this !== undefined) {
+      throw new TypeError("Illegal invocation");
+    }
+    realClearTimeout(handle as ReturnType<typeof setTimeout>);
+  } as unknown as typeof clearTimeout;
+  globalThis.setTimeout = strictSetTimeout;
+  globalThis.clearTimeout = strictClearTimeout;
+  try {
+    const child = new FakeChild();
+    // No injected timer: this must use the module default without throwing.
+    const started = startAppleBooksReaderProcess({ spawn: () => child });
+    child.stdout.emit('{"status":"success"}\n');
+    child.emit("close", 0);
+    assert.deepEqual(await started.promise, { status: "success" });
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
+});

@@ -22,7 +22,15 @@ export function startAppleBooksReaderProcess(options: {
   timer?: ReaderTimer;
   timeoutMs?: number;
 }): { child: ReaderChild; promise: Promise<unknown> } {
-  const timer = options.timer ?? { setTimeout, clearTimeout };
+  // Wrap the global timers rather than passing them as object properties: in
+  // Electron's renderer the native setTimeout/clearTimeout throw "Illegal
+  // invocation" unless called with `this === window`, which `{ setTimeout }`
+  // shorthand does not preserve. Node has no such requirement, so this only
+  // surfaces at runtime inside Obsidian.
+  const timer = options.timer ?? {
+    setTimeout: (callback: () => void, delayMs: number) => setTimeout(callback, delayMs),
+    clearTimeout: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  };
   const timeoutMs = options.timeoutMs ?? APPLE_BOOKS_READER_TIMEOUT_MS;
   const child = options.spawn();
   let stdout = "";
