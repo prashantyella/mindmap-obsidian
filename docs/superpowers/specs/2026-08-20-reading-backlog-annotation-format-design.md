@@ -51,7 +51,7 @@ The body contains only the annotation as a leading Markdown blockquote. There is
 
 When Apple Books includes a user note, it appears in the same leading blockquote after a blank quoted line. Mindmap owns only this leading blockquote and preserves all content following it.
 
-Concepts and related notes remain in frontmatter as readable Obsidian wikilinks:
+Concepts, related notes, and an optional research companion remain in frontmatter as readable Obsidian wikilinks:
 
 ```yaml
 concepts:
@@ -59,19 +59,32 @@ concepts:
   - "[[Teaching]]"
 related:
   - "[[Books/Apple Books/Michael Gervais/The First Rule of Mastery/Annotations/Overcoming ingrained habits|Overcoming ingrained habits]]"
+research: "[[Books/Apple Books/Morgan Housel/The Psychology of Money/Research/Behavior is hard to teach|Research]]"
 ```
 
 Generated summary and tags are not written to Apple Books annotation frontmatter. Raw vault paths are not displayed as related-property text. Source identity and synchronization fields remain in frontmatter/state because they are required for safe adoption and recovery.
 
+## Research Companion Notes
+
+Web Research for an Apple Books annotation is stored in a separate companion note so the annotation body remains annotation-only.
+
+Companions live under the same book folder:
+
+`Books/Apple Books/<Author>/<Book>/Research/<Annotation title>.md`
+
+The annotation frontmatter links to the companion through a readable `research` property. The companion contains the grounded synthesis and a `## Sources` list. Mindmap owns the complete companion note, so it does not require visible technical markers.
+
+Manual Web Research for ordinary non-Reading notes retains its existing inline managed-section behavior.
+
 ## Migration and Preservation
 
-For existing marker-based Reading notes, the importer removes the old managed source markers and replaces that source block with the leading blockquote. It moves generated concepts and related notes into readable frontmatter wikilinks and removes obsolete generated annotation summary/tag fields.
+For existing marker-based Reading notes, the importer removes the old managed source markers and replaces that source block with the leading blockquote. It moves generated concepts and related notes into readable frontmatter wikilinks and removes obsolete generated annotation summary/tag fields. Existing valid inline Reading research is moved into a companion note before its old managed research block is removed.
 
 Migration preserves:
 
 - the stable annotation-to-path mapping unless the note still uses the old opaque generated filename;
 - user content outside the old managed source/research regions;
-- valid managed Web Research content;
+- valid managed Web Research content and sources, migrated to the companion note;
 - source identity, timestamps, and processing/research state;
 - unrelated frontmatter.
 
@@ -115,6 +128,7 @@ Automated coverage must include:
 - failed live processing remains pending without a tight retry loop;
 - readable filename derivation, fallbacks, collision numbering, and stable reuse;
 - marker-based migration to the clean blockquote format;
+- Reading Web Research migration and idempotent companion-note updates;
 - preservation of user content, Web Research content, unrelated frontmatter, state, and indexes;
 - concepts and related notes serialize as readable wikilinks;
 - ten repeated imports remain idempotent with no duplicate notes.
