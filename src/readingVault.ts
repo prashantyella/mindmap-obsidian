@@ -11,6 +11,7 @@ export interface ReadingVault {
   create(path: string, content: string): Promise<VaultEntry>;
   modify(entry: VaultEntry, content: string): Promise<void>;
   createFolder(path: string): Promise<void>;
+  rename(entry: VaultEntry, newPath: string): Promise<void>;
 }
 
 export function createObsidianVaultApi(vault: Vault): ReadingVault {
@@ -22,6 +23,9 @@ export function createObsidianVaultApi(vault: Vault): ReadingVault {
     modify: async (entry, content) => await vault.modify(entry.raw as TFile, content),
     createFolder: async (path) => {
       await vault.createFolder(path);
+    },
+    rename: async (entry, newPath) => {
+      await vault.rename(entry.raw as TFile, newPath);
     },
   };
 }

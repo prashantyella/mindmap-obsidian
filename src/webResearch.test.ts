@@ -14,6 +14,7 @@ class MemoryVault implements ReadingVault {
   async create(): Promise<VaultEntry> { throw new Error("unused"); }
   async modify(_entry: VaultEntry, content: string): Promise<void> { this.text = content; }
   async createFolder(): Promise<void> {}
+  async rename(): Promise<void> { throw new Error("unused"); }
 }
 
 function response(body: unknown, status = 200): Response {

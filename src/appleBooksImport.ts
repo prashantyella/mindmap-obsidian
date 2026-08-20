@@ -2,21 +2,31 @@ import { createObsidianVaultApi, type ReadingVault } from "./readingVault";
 import {
   annotationContentHash,
   annotationIsTooShort,
-  annotationPathCandidate,
+  baseAnnotationNotePath,
   bookFolderForNotePath,
   bookIndexPath,
-  planAnnotationPaths,
+  READING_ANNOTATIONS_FOLDER,
   READING_INDEX_END,
   READING_INDEX_START,
+  READING_ROOT,
   READING_SOURCE_END,
   READING_SOURCE_START,
   isSafeReadingPath,
+  sanitizePathComponent,
   type AppleBooksAnnotation,
   type ReadingState,
   type ReadingStateEntry,
   type ResearchStatus,
   validateAppleBooksReaderPayload,
 } from "./readingTypes";
+import {
+  conceptWikilink,
+  deriveHumanTitle,
+  humanTitleCandidate,
+  isSafeRelatedTarget,
+  relatedNoteWikilink,
+  replaceLeadingAnnotationSource,
+} from "./readingNoteFormat";
 import type { ReadingStateStore } from "./readingState";
 
 export interface ImportFailure {
@@ -104,10 +114,68 @@ const MANAGED_FRONTMATTER_KEYS = [
   "book_title",
   "book_author",
   "chapter",
+  "location",
   "created_at",
   "imported_at",
   "research_status",
 ] as const;
+
+const GENERATED_FRONTMATTER_KEYS = ["summary", "tags"] as const;
+
+function readableAnnotationFolder(annotation: AppleBooksAnnotation): string {
+  const author = sanitizePathComponent(annotation.author, "Unknown Author");
+  const book = sanitizePathComponent(annotation.book_title, "Untitled Book");
+  return `${READING_ROOT}/${author}/${book}/${READING_ANNOTATIONS_FOLDER}`;
+}
+
+function readableAnnotationPathCandidate(annotation: AppleBooksAnnotation, collisionIndex: number): string {
+  const title = deriveHumanTitle(annotation);
+  return `${readableAnnotationFolder(annotation)}/${humanTitleCandidate(title, collisionIndex)}`;
+}
+
+const LEGACY_BASENAME_PARTS_PATTERN = /^(.+)-([0-9a-f]{12})\.md$/;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Every basename the old `annotationPathCandidate` scheme could produce for
+ * this exact annotation: the base form and its collision variants
+ * (`-<shortId>` and `-<shortId>-<N>`). Both the date/`undated` component and
+ * the short ID must match this annotation's own recomputed legacy base path
+ * exactly — a path that merely looks legacy-shaped with a different date is
+ * left alone rather than migrated.
+ */
+function legacyAnnotationBasenamePattern(annotation: AppleBooksAnnotation): RegExp | undefined {
+  const base = baseAnnotationNotePath(annotation);
+  const basename = base.slice(base.lastIndexOf("/") + 1);
+  const match = LEGACY_BASENAME_PARTS_PATTERN.exec(basename);
+  if (!match) {
+    return undefined;
+  }
+  const [, date, shortId] = match;
+  if (!date || !shortId) {
+    return undefined;
+  }
+  const datePart = escapeRegExp(date);
+  return new RegExp(`^${datePart}-${shortId}(?:-${shortId}(?:-\\d+)?)?\\.md$`);
+}
+
+/**
+ * A stored path only counts as legacy-opaque when it sits in exactly the
+ * same author/book/Annotations parent folder the readable scheme also uses
+ * and its basename matches one of this specific annotation's old date+hex
+ * candidates (base form or a collision variant).
+ */
+function isLegacyAnnotationPath(path: string, annotation: AppleBooksAnnotation): boolean {
+  const folder = readableAnnotationFolder(annotation);
+  if (!path.startsWith(`${folder}/`)) {
+    return false;
+  }
+  const pattern = legacyAnnotationBasenamePattern(annotation);
+  return pattern ? pattern.test(path.slice(folder.length + 1)) : false;
+}
 
 export async function importAppleBooksAnnotations(
   rawPayload: unknown,
@@ -126,21 +194,25 @@ export async function importAppleBooksAnnotations(
       occupiedPaths.add(entry.notePath);
     }
   }
-  for (const annotation of [...payload.annotations].sort((left, right) => left.annotation_id.localeCompare(right.annotation_id))) {
+  const sortedAnnotations = [...payload.annotations].sort((left, right) => left.annotation_id.localeCompare(right.annotation_id));
+  for (const annotation of sortedAnnotations) {
     const storedPath = state.annotations[annotation.annotation_id]?.notePath;
+    const isLegacy = storedPath !== undefined && isLegacyAnnotationPath(storedPath, annotation);
     if (storedPath && isSafeReadingPath(storedPath)) {
-      const storedStatus = await probeCandidate(options.vault, storedPath, annotation.annotation_id);
-      if (storedStatus !== "occupied") {
-        preferredPaths[annotation.annotation_id] = storedPath;
-        occupiedPaths.add(storedPath);
-        continue;
+      if (!isLegacy) {
+        const storedStatus = await probeCandidate(options.vault, storedPath, annotation.annotation_id);
+        if (storedStatus !== "occupied") {
+          preferredPaths[annotation.annotation_id] = storedPath;
+          occupiedPaths.add(storedPath);
+          continue;
+        }
       }
       occupiedPaths.add(storedPath);
     }
 
     let collisionIndex = 0;
     while (true) {
-      const candidate = annotationPathCandidate(annotation, collisionIndex);
+      const candidate = readableAnnotationPathCandidate(annotation, collisionIndex);
       const status = await probeCandidate(options.vault, candidate, annotation.annotation_id);
       if (status === "match") {
         preferredPaths[annotation.annotation_id] = candidate;
@@ -156,13 +228,13 @@ export async function importAppleBooksAnnotations(
       collisionIndex += 1;
     }
   }
-  const planned = new Map(planAnnotationPaths(payload.annotations, state, occupiedPaths, preferredPaths).map((item) => [item.annotationId, item.notePath]));
+  const planned = new Map(Object.entries(preferredPaths));
   let currentState = state;
   let statePersisted = false;
   let annotationFailure = false;
 
-  for (const annotation of [...payload.annotations].sort((left, right) => left.annotation_id.localeCompare(right.annotation_id))) {
-    const notePath = planned.get(annotation.annotation_id);
+  for (const annotation of sortedAnnotations) {
+    let notePath = planned.get(annotation.annotation_id);
     if (!notePath) {
       annotationFailure = true;
       failures.push({ annotationId: annotation.annotation_id, stage: "validation", message: "No safe note path could be allocated." });
@@ -170,46 +242,70 @@ export async function importAppleBooksAnnotations(
     }
     const contentHash = annotationContentHash(annotation);
     const previous = currentState.annotations[annotation.annotation_id];
-    const existing = options.vault.get(notePath);
-    if (previous?.contentHash === contentHash && existing) {
+    let existing = options.vault.get(notePath);
+    if (previous?.contentHash === contentHash && previous.notePath === notePath && existing) {
       const existingText = await options.vault.read(existing);
-      const durableStatus = readFrontmatterValue(existingText, "research_status");
-      if (previous.researchStatus === "too-short" || annotationIsTooShort(annotation)) {
-        if (durableStatus !== "too-short") {
-          await options.vault.modify(existing, replaceFrontmatterScalar(existingText, "research_status", "too-short"));
-        }
-      } else if (durableStatus === "complete" && previous.researchStatus !== "complete") {
-        const { state: adopted } = await options.state.mutate((state) => {
-          const entry = state.annotations[annotation.annotation_id];
-          if (entry && entry.researchStatus !== "complete") {
-            entry.researchStatus = "complete";
-            entry.processedAt = null;
+      if (!noteNeedsFormatCleanup(existingText, annotation)) {
+        const durableStatus = readFrontmatterValue(existingText, "research_status");
+        if (previous.researchStatus === "too-short" || annotationIsTooShort(annotation)) {
+          if (durableStatus !== "too-short") {
+            await options.vault.modify(existing, replaceFrontmatterScalar(existingText, "research_status", "too-short"));
           }
+        } else if (durableStatus === "complete" && previous.researchStatus !== "complete") {
+          const { state: adopted } = await options.state.mutate((state) => {
+            const entry = state.annotations[annotation.annotation_id];
+            if (entry && entry.researchStatus !== "complete") {
+              entry.researchStatus = "complete";
+              entry.processedAt = null;
+            }
+          });
+          currentState = adopted;
+        }
+        imported.push({
+          annotationId: annotation.annotation_id,
+          notePath,
+          action: "unchanged",
+          tooShort: currentState.annotations[annotation.annotation_id]?.researchStatus === "too-short",
+          eligible: currentState.annotations[annotation.annotation_id]?.researchStatus !== "too-short",
         });
-        currentState = adopted;
+        continue;
       }
-      imported.push({
-        annotationId: annotation.annotation_id,
-        notePath,
-        action: "unchanged",
-        tooShort: currentState.annotations[annotation.annotation_id]?.researchStatus === "too-short",
-        eligible: currentState.annotations[annotation.annotation_id]?.researchStatus !== "too-short",
-      });
-      continue;
     }
 
     try {
-      const existingText = existing ? await options.vault.read(existing) : "";
+      const migrationSourcePath = previous && previous.notePath !== notePath ? previous.notePath : undefined;
+      const oldEntry = migrationSourcePath ? options.vault.get(migrationSourcePath) : null;
+      const readEntry = oldEntry ?? existing;
+
+      const existingText = readEntry ? await options.vault.read(readEntry) : "";
       const tooShort = annotationIsTooShort(annotation);
       const importedAt = previous?.importedAt ?? readFrontmatterValue(existingText, "imported_at") ?? syncAt;
       const sourceChanged = Boolean(previous && previous.contentHash !== contentHash);
       const researchStatus = sourceChanged && !tooShort ? "off" : chooseResearchStatus(annotation, previous, existingText);
       const processedAt = previous && previous.contentHash !== contentHash ? null : previous?.processedAt ?? null;
+      // Render (and thus validate) before touching the Vault at all, so an incomplete-marker
+      // refusal never leaves a rename half-done or the old stable path/state disturbed.
       const noteText = renderAnnotationNote(existingText, annotation, {
         importedAt,
         researchStatus,
       });
-      await ensureVaultFolders(options.vault, notePath);
+
+      if (oldEntry && migrationSourcePath) {
+        try {
+          await ensureVaultFolders(options.vault, notePath);
+          await options.vault.rename(oldEntry, notePath);
+          // A fresh lookup can transiently miss right after a successful rename (e.g. Obsidian's
+          // vault index catching up); fall back to the renamed file's own raw reference rather
+          // than treating a null lookup as "nothing here" and creating a duplicate.
+          existing = options.vault.get(notePath) ?? { path: notePath, raw: oldEntry.raw };
+        } catch {
+          notePath = migrationSourcePath;
+          existing = oldEntry;
+        }
+      }
+
+      const resolvedNotePath: string = notePath;
+      await ensureVaultFolders(options.vault, resolvedNotePath);
       let action: ImportedAnnotationResult["action"] = existing ? "updated" : "created";
       if (existing) {
         if (noteText !== existingText) {
@@ -218,14 +314,14 @@ export async function importAppleBooksAnnotations(
           action = "unchanged";
         }
       } else {
-        await options.vault.create(notePath, noteText);
+        await options.vault.create(resolvedNotePath, noteText);
       }
 
       try {
         const { state: nextState } = await options.state.mutate((freshState) => {
           freshState.annotations[annotation.annotation_id] = {
             contentHash,
-            notePath,
+            notePath: resolvedNotePath,
             importedAt,
             researchStatus,
             processedAt,
@@ -240,7 +336,7 @@ export async function importAppleBooksAnnotations(
       statePersisted = true;
       imported.push({
         annotationId: annotation.annotation_id,
-        notePath,
+        notePath: resolvedNotePath,
         action,
         tooShort,
         eligible: !tooShort,
@@ -262,27 +358,33 @@ export async function importAppleBooksAnnotations(
     }
   }
 
+  // A note/state failure earlier in this pass can leave currentState only partially advanced
+  // (e.g. a rename succeeded but its state save did not). Rebuilding indexes from that stale
+  // mix would write a wrong path into a book index; skip entirely and let the next successful
+  // sync (after the failed entry is adopted) regenerate indexes from a fully consistent state.
   const indexPaths: string[] = [];
-  for (const bookFolder of [...new Set(Object.values(currentState.annotations).map((entry) => bookFolderForNotePath(entry.notePath)))].sort()) {
-    try {
-      const indexPath = bookIndexPath(bookFolder);
-      const existing = options.vault.get(indexPath);
-      const existingText = existing ? await options.vault.read(existing) : "";
-      const entries = Object.entries(currentState.annotations)
-        .filter(([, entry]) => bookFolderForNotePath(entry.notePath) === bookFolder)
-        .sort((left, right) => left[1].notePath.localeCompare(right[1].notePath));
-      const indexText = upsertManagedBlock(existingText, READING_INDEX_START, READING_INDEX_END, renderIndexBlock(entries));
-      await ensureVaultFolders(options.vault, indexPath);
-      if (existing) {
-        if (indexText !== existingText) {
-          await options.vault.modify(existing, indexText);
+  if (!annotationFailure) {
+    for (const bookFolder of [...new Set(Object.values(currentState.annotations).map((entry) => bookFolderForNotePath(entry.notePath)))].sort()) {
+      try {
+        const indexPath = bookIndexPath(bookFolder);
+        const existing = options.vault.get(indexPath);
+        const existingText = existing ? await options.vault.read(existing) : "";
+        const entries = Object.entries(currentState.annotations)
+          .filter(([, entry]) => bookFolderForNotePath(entry.notePath) === bookFolder)
+          .sort((left, right) => left[1].notePath.localeCompare(right[1].notePath));
+        const indexText = upsertManagedBlock(existingText, READING_INDEX_START, READING_INDEX_END, renderIndexBlock(entries));
+        await ensureVaultFolders(options.vault, indexPath);
+        if (existing) {
+          if (indexText !== existingText) {
+            await options.vault.modify(existing, indexText);
+          }
+        } else {
+          await options.vault.create(indexPath, indexText);
         }
-      } else {
-        await options.vault.create(indexPath, indexText);
+        indexPaths.push(indexPath);
+      } catch (error) {
+        failures.push({ stage: "index", message: errorMessage(error) });
       }
-      indexPaths.push(indexPath);
-    } catch (error) {
-      failures.push({ stage: "index", message: errorMessage(error) });
     }
   }
 
@@ -294,19 +396,26 @@ export function renderAnnotationNote(
   annotation: AppleBooksAnnotation,
   values: Pick<ReadingStateEntry, "importedAt" | "researchStatus">,
 ): string {
-  const frontmatter = upsertManagedFrontmatter(existingText, {
+  const withoutGenerated = removeFrontmatterKeysFromText(existingText, GENERATED_FRONTMATTER_KEYS);
+  const withReadableLinks = convertFrontmatterWikilinkLists(withoutGenerated);
+  const frontmatter = upsertManagedFrontmatter(withReadableLinks, {
     type: "apple-books-annotation",
     source: "apple-books",
     annotation_id: annotation.annotation_id,
     book_title: annotation.book_title,
     book_author: annotation.author ?? "",
     chapter: annotation.chapter ?? "",
+    location: annotation.location ?? "",
     created_at: annotation.created_at ?? "",
     imported_at: values.importedAt,
     research_status: values.researchStatus,
   });
   const parts = splitFrontmatter(frontmatter);
-  return composeFrontmatter(parts.frontmatter, upsertManagedBlock(parts.body, READING_SOURCE_START, READING_SOURCE_END, renderSourceBlock(annotation)));
+  const sourceResult = replaceLeadingAnnotationSource(parts.body, annotation);
+  if (!sourceResult.ok) {
+    throw new Error(`Cannot update Apple Books source: ${sourceResult.reason}`);
+  }
+  return composeFrontmatter(parts.frontmatter, sourceResult.text);
 }
 
 async function probeCandidate(vault: ReadingVault, candidate: string, annotationId: string): Promise<"free" | "match" | "occupied"> {
@@ -404,24 +513,168 @@ function yamlScalar(value: string): string {
     : JSON.stringify(value);
 }
 
-function renderSourceBlock(annotation: AppleBooksAnnotation): string {
-  const lines = [
-    READING_SOURCE_START,
-    "## Apple Books Source",
-    "> **Quote**",
-    ...blockquote(annotation.quote),
-  ];
-  if (annotation.user_note) {
-    lines.push("> **Note**", ...blockquote(annotation.user_note));
+function removeFrontmatterKeysFromText(text: string, keys: readonly string[]): string {
+  const parts = splitFrontmatter(text);
+  if (!parts.frontmatter) {
+    return text;
   }
-  if (annotation.location) {
-    lines.push(`> **Location:** ${escapeInline(annotation.location)}`);
+  return composeFrontmatter(removeFrontmatterKeys(parts.frontmatter.split("\n"), keys).join("\n"), parts.body);
+}
+
+function removeFrontmatterKeys(lines: string[], keys: readonly string[]): string[] {
+  const keySet = new Set(keys);
+  const result: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (skipping && /^[ \t]/.test(line)) {
+      continue;
+    }
+    skipping = false;
+    const match = /^([A-Za-z0-9_-]+)\s*:/.exec(line);
+    if (match && keySet.has(match[1] ?? "")) {
+      skipping = true;
+      continue;
+    }
+    result.push(line);
   }
-  if (annotation.chapter) {
-    lines.push(`> **Chapter:** ${escapeInline(annotation.chapter)}`);
+  return result;
+}
+
+function isAlreadyWikilink(value: string): boolean {
+  return /^\[\[[^[\]]*(\|[^[\]]*)?\]\]$/.test(value);
+}
+
+const WIKILINK_TARGET_PATTERN = /^\[\[([^[\]|]*)(?:\|[^[\]]*)?\]\]$/;
+
+function wikilinkTarget(value: string): string | undefined {
+  return WIKILINK_TARGET_PATTERN.exec(value)?.[1];
+}
+
+/** relatedNoteWikilink strips the .md extension for display; isSafeRelatedTarget expects it back to validate the underlying vault path. */
+function isSafeExistingRelatedWikilink(raw: string): boolean {
+  const target = wikilinkTarget(raw);
+  return target !== undefined && isSafeRelatedTarget(`${target}.md`);
+}
+
+function unquoteYamlScalar(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
   }
-  lines.push(READING_SOURCE_END);
-  return lines.join("\n");
+  if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1).replace(/''/g, "'");
+  }
+  return trimmed;
+}
+
+function yamlDoubleQuoted(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
+}
+
+/**
+ * Converts a plain YAML block list (ruamel's default `key:\n  - value`
+ * shape) of raw concept/related values into readable wikilinks. Any other
+ * shape (inline flow list, scalar value, empty block, missing key) is left
+ * completely untouched rather than guessed at, so frontmatter never gets
+ * corrupted. Items already in wikilink form are passed through unchanged
+ * (byte-for-byte) so repeated imports stay idempotent, unless `keepExisting`
+ * rejects one (e.g. an existing related link whose target is no longer
+ * safe), in which case it is dropped rather than preserved or re-derived.
+ */
+function convertBlockList(
+  lines: string[],
+  key: string,
+  transform: (raw: string) => string | undefined,
+  keepExisting: (raw: string) => boolean = () => true,
+): string[] {
+  const headerIndex = lines.findIndex((line) => new RegExp(`^${key}\\s*:\\s*$`).test(line));
+  if (headerIndex < 0) {
+    return lines;
+  }
+  let end = headerIndex + 1;
+  const items: string[] = [];
+  while (end < lines.length) {
+    const match = /^ {2}-\s?(.*)$/.exec(lines[end] ?? "");
+    if (!match) break;
+    items.push(unquoteYamlScalar(match[1] ?? ""));
+    end += 1;
+  }
+  if (items.length === 0) {
+    return lines;
+  }
+  const seen = new Set<string>();
+  const converted: string[] = [];
+  for (const raw of items) {
+    const value = isAlreadyWikilink(raw) ? (keepExisting(raw) ? raw : undefined) : transform(raw);
+    if (value && !seen.has(value)) {
+      seen.add(value);
+      converted.push(value);
+    }
+  }
+  const replacement = converted.length > 0
+    ? [`${key}:`, ...converted.map((value) => `  - ${yamlDoubleQuoted(value)}`)]
+    : [];
+  return [...lines.slice(0, headerIndex), ...replacement, ...lines.slice(end)];
+}
+
+function convertFrontmatterWikilinkLists(text: string): string {
+  const parts = splitFrontmatter(text);
+  if (!parts.frontmatter) {
+    return text;
+  }
+  let lines = parts.frontmatter.split("\n");
+  lines = convertBlockList(lines, "concepts", conceptWikilink);
+  lines = convertBlockList(lines, "related", relatedNoteWikilink, isSafeExistingRelatedWikilink);
+  return composeFrontmatter(lines.join("\n"), parts.body);
+}
+
+/**
+ * True when a note's stored content still needs a full render pass even
+ * though its Apple Books source content hash is unchanged: an old marker
+ * (including an orphan end marker with no start), leftover generated
+ * summary/tags, a concepts/related block list still holding a raw
+ * (non-wikilink) value or an existing related wikilink whose target is no
+ * longer safe, or a missing/outdated managed `location` field. A genuinely
+ * clean, up-to-date note returns false so the unchanged fast path stays a
+ * true no-op.
+ */
+function noteNeedsFormatCleanup(existingText: string, annotation: AppleBooksAnnotation): boolean {
+  if (existingText.includes(READING_SOURCE_START) || existingText.includes(READING_SOURCE_END)) {
+    return true;
+  }
+  const frontmatter = splitFrontmatter(existingText).frontmatter;
+  if (!frontmatter) {
+    return false;
+  }
+  const lines = frontmatter.split("\n");
+  if (lines.some((line) => /^(?:summary|tags)\s*:/.test(line))) {
+    return true;
+  }
+  if (blockListNeedsCleanup(lines, "concepts", isAlreadyWikilink)) {
+    return true;
+  }
+  if (blockListNeedsCleanup(lines, "related", (value) => isAlreadyWikilink(value) && isSafeExistingRelatedWikilink(value))) {
+    return true;
+  }
+  const currentLocation = readFrontmatterValue(existingText, "location") ?? "";
+  return currentLocation !== (annotation.location ?? "");
+}
+
+function blockListNeedsCleanup(lines: string[], key: string, isItemClean: (raw: string) => boolean): boolean {
+  const headerIndex = lines.findIndex((line) => new RegExp(`^${key}\\s*:\\s*$`).test(line));
+  if (headerIndex < 0) {
+    return false;
+  }
+  let index = headerIndex + 1;
+  while (index < lines.length) {
+    const match = /^ {2}-\s?(.*)$/.exec(lines[index] ?? "");
+    if (!match) break;
+    if (!isItemClean(unquoteYamlScalar(match[1] ?? ""))) {
+      return true;
+    }
+    index += 1;
+  }
+  return false;
 }
 
 function renderIndexBlock(entries: Array<[string, ReadingStateEntry]>): string {
@@ -433,10 +686,6 @@ function renderIndexBlock(entries: Array<[string, ReadingStateEntry]>): string {
   }
   lines.push(READING_INDEX_END);
   return lines.join("\n");
-}
-
-function blockquote(value: string): string[] {
-  return value.replace(/\r\n?/g, "\n").split("\n").map((line) => `> ${line.replace(/```/g, "\\`\\`\\`")}`);
 }
 
 function escapeInline(value: string): string {
