@@ -14,18 +14,27 @@ export function validateSynthesis(synthesis: string, sources: ResearchSource[]):
   return trimmed;
 }
 
-export function renderResearchBlock(result: ResearchResult): string | null {
-  const synthesis = validateSynthesis(result.synthesis, result.sources);
-  if (!synthesis) return null;
-  const lines = [RESEARCH_START, "## Research", synthesis, "", "### Sources"];
-  for (const [index, source] of result.sources.entries()) {
+function renderSourceLines(sources: ResearchSource[]): string[] {
+  const lines: string[] = [];
+  for (const [index, source] of sources.entries()) {
     lines.push(`${index + 1}. [${escapeLinkText(source.title)}](<${source.url}>)`);
     if (source.author) lines.push(`   Author: ${source.author}`);
     if (source.publishedAt) lines.push(`   Published: ${source.publishedAt}`);
     lines.push(`   Retrieved: ${source.retrievedAt}`);
   }
-  lines.push(RESEARCH_END);
-  return lines.join("\n");
+  return lines;
+}
+
+export function renderResearchBlock(result: ResearchResult): string | null {
+  const synthesis = validateSynthesis(result.synthesis, result.sources);
+  if (!synthesis) return null;
+  return [RESEARCH_START, "## Research", synthesis, "", "### Sources", ...renderSourceLines(result.sources), RESEARCH_END].join("\n");
+}
+
+export function renderCompanionResearchContent(result: ResearchResult): string | null {
+  const synthesis = validateSynthesis(result.synthesis, result.sources);
+  if (!synthesis) return null;
+  return [synthesis, "", "## Sources", ...renderSourceLines(result.sources)].join("\n");
 }
 
 export async function writeResearch(vault: ReadingVault, note: VaultEntry, result: ResearchResult): Promise<boolean> {

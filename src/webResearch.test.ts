@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { ExaResearchProvider } from "./exaResearchProvider";
 import { getExaCredential } from "./keychainCredential";
-import { RESEARCH_END, RESEARCH_START, renderResearchBlock, upsertResearchBlock } from "./researchWriter";
+import { RESEARCH_END, RESEARCH_START, renderCompanionResearchContent, renderResearchBlock, upsertResearchBlock } from "./researchWriter";
 import { researchNote } from "./webResearch";
 import type { ReadingVault, VaultEntry } from "./readingVault";
 
@@ -118,4 +118,40 @@ test("replacing research preserves exact prefix and suffix bytes", () => {
   const replaced = upsertResearchBlock(original, block);
   assert.ok(replaced.startsWith(prefix));
   assert.ok(replaced.endsWith(suffix));
+});
+
+test("renderCompanionResearchContent uses ## Sources (not ### Sources) and omits markers", () => {
+  const content = renderCompanionResearchContent({
+    synthesis: "Claim [1]",
+    sources: [{ title: "Good", url: "https://example.com", author: "Author", publishedAt: "2026-01-01T00:00:00Z", retrievedAt: "2026-01-02T00:00:00Z", highlights: [] }],
+  });
+  assert.ok(content);
+  assert.ok(content.includes("## Sources"));
+  assert.ok(!content.includes("### Sources"));
+  assert.ok(!content.includes("## Research"));
+  assert.ok(!content.includes(RESEARCH_START));
+  assert.ok(!content.includes(RESEARCH_END));
+  assert.ok(content.includes("Author: Author"));
+  assert.ok(content.includes("Published: 2026-01-01T00:00:00Z"));
+});
+
+test("renderCompanionResearchContent and renderResearchBlock share identical source list format", () => {
+  const result = { synthesis: "Claim [1] [2]", sources: [
+    { title: "First", url: "https://example.com/a", author: "A", retrievedAt: "2026-01-01T00:00:00Z", highlights: [] },
+    { title: "Second", url: "https://example.com/b", publishedAt: "2025-06-01T00:00:00Z", retrievedAt: "2026-01-01T00:00:00Z", highlights: [] },
+  ] };
+  const inline = renderResearchBlock(result)!;
+  const companion = renderCompanionResearchContent(result)!;
+  const inlineSources = inline.split("### Sources\n")[1]?.split(`\n${RESEARCH_END}`)[0] ?? "";
+  const companionSources = companion.split("## Sources\n")[1] ?? "";
+  assert.equal(inlineSources, companionSources);
+});
+
+test("renderResearchBlock output is byte-identical to the original format", () => {
+  const result = { synthesis: "Claim [1]", sources: [{ title: "Good", url: "https://example.com", retrievedAt: "2026-01-01T00:00:00Z", highlights: [] }] };
+  const block = renderResearchBlock(result)!;
+  assert.ok(block.startsWith(RESEARCH_START));
+  assert.ok(block.endsWith(RESEARCH_END));
+  assert.ok(block.includes("## Research"));
+  assert.ok(block.includes("### Sources"));
 });
