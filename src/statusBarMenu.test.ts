@@ -108,8 +108,35 @@ void test("reading status is visibly distinct and exposes experimental toggle", 
   const titles = buildStatusBarMenuItems(state({ readingMode: "reading", readingPending: 3, readingUnresearchable: 2 })).map((item) => item.title);
   assert.ok(titles.includes("Reading Mode (experimental)"));
   assert.ok(titles.includes("Sync Reading Mode now"));
+  assert.ok(titles.includes("Process Reading backlog (3)"));
   assert.ok(titles.includes("Reading pending: 3"));
   assert.ok(titles.includes("Reading unresearchable: 2"));
+});
+
+void test("process reading backlog action disabled at zero pending and while busy", () => {
+  const empty = buildStatusBarMenuItems(state({ readingMode: "reading", readingPending: 0 }));
+  const backlogEmpty = empty.find((item) => item.title === "Process Reading backlog (0)");
+  assert.ok(backlogEmpty);
+  assert.equal(backlogEmpty?.disabled, true);
+
+  const syncing = buildStatusBarMenuItems(state({ readingMode: "reading", readingPending: 2, readingActivity: "syncing" }));
+  assert.equal(syncing.find((item) => item.title === "Process Reading backlog (2)")?.disabled, true);
+
+  const processing = buildStatusBarMenuItems(state({ readingMode: "reading", readingPending: 2, readingActivity: "processing" }));
+  assert.equal(processing.find((item) => item.title === "Process Reading backlog (2)")?.disabled, true);
+
+  const running = buildStatusBarMenuItems(state({ readingMode: "reading", readingPending: 2, running: true }));
+  assert.equal(running.find((item) => item.title === "Process Reading backlog (2)")?.disabled, true);
+
+  const researchBusy = buildStatusBarMenuItems(state({ readingMode: "reading", readingPending: 2, webResearchActivity: "writing" }));
+  assert.equal(researchBusy.find((item) => item.title === "Process Reading backlog (2)")?.disabled, true);
+
+  const ready = buildStatusBarMenuItems(state({ readingMode: "reading", readingPending: 2, readingActivity: "ready" }));
+  assert.equal(ready.find((item) => item.title === "Process Reading backlog (2)")?.disabled, false);
+  assert.equal(ready.find((item) => item.title === "Process Reading backlog (2)")?.action, "processReadingBacklog");
+
+  const standard = buildStatusBarMenuItems(state({ readingMode: "standard" }));
+  assert.equal(standard.some((item) => item.title.includes("Process Reading backlog")), false);
 });
 
 void test("reading errors are actionable and Web Research copy matches Reading Mode", () => {

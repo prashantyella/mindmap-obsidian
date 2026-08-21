@@ -44,6 +44,20 @@ export function selectAutomaticResearchCandidates(entries: Record<string, Readin
     .sort((left, right) => left.annotationId.localeCompare(right.annotationId));
 }
 
+export function selectSyncResearchCandidates(
+  imported: ReadonlyArray<{ annotationId: string; notePath: string; action: "created" | "updated" | "unchanged"; eligible: boolean }>,
+  entries: Record<string, ReadingStateEntry>,
+): AutomaticResearchCandidate[] {
+  return imported
+    .filter((item) => item.eligible && item.action !== "unchanged")
+    .filter((item) => {
+      const entry = entries[item.annotationId];
+      return entry && (entry.researchStatus === "off" || entry.researchStatus === "retryable");
+    })
+    .map((item) => ({ annotationId: item.annotationId, notePath: item.notePath, eligible: true, action: item.action }))
+    .sort((left, right) => left.annotationId.localeCompare(right.annotationId));
+}
+
 /**
  * Keeps automatic provider work and its single durable lifecycle transition
  * together. This module has no UI dependency, so automatic callers remain

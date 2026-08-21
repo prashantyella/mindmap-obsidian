@@ -160,6 +160,7 @@ export interface StatusBarMenuActions {
   openSettings(): void;
   toggleReadingMode(): void | Promise<void>;
   syncReadingMode(): void | Promise<void>;
+  processReadingBacklog(): void | Promise<void>;
   toggleWebResearchMode(): void | Promise<void>;
   researchSelectedText(): void | Promise<void>;
   researchActiveNote(): void | Promise<void>;
@@ -302,6 +303,12 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       : { title: "Reading Mode is off (experimental)", icon: "book-open", disabled: true },
     ...(state.readingMode === "reading" ? [
       { title: "Sync Reading Mode now", icon: "refresh-cw" as IconName, action: "syncReadingMode" as const, disabled: state.readingActivity === "syncing" || state.readingActivity === "processing" },
+      {
+        title: `Process Reading backlog (${state.readingPending})`,
+        icon: "list-checks" as IconName,
+        action: "processReadingBacklog" as const,
+        disabled: state.readingPending === 0 || state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy,
+      },
       { title: `Reading pending: ${state.readingPending}`, disabled: true },
       { title: `Reading unresearchable: ${state.readingUnresearchable}`, disabled: true },
       { title: state.readingLastSyncAt ? `Reading last sync: ${state.readingLastSyncAt}` : "Reading has not synced yet", disabled: true },

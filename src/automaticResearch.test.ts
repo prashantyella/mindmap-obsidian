@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { commitAutomaticResearchAttempt, pauseReasonFor, persistAutomaticResearchOutcome, runAutomaticResearch, selectAutomaticResearchCandidates, TerminalAutomaticResearchError } from "./automaticResearch";
+import { commitAutomaticResearchAttempt, pauseReasonFor, persistAutomaticResearchOutcome, runAutomaticResearch, selectAutomaticResearchCandidates, selectSyncResearchCandidates, TerminalAutomaticResearchError } from "./automaticResearch";
 import { createAutomaticResearchPolicy, type AutomaticResearchPolicyState } from "./automaticResearchPolicy";
 import { WebResearchError } from "./webResearchTypes";
 
@@ -153,4 +153,25 @@ test("automatic attempt rejects when complete or retryable lifecycle status cann
     () => commitAutomaticResearchAttempt({ runResearch: async () => false, updateStatus: async () => false }),
     /status could not be applied/,
   );
+});
+
+test("selectSyncResearchCandidates scopes to eligible created/updated items with valid research status", () => {
+  const entries = {
+    a: { notePath: "a.md", contentHash: "h", importedAt: "now", researchStatus: "off" as const, processedAt: null },
+    b: { notePath: "b.md", contentHash: "h", importedAt: "now", researchStatus: "complete" as const, processedAt: null },
+    c: { notePath: "c.md", contentHash: "h", importedAt: "now", researchStatus: "retryable" as const, processedAt: null },
+    d: { notePath: "d.md", contentHash: "h", importedAt: "now", researchStatus: "off" as const, processedAt: null },
+    e: { notePath: "e.md", contentHash: "h", importedAt: "now", researchStatus: "too-short" as const, processedAt: null },
+  };
+  const imported = [
+    { annotationId: "a", notePath: "a.md", action: "created" as const, eligible: true },
+    { annotationId: "b", notePath: "b.md", action: "created" as const, eligible: true },
+    { annotationId: "c", notePath: "c.md", action: "updated" as const, eligible: true },
+    { annotationId: "d", notePath: "d.md", action: "unchanged" as const, eligible: true },
+    { annotationId: "e", notePath: "e.md", action: "created" as const, eligible: false },
+  ];
+  const result = selectSyncResearchCandidates(imported, entries);
+  assert.deepEqual(result.map((r) => r.annotationId), ["a", "c"]);
+  assert.equal(result[0]?.action, "created");
+  assert.equal(result[1]?.action, "updated");
 });

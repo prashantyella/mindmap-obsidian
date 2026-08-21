@@ -6,6 +6,7 @@ import {
   baseAnnotationNotePath,
   createEmptyReadingState,
   isSafeReadingPath,
+  parseReadingState,
   planAnnotationPaths,
   sanitizePathComponent,
   validateAppleBooksReaderPayload,
@@ -97,4 +98,28 @@ test("keeps a preferred path even when it is not present in persisted state", ()
 test("uses quote and note word count for the eight-word eligibility threshold", () => {
   assert.equal(annotationIsTooShort(annotation({ quote: "one two three", user_note: "four five" })), true);
   assert.equal(annotationIsTooShort(annotation({ quote: "one two three four", user_note: "five six seven eight" })), false);
+});
+
+test("new-format state with explicit null initialImportCompletedAt stays incomplete", () => {
+  const raw = { version: 1, lastSyncAt: "2026-08-17T01:00:00Z", initialImportCompletedAt: null, annotations: {} };
+  const parsed = parseReadingState(raw);
+  assert.equal(parsed.initialImportCompletedAt, null);
+});
+
+test("legacy state without initialImportCompletedAt property infers completion from lastSyncAt", () => {
+  const raw = { version: 1, lastSyncAt: "2026-08-17T01:00:00Z", annotations: {} };
+  const parsed = parseReadingState(raw);
+  assert.equal(parsed.initialImportCompletedAt, "2026-08-17T01:00:00Z");
+});
+
+test("legacy state without lastSyncAt remains incomplete", () => {
+  const raw = { version: 1, lastSyncAt: null, annotations: {} };
+  const parsed = parseReadingState(raw);
+  assert.equal(parsed.initialImportCompletedAt, null);
+});
+
+test("createEmptyReadingState emits initialImportCompletedAt as null", () => {
+  const state = createEmptyReadingState();
+  assert.equal(state.initialImportCompletedAt, null);
+  assert.ok("initialImportCompletedAt" in state);
 });

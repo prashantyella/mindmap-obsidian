@@ -16,6 +16,8 @@ import {
   annotationContentHash,
   annotationPathCandidate,
   baseAnnotationNotePath,
+  bookFolderForNotePath,
+  bookIndexPath,
   createEmptyReadingState,
   isValidResearchPathForNote,
   READING_INDEX_END,
@@ -106,15 +108,18 @@ class MemoryVault implements ReadingVault {
 class MemoryState implements ReadingStateStore {
   current: ReadingState = createEmptyReadingState();
   saves = 0;
+  saveAttempts = 0;
   failSave = false;
   failNextSave = false;
+  failOnSaveAttempt: number | null = null;
 
   async load(): Promise<ReadingState> {
     return cloneState(this.current);
   }
 
   async save(state: ReadingState): Promise<void> {
-    if (this.failSave || this.failNextSave) {
+    this.saveAttempts += 1;
+    if (this.failSave || this.failNextSave || this.saveAttempts === this.failOnSaveAttempt) {
       this.failNextSave = false;
       throw new Error("state save failed");
     }
@@ -232,6 +237,44 @@ test("imports one note with a readable filename, leading blockquote body, and lo
   assert.match(vault.files.get(indexPath) ?? "", new RegExp(READING_INDEX_START));
   assert.match(vault.files.get(indexPath) ?? "", new RegExp(READING_INDEX_END));
   assert.equal(state.current.annotations["id-1"]?.notePath, notePath);
+  assert.equal(result.initialImport, true);
+  assert.equal(state.current.initialImportCompletedAt, "2026-08-17T01:00:00Z");
+
+  const second = await runImport(vault, state, [source], "2026-08-18T01:00:00Z");
+  assert.equal(second.initialImport, false);
+});
+
+test("index failure leaves initial import incomplete until a fully successful retry", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("initial-index-failure");
+  const indexPath = bookIndexPath(bookFolderForNotePath(readablePath(source)));
+  vault.failCreatePath = indexPath;
+
+  const failed = await runImport(vault, state, [source]);
+  assert.equal(failed.initialImport, true);
+  assert.equal(failed.failures.some((failure) => failure.stage === "index"), true);
+  assert.equal(state.current.initialImportCompletedAt, null);
+
+  vault.failCreatePath = null;
+  const retried = await runImport(vault, state, [source], "2026-08-18T01:00:00Z");
+  assert.equal(retried.initialImport, true);
+  assert.equal(retried.failures.length, 0);
+  assert.equal(state.current.initialImportCompletedAt, "2026-08-18T01:00:00Z");
+});
+
+test("completion-marker save failure preserves explicit incomplete state", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("initial-marker-failure");
+  state.failOnSaveAttempt = 3;
+
+  const result = await runImport(vault, state, [source]);
+  assert.equal(result.initialImport, true);
+  assert.equal(result.failures.some((failure) => failure.stage === "state"), true);
+  assert.equal(state.current.lastSyncAt, "2026-08-17T01:00:00Z");
+  assert.equal(state.current.initialImportCompletedAt, null);
+  assert.equal(parseReadingState(state.current).initialImportCompletedAt, null);
 });
 
 test("keeps the allocated readable path stable even when a later edit would derive a different title", async () => {

@@ -63,6 +63,7 @@ export interface ReadingStateEntry {
 export interface ReadingState {
   version: typeof READING_STATE_VERSION;
   lastSyncAt: string | null;
+  initialImportCompletedAt: string | null;
   annotations: Record<string, ReadingStateEntry>;
 }
 
@@ -199,7 +200,7 @@ export function validateAppleBooksReaderPayload(value: unknown): AppleBooksReade
 }
 
 export function createEmptyReadingState(): ReadingState {
-  return { version: READING_STATE_VERSION, lastSyncAt: null, annotations: {} };
+  return { version: READING_STATE_VERSION, lastSyncAt: null, initialImportCompletedAt: null, annotations: {} };
 }
 
 export function isSafeReadingPath(value: string): boolean {
@@ -247,7 +248,20 @@ export function parseReadingState(value: unknown): ReadingState {
       ...(validResearchPath ? { researchPath: validResearchPath } : {}),
     };
   }
-  return { version: READING_STATE_VERSION, lastSyncAt: value.lastSyncAt, annotations };
+  const hasInitialImportProperty = "initialImportCompletedAt" in (value as Record<string, unknown>);
+  let initialImportCompletedAt: string | null;
+  if (hasInitialImportProperty) {
+    const raw = (value as Record<string, unknown>).initialImportCompletedAt;
+    initialImportCompletedAt = typeof raw === "string" && raw.trim() ? raw : null;
+  } else {
+    initialImportCompletedAt = typeof value.lastSyncAt === "string" ? value.lastSyncAt : null;
+  }
+  return {
+    version: READING_STATE_VERSION,
+    lastSyncAt: value.lastSyncAt,
+    initialImportCompletedAt,
+    annotations,
+  };
 }
 
 export function sanitizePathComponent(value: string | undefined, fallback: string): string {

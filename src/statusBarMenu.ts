@@ -88,6 +88,8 @@ function addMenuItem(menu: Menu, descriptor: StatusBarMenuItemDescriptor, action
           void actions.toggleReadingMode();
         } else if (action === "syncReadingMode") {
           void actions.syncReadingMode();
+        } else if (action === "processReadingBacklog") {
+          void actions.processReadingBacklog();
         } else if (action === "toggleWebResearchMode") {
           void actions.toggleWebResearchMode();
         } else if (action === "researchSelectedText") {

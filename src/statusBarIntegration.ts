@@ -61,6 +61,7 @@ export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMe
     },
     toggleReadingMode: async () => { await plugin.toggleReadingMode(); },
     syncReadingMode: async () => { await plugin.syncReadingMode(); },
+    processReadingBacklog: async () => { await plugin.processReadingBacklog(); },
     toggleWebResearchMode: async () => { await plugin.toggleWebResearchMode(); },
     researchSelectedText: async () => { await plugin.researchSelectedText(); },
     researchActiveNote: async () => { await plugin.researchActiveNote(); },

@@ -12,7 +12,7 @@ import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { discoverAppleBooksDatabasePaths } from "./appleBooksDiscovery";
 import { classifyResearchTarget, completeAppleAnnotationResearchForNote, importAppleBooksAnnotations, updateAppleAnnotationResearchStatus, writeAppleAnnotationCompanion } from "./appleBooksImport";
 import { clearTransientAutomaticPause, createAutomaticResearchPolicy, createAutomaticResearchPolicyStore, loadAutomaticResearchPolicySafely, localResearchDay, type AutomaticResearchPolicyState, type AutomaticResearchPolicyStore } from "./automaticResearchPolicy";
-import { persistAutomaticResearchOutcome, runAutomaticResearch, selectAutomaticResearchCandidates } from "./automaticResearch";
+import { persistAutomaticResearchOutcome, runAutomaticResearch, selectSyncResearchCandidates } from "./automaticResearch";
 import { ExaResearchProvider } from "./exaResearchProvider";
 import { getExaCredential } from "./keychainCredential";
 import { createConfiguredLocalResearchModel } from "./localResearchModel";
@@ -367,11 +367,29 @@ export default class MindmapPlugin extends Plugin {
       await this.readingModeController.disable();
       return;
     }
-    await this.readingModeController.enable();
+    const outcome = await this.readingModeController.enable();
+    if (outcome.enabled && outcome.initialImport) {
+      const health = this.readingModeController.getHealth();
+      if (health.pendingCount > 0) {
+        const shouldProcess = await confirmMindmapRun(this.app, {
+          title: "Process Reading backlog?",
+          message: `${health.pendingCount} annotation${health.pendingCount === 1 ? "" : "s"} ready for processing. Process them now?`,
+          confirmText: "Process now",
+          confirmClass: "mod-cta",
+        });
+        if (shouldProcess) {
+          await this.readingModeController.processBacklog();
+        }
+      }
+    }
   }
 
   async syncReadingMode(): Promise<void> {
     await this.readingModeController?.syncNow();
+  }
+
+  async processReadingBacklog(): Promise<void> {
+    await this.readingModeController?.processBacklog();
   }
 
   getWebResearchStatus(): { mode: "off" | "manual" | "automatic-reading"; activity: string; lastError: string | null; automatic: AutomaticResearchPolicyState } {
@@ -1313,18 +1331,19 @@ export default class MindmapPlugin extends Plugin {
           imported: result.imported,
           failures: result.failures,
           lastSyncAt: result.state.lastSyncAt,
+          initialImport: result.initialImport,
         };
       },
       waitForManualResearch: async () => {
         if (this.webResearchPromise) await this.webResearchPromise;
       },
-      runAutomaticResearch: async (_imported) => {
+      runAutomaticResearch: async (imported) => {
         if (this.settings.webResearchMode !== "automatic-reading" || this.settings.readingMode !== "reading" || !this.automaticResearchPolicyStore) return;
         const now = new Date();
         try {
           await this.refreshAutomaticResearchPolicyStatus(now);
           const currentState = await state.load();
-          const candidates = selectAutomaticResearchCandidates(currentState.annotations);
+          const candidates = selectSyncResearchCandidates(imported, currentState.annotations);
           const policyResult = await runAutomaticResearch({
             store: this.automaticResearchPolicyStore,
             now,

@@ -63,6 +63,7 @@ function deps(clock: FakeClock, overrides: Partial<ConstructorParameters<typeof 
         imported: [{ annotationId: "one", notePath: "Books/one.md", action: "created" as const, eligible: true }],
         failures: [],
         lastSyncAt: "2026-08-17T01:00:00Z",
+        initialImport: false,
       };
     },
     listPendingEligibleNotes: async () => [],
@@ -87,25 +88,292 @@ test("cancelling first-use confirmation does not enable or import", async () => 
   const setup = deps(clock, { confirmSetup: async () => false });
   const controller = new ReadingModeController(setup.options);
 
-  assert.equal(await controller.enable(), false);
+  assert.deepEqual(await controller.enable(), { enabled: false, initialImport: false });
   assert.equal(controller.getMode(), "standard");
   assert.equal(setup.getImports(), 0);
   assert.equal(controller.getHealth().activity, "disabled");
 });
 
-test("confirmed enable previews, immediately syncs, and processes eligible notes sequentially", async () => {
+test("confirmed enable previews, syncs, and processes eligible notes on non-initial import", async () => {
   const clock = new FakeClock();
   let preview: ReadingPreview | null = null;
   let confirmationCalls = 0;
   const setup = deps(clock, { confirmSetup: async (value) => { preview = value; confirmationCalls += 1; return true; } });
   const controller = new ReadingModeController(setup.options);
 
-  assert.equal(await controller.enable(), true);
+  const outcome = await controller.enable();
+  assert.deepEqual(outcome, { enabled: true, initialImport: false });
   assert.deepEqual(preview, { annotationCount: 2, eligibleCount: 1, tooShortCount: 1 });
   assert.deepEqual(setup.events, ["import-1", "process-Books/one.md", "mark-Books/one.md"]);
   assert.equal(confirmationCalls, 1);
   assert.equal(controller.getHealth().pendingCount, 0);
   assert.equal(clock.intervals.size, 1);
+});
+
+test("initial import does not process notes and sets pending count", async () => {
+  const clock = new FakeClock();
+  const setup = deps(clock, {
+    importPayload: async () => ({
+      imported: [{ annotationId: "one", notePath: "Books/one.md", action: "created" as const, eligible: true }],
+      failures: [],
+      lastSyncAt: "2026-08-17T01:00:00Z",
+      initialImport: true,
+    }),
+    listPendingEligibleNotes: async () => ["Books/one.md"],
+  });
+  const controller = new ReadingModeController(setup.options);
+
+  const outcome = await controller.enable();
+  assert.deepEqual(outcome, { enabled: true, initialImport: true });
+  assert.deepEqual(setup.events, []);
+  assert.equal(controller.getHealth().pendingCount, 1);
+  assert.equal(controller.getHealth().activity, "ready");
+});
+
+test("processBacklog processes all pending notes after initial import", async () => {
+  const clock = new FakeClock();
+  const setup = deps(clock, {
+    importPayload: async () => ({
+      imported: [{ annotationId: "one", notePath: "Books/one.md", action: "created" as const, eligible: true }],
+      failures: [],
+      lastSyncAt: "2026-08-17T01:00:00Z",
+      initialImport: true,
+    }),
+    listPendingEligibleNotes: async () => ["Books/one.md"],
+  });
+  const controller = new ReadingModeController(setup.options);
+
+  await controller.enable();
+  assert.deepEqual(setup.events, []);
+  assert.equal(controller.getHealth().pendingCount, 1);
+
+  await controller.processBacklog();
+  assert.deepEqual(setup.events, ["process-Books/one.md", "mark-Books/one.md"]);
+  assert.equal(controller.getHealth().pendingCount, 1);
+});
+
+test("subsequent sync processes only new/changed items, not the full backlog", async () => {
+  const clock = new FakeClock();
+  let importCalls = 0;
+  const setup = deps(clock, {
+    importPayload: async () => {
+      importCalls += 1;
+      if (importCalls === 1) {
+        return {
+          imported: [{ annotationId: "one", notePath: "Books/one.md", action: "created" as const, eligible: true }],
+          failures: [],
+          lastSyncAt: "2026-08-17T01:00:00Z",
+          initialImport: true,
+        };
+      }
+      return {
+        imported: [
+          { annotationId: "one", notePath: "Books/one.md", action: "unchanged" as const, eligible: true },
+          { annotationId: "two", notePath: "Books/two.md", action: "created" as const, eligible: true },
+        ],
+        failures: [],
+        lastSyncAt: "2026-08-17T02:00:00Z",
+        initialImport: false,
+      };
+    },
+    listPendingEligibleNotes: async () => ["Books/one.md", "Books/two.md"],
+  });
+  const controller = new ReadingModeController(setup.options);
+
+  await controller.enable();
+  assert.deepEqual(setup.events, []);
+
+  await controller.syncNow();
+  assert.deepEqual(setup.events, ["process-Books/two.md", "mark-Books/two.md"]);
+});
+
+test("processBacklog respects mode check and does nothing when disabled", async () => {
+  const clock = new FakeClock();
+  const setup = deps(clock);
+  const controller = new ReadingModeController(setup.options);
+
+  await controller.processBacklog();
+  assert.deepEqual(setup.events, []);
+});
+
+test("partial initial import reports enabled but not initialImport", async () => {
+  const clock = new FakeClock();
+  const setup = deps(clock, {
+    importPayload: async () => ({
+      imported: [{ annotationId: "one", notePath: "Books/one.md", action: "created" as const, eligible: true }],
+      failures: [{ stage: "note", message: "one note failed" }],
+      lastSyncAt: "2026-08-17T01:00:00Z",
+      initialImport: true,
+    }),
+    listPendingEligibleNotes: async () => ["Books/one.md"],
+  });
+  const controller = new ReadingModeController(setup.options);
+
+  const outcome = await controller.enable();
+  assert.equal(outcome.enabled, true);
+  assert.equal(outcome.initialImport, false);
+});
+
+test("re-enable after disable does not report initialImport", async () => {
+  const clock = new FakeClock();
+  const setup = deps(clock);
+  const controller = new ReadingModeController(setup.options);
+
+  const first = await controller.enable();
+  assert.equal(first.enabled, true);
+  assert.equal(first.initialImport, false);
+
+  await controller.disable();
+  const second = await controller.enable();
+  assert.equal(second.enabled, true);
+  assert.equal(second.initialImport, false);
+});
+
+test("processBacklog waits for active sync then processes freshly listed pending", async () => {
+  const clock = new FakeClock();
+  let releaseSyncPayload: (() => void) | undefined;
+  let signalSyncStarted!: () => void;
+  const syncStarted = new Promise<void>((resolve) => { signalSyncStarted = resolve; });
+  let importCalls = 0;
+  const setup = deps(clock, {
+    importPayload: async () => {
+      importCalls += 1;
+      if (importCalls === 2) {
+        signalSyncStarted();
+        await new Promise<void>((resolve) => { releaseSyncPayload = resolve; });
+      }
+      return {
+        imported: [{ annotationId: "one", notePath: "Books/one.md", action: "created" as const, eligible: true }],
+        failures: [],
+        lastSyncAt: "2026-08-17T01:00:00Z",
+        initialImport: false,
+      };
+    },
+    listPendingEligibleNotes: async () => ["Books/backlog.md"],
+  });
+  const controller = new ReadingModeController(setup.options);
+  await controller.enable();
+
+  const syncPromise = controller.syncNow();
+  await syncStarted;
+  const backlogPromise = controller.processBacklog();
+  releaseSyncPayload?.();
+  await syncPromise;
+  await backlogPromise;
+
+  assert.ok(setup.events.includes("process-Books/backlog.md"));
+});
+
+test("processBacklog aborts if disabled while waiting for sync", async () => {
+  const clock = new FakeClock();
+  let releaseSyncPayload: (() => void) | undefined;
+  let signalSyncStarted!: () => void;
+  const syncStarted = new Promise<void>((resolve) => { signalSyncStarted = resolve; });
+  let importCalls = 0;
+  const setup = deps(clock, {
+    importPayload: async () => {
+      importCalls += 1;
+      if (importCalls === 2) {
+        signalSyncStarted();
+        await new Promise<void>((resolve) => { releaseSyncPayload = resolve; });
+      }
+      return {
+        imported: [{ annotationId: "one", notePath: "Books/one.md", action: "created" as const, eligible: true }],
+        failures: [],
+        lastSyncAt: "2026-08-17T01:00:00Z",
+        initialImport: false,
+      };
+    },
+    listPendingEligibleNotes: async () => ["Books/backlog.md"],
+  });
+  const controller = new ReadingModeController(setup.options);
+  await controller.enable();
+  setup.events.length = 0;
+
+  const syncPromise = controller.syncNow();
+  await syncStarted;
+  const backlogPromise = controller.processBacklog();
+  await controller.disable();
+  releaseSyncPayload?.();
+  await syncPromise;
+  await backlogPromise;
+
+  assert.equal(setup.events.some((e) => e.includes("backlog")), false);
+});
+
+test("sync waits until active backlog processing finishes", async () => {
+  const clock = new FakeClock();
+  let importCalls = 0;
+  let releaseBacklog: (() => void) | undefined;
+  let signalBacklogStarted!: () => void;
+  const backlogStarted = new Promise<void>((resolve) => { signalBacklogStarted = resolve; });
+  const setup = deps(clock, {
+    importPayload: async () => {
+      importCalls += 1;
+      return {
+        imported: [],
+        failures: [],
+        lastSyncAt: "2026-08-17T01:00:00Z",
+        initialImport: importCalls === 1,
+      };
+    },
+    listPendingEligibleNotes: async () => ["Books/backlog.md"],
+    processNote: async () => {
+      signalBacklogStarted();
+      await new Promise<void>((resolve) => { releaseBacklog = resolve; });
+      return true;
+    },
+  });
+  const controller = new ReadingModeController(setup.options);
+  await controller.enable();
+
+  const backlogPromise = controller.processBacklog();
+  await backlogStarted;
+  const syncPromise = controller.syncNow();
+  await Promise.resolve();
+  assert.equal(importCalls, 1);
+
+  releaseBacklog?.();
+  await backlogPromise;
+  await syncPromise;
+  assert.equal(importCalls, 2);
+});
+
+test("disabling during backlog prevents a queued sync", async () => {
+  const clock = new FakeClock();
+  let importCalls = 0;
+  let releaseBacklog: (() => void) | undefined;
+  let signalBacklogStarted!: () => void;
+  const backlogStarted = new Promise<void>((resolve) => { signalBacklogStarted = resolve; });
+  const setup = deps(clock, {
+    importPayload: async () => {
+      importCalls += 1;
+      return {
+        imported: [],
+        failures: [],
+        lastSyncAt: "2026-08-17T01:00:00Z",
+        initialImport: importCalls === 1,
+      };
+    },
+    listPendingEligibleNotes: async () => ["Books/backlog.md"],
+    processNote: async () => {
+      signalBacklogStarted();
+      await new Promise<void>((resolve) => { releaseBacklog = resolve; });
+      return true;
+    },
+  });
+  const controller = new ReadingModeController(setup.options);
+  await controller.enable();
+
+  const backlogPromise = controller.processBacklog();
+  await backlogStarted;
+  const syncPromise = controller.syncNow();
+  await controller.disable();
+  releaseBacklog?.();
+  await backlogPromise;
+  await syncPromise;
+
+  assert.equal(importCalls, 1);
 });
 
 test("automatic hook failures are reported without blocking local Reading processing", async () => {
@@ -133,7 +401,7 @@ test("Reading sync waits for an existing manual research operation before import
   const setup = deps(clock, {
     initiallyEnabled: true,
     waitForManualResearch: async () => { order.push("wait"); await manual; },
-    importPayload: async () => { order.push("import"); return { imported: [{ annotationId: "one", notePath: "Books/one.md", action: "created", eligible: true }], failures: [], lastSyncAt: "now" }; },
+    importPayload: async () => { order.push("import"); return { imported: [{ annotationId: "one", notePath: "Books/one.md", action: "created", eligible: true }], failures: [], lastSyncAt: "now", initialImport: false }; },
     processNote: async (notePath) => { order.push(`process-${notePath}`); return true; },
   });
   const controller = new ReadingModeController(setup.options);
@@ -296,7 +564,7 @@ test("disabling while pending notes load cannot leave Standard Mode processing",
 test("partial import failures remain actionable after pending processing", async () => {
   const clock = new FakeClock();
   const setup = deps(clock, {
-    importPayload: async () => ({ imported: [], failures: [{ stage: "note", message: "one note failed" }], lastSyncAt: "before" }),
+    importPayload: async () => ({ imported: [], failures: [{ stage: "note", message: "one note failed" }], lastSyncAt: "before", initialImport: false }),
   });
   const controller = new ReadingModeController(setup.options);
 
@@ -311,7 +579,7 @@ test("mode persistence failure restores controller mode and reports an actionabl
   const setup = deps(clock, { onModeChange: async () => { throw new Error("settings write failed"); } });
   const controller = new ReadingModeController(setup.options);
 
-  assert.equal(await controller.enable(), false);
+  assert.deepEqual(await controller.enable(), { enabled: false, initialImport: false });
   assert.equal(controller.getMode(), "standard");
   assert.equal(controller.getHealth().activity, "error");
   assert.match(controller.getHealth().lastError ?? "", /Could not persist Reading Mode/);

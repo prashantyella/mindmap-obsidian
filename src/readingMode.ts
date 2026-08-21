@@ -39,6 +39,7 @@ export interface ReadingImportResult {
   imported: ReadingImportItem[];
   failures: Array<{ annotationId?: string; stage: string; message: string }>;
   lastSyncAt: string | null;
+  initialImport: boolean;
 }
 
 export interface ReadingModeClock {
@@ -47,6 +48,11 @@ export interface ReadingModeClock {
   clearInterval(handle: unknown): void;
   setTimeout(callback: () => void, delayMs: number): unknown;
   clearTimeout(handle: unknown): void;
+}
+
+export interface EnableOutcome {
+  enabled: boolean;
+  initialImport: boolean;
 }
 
 export interface ReadingModeDependencies {
@@ -85,7 +91,9 @@ export class ReadingModeController {
   private syncPromise: Promise<void> | null = null;
   private syncRequested = false;
   private processingPromise: Promise<void> | null = null;
+  private backlogPromise: Promise<void> | null = null;
   private lastFingerprint: string | null = null;
+  private lastSyncWasInitialImport = false;
 
   constructor(deps: ReadingModeDependencies) {
     this.deps = deps;
@@ -120,9 +128,9 @@ export class ReadingModeController {
     this.armWatcher();
   }
 
-  async enable(): Promise<boolean> {
+  async enable(): Promise<EnableOutcome> {
     if (this.mode === "reading") {
-      return true;
+      return { enabled: true, initialImport: false };
     }
     this.setHealth({ mode: "standard", activity: "setup", lastError: null });
     let preview: ReadingPreview;
@@ -130,11 +138,11 @@ export class ReadingModeController {
       preview = await this.previewSetup();
     } catch (error) {
       this.setHealth({ activity: "error", lastError: errorMessage(error) });
-      return false;
+      return { enabled: false, initialImport: false };
     }
     if (!(await this.deps.confirmSetup(preview))) {
       this.setHealth({ mode: "standard", activity: "disabled", lastError: null });
-      return false;
+      return { enabled: false, initialImport: false };
     }
     this.mode = "reading";
     try {
@@ -142,12 +150,13 @@ export class ReadingModeController {
     } catch (error) {
       this.mode = "standard";
       this.setHealth({ mode: "standard", activity: "error", lastError: `Could not persist Reading Mode: ${errorMessage(error)}` });
-      return false;
+      return { enabled: false, initialImport: false };
     }
     this.setHealth({ mode: "reading", activity: "ready", lastError: null });
+    this.lastSyncWasInitialImport = false;
     await this.syncNow();
     this.armWatcher();
-    return true;
+    return { enabled: true, initialImport: this.lastSyncWasInitialImport };
   }
 
   async disable(): Promise<void> {
@@ -177,6 +186,12 @@ export class ReadingModeController {
   async syncNow(): Promise<void> {
     if (this.mode !== "reading") {
       return;
+    }
+    while (this.backlogPromise) {
+      await this.backlogPromise;
+      if (this.mode !== "reading") {
+        return;
+      }
     }
     if (this.syncPromise) {
       this.syncRequested = true;
@@ -231,6 +246,7 @@ export class ReadingModeController {
       if (this.mode !== "reading") {
         return;
       }
+      this.lastSyncWasInitialImport = result.initialImport && result.failures.length === 0;
       const importError = result.failures[0]?.message ?? null;
       this.setHealth({
         activity: importError ? "error" : "ready",
@@ -240,6 +256,14 @@ export class ReadingModeController {
         importedCount: this.health.importedCount + result.imported.filter((item) => item.action !== "unchanged").length,
         lastError: importError,
       });
+      if (result.initialImport) {
+        const pending = await this.deps.listPendingEligibleNotes();
+        this.setHealth({ pendingCount: pending.length });
+        if (this.mode === "reading") {
+          this.lastFingerprint = await this.deps.readFingerprint();
+        }
+        return;
+      }
       let automaticError: string | null = null;
       try {
         await this.deps.runAutomaticResearch?.(result.imported);
@@ -247,7 +271,7 @@ export class ReadingModeController {
         automaticError = `Automatic research paused: ${errorMessage(error)}`;
         this.deps.onAutomaticResearchError?.(automaticError);
       }
-      await this.processPending(result.imported, importError ?? automaticError);
+      await this.processImported(result.imported, importError ?? automaticError);
       if (this.mode === "reading") {
         this.lastFingerprint = await this.deps.readFingerprint();
       }
@@ -256,19 +280,45 @@ export class ReadingModeController {
     }
   }
 
-  private async processPending(imported: ReadingImportItem[], initialError: string | null): Promise<void> {
+  async processBacklog(): Promise<void> {
+    if (this.mode !== "reading") return;
+    if (this.backlogPromise) return this.backlogPromise;
+
+    const operation = (async () => {
+      while (this.syncPromise) {
+        await this.syncPromise;
+        if (this.mode !== "reading") return;
+      }
+      while (this.processingPromise) {
+        await this.processingPromise;
+        if (this.mode !== "reading") return;
+      }
+      const pending = await this.deps.listPendingEligibleNotes();
+      if (this.mode !== "reading") return;
+      await this.processNotes(pending, null);
+    })();
+    const guarded = operation.finally(() => {
+      if (this.backlogPromise === guarded) this.backlogPromise = null;
+    });
+    this.backlogPromise = guarded;
+    return guarded;
+  }
+
+  private async processImported(imported: ReadingImportItem[], initialError: string | null): Promise<void> {
+    const paths = imported
+      .filter((item) => item.eligible && item.action !== "unchanged")
+      .map((item) => item.notePath);
+    return this.processNotes(paths, initialError);
+  }
+
+  private async processNotes(paths: string[], initialError: string | null): Promise<void> {
     if (this.processingPromise) {
       return this.processingPromise;
     }
     this.processingPromise = (async () => {
-      const importedPaths = imported
-        .filter((item) => item.eligible && item.action !== "unchanged")
-        .map((item) => item.notePath);
-      const pendingPaths = await this.deps.listPendingEligibleNotes();
       if (this.mode !== "reading") {
         return;
       }
-      const paths = [...new Set([...importedPaths, ...pendingPaths])];
       this.setHealth({ activity: paths.length > 0 ? "processing" : this.health.activity, pendingCount: paths.length });
       let firstFailure: string | null = null;
       for (const notePath of paths) {
@@ -292,6 +342,7 @@ export class ReadingModeController {
         }
       }
       const remaining = await this.deps.listPendingEligibleNotes();
+      if (this.mode !== "reading") return;
       const unresearchableCount = await this.deps.countUnresearchable();
       const actionableError = firstFailure ?? initialError;
       this.setHealth({

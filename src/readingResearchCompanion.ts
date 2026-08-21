@@ -1,6 +1,5 @@
 import {
   READING_ANNOTATIONS_FOLDER,
-  READING_ROOT,
   hasControlOrDelimiterChar,
   isSafeReadingPath,
 } from "./readingTypes";

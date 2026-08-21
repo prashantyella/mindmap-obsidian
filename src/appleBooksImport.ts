@@ -55,6 +55,7 @@ export interface AnnotationImportResult {
   failures: ImportFailure[];
   state: ReadingState;
   indexPaths: string[];
+  initialImport: boolean;
 }
 
 export interface AnnotationImporterOptions {
@@ -281,6 +282,7 @@ export async function importAppleBooksAnnotations(
   const now = options.now ?? (() => new Date().toISOString());
   const syncAt = now();
   const state = await options.state.load();
+  const isInitialImport = !state.initialImportCompletedAt;
   const failures: ImportFailure[] = [];
   const imported: ImportedAnnotationResult[] = [];
   const occupiedPaths = new Set<string>();
@@ -558,7 +560,18 @@ export async function importAppleBooksAnnotations(
     }
   }
 
-  return { imported, failures, state: currentState, indexPaths };
+  if (isInitialImport && failures.length === 0) {
+    try {
+      const { state: nextState } = await options.state.mutate((freshState) => {
+        freshState.initialImportCompletedAt = syncAt;
+      });
+      currentState = nextState;
+    } catch (error) {
+      failures.push({ stage: "state", message: errorMessage(error) });
+    }
+  }
+
+  return { imported, failures, state: currentState, indexPaths, initialImport: isInitialImport };
 }
 
 export function renderAnnotationNote(
