@@ -78,16 +78,26 @@ LaunchAgent mode uses the plugin runtime resolved in settings. With default path
 
 Default LaunchAgent schedules:
 
-- Daily Mon-Sat 02:30: `--all --apply`
-- Weekly Sunday 03:00: `--all --refresh-all --apply`
+- Daily Mon-Sat 02:30: `--all --apply --include-reading-pending`. The extra flag only adds already-imported, pending `Books/Apple Books` annotation notes to that run's note universe; it never reads the Apple Books database or widens your configured all-scope folders.
+- Weekly Sunday 03:00: `--all --refresh-all --apply`. Weekly refresh never includes Reading notes.
 
 Scheduled maintenance runs Mindmap only. It never starts Web Research.
+
+`Run Mindmap full rebuild (all notes)` deletes and recreates the local vector collections for your configured all-scope folders. Any already-indexed Apple Books annotation vectors are snapshotted first and restored afterward, so a manual rebuild of your regular notes does not force the whole Reading history to be re-embedded by the next daily run.
 
 ## Reading Mode and Apple Books
 
 Reading Mode is an experimental, opt-in workflow for Apple Books annotations. The first enablement previews access and eligible-note counts before any import. Mindmap reads the supported Apple Books annotation database and its WAL/SHM companions without modifying Apple Books or your source database.
 
-Imported annotation notes retain their Apple Books source block and your own note content. The native status menu shows Reading Mode, sync time, pending notes, and actionable import or processing errors. Turn Reading Mode off to stop its watcher and automatic work.
+**Import-only first activation.** Enabling Reading Mode imports every eligible annotation into your vault, but does not process the historical backlog automatically. If any annotations are pending right after import, Mindmap asks once whether to process them now. If you decline (or close the prompt), pending notes stay visible in the status menu behind a **Process Reading backlog** action you can trigger at any time, and they are also picked up by the next daily scheduled run (see Scheduling above).
+
+**Live processing for new annotations.** Once Reading Mode is active, any annotation you highlight afterward is imported and processed immediately and sequentially while Obsidian is open, with no additional prompt. A failed note is left pending for manual or scheduled retry rather than retried in a tight loop.
+
+**Readable notes.** Annotation notes live at `Books/Apple Books/<Author>/<Book>/Annotations/<Title>.md`, where `<Title>` is a short, human-readable title derived from the quote (falling back to your note, chapter, or location) instead of a date or opaque ID. The note body is just your annotation as a leading blockquote, plus any Apple Books note; there is no visible technical marker. Concepts and related notes are stored as readable `[[wikilink]]` values in frontmatter; Mindmap never writes generated summary or tag fields to an annotation note.
+
+**Companion research.** When Web Research runs against an Apple Books annotation, its synthesis and sources are written to a separate companion note at `Books/Apple Books/<Author>/<Book>/Research/<Title>.md`, linked back from the annotation via a `research` frontmatter wikilink, so the annotation body itself stays annotation-only.
+
+The native status menu shows Reading Mode, sync time, pending notes, and actionable import or processing errors. Turn Reading Mode off to stop its watcher and automatic work.
 
 ## Web Research
 

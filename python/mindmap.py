@@ -589,6 +589,15 @@ def validate_preview_entry(entry: Dict, vault_root: Path, entry_index: int) -> T
             context=context,
         )
 
+    if is_plugin_internal_relpath(raw_path):
+        return None, build_runtime_issue(
+            "warn",
+            "PREVIEW_TARGET_RUNTIME_INTERNAL",
+            f"Skipping preview entry because it targets plugin/runtime internals: {raw_path}",
+            guidance="Plugin and runtime internals cannot be processed as notes.",
+            context={"path": raw_path, **context},
+        )
+
     target, issue = resolve_vault_markdown_write_target(vault_root, raw_path)
     if issue:
         issue_context = dict(issue.get("context", {}))
@@ -618,6 +627,26 @@ def validate_preview_entry(entry: Dict, vault_root: Path, entry_index: int) -> T
             guidance="Point preview path rows to markdown files, not directories.",
             context={"path": raw_path, **context},
         )
+
+    for field in ("summary",):
+        if field in entry and not isinstance(entry[field], str):
+            return None, build_runtime_issue(
+                "warn",
+                "PREVIEW_METADATA_INVALID",
+                f"Skipping preview entry because '{field}' is not a string: {raw_path}",
+                guidance="Regenerate preview rows with valid metadata field types.",
+                context={"path": raw_path, "field": field, **context},
+            )
+    for field in ("tags", "concepts", "related"):
+        value = entry.get(field, [])
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return None, build_runtime_issue(
+                "warn",
+                "PREVIEW_METADATA_INVALID",
+                f"Skipping preview entry because '{field}' is not a list of strings: {raw_path}",
+                guidance="Regenerate preview rows with valid metadata field types.",
+                context={"path": raw_path, "field": field, **context},
+            )
 
     return target, None
 
@@ -1188,9 +1217,14 @@ def normalize_provider_name(provider: str) -> str:
 
 
 def resolve_llm_api_key(config: Dict) -> str:
+    """Trims the resolved key on every path (including the environment
+    variable, which os.environ does not trim) before any caller uses its
+    truthiness to select an authentication mode: an untrimmed
+    whitespace-only value would otherwise read as "present" and trigger a
+    Bearer header with a garbage token."""
     env_name = str(config.get("llm_api_key_env", "")).strip()
     if env_name:
-        return os.environ.get(env_name, "")
+        return os.environ.get(env_name, "").strip()
     return str(config.get("llm_api_key", "")).strip()
 
 
@@ -1494,6 +1528,13 @@ def update_related_section(text: str, heading: str, links: List) -> str:
 
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_remove_mindmap_section(config: Dict) -> bool:
+    """Destructive: only the literal JSON boolean `true` enables stripping an
+    existing Mindmap/Related section. A truthy non-boolean config value
+    (e.g. the string "false", "yes", or 1) must not silently enable it."""
+    return config.get("remove_mindmap_section", False) is True
 
 
 def resolve_config_path(raw_config_path: Optional[str]) -> Path:
@@ -2713,7 +2754,7 @@ def main():
     llm_model = llm_settings["model"]
     mindmap_heading = config.get("mindmap_heading", config.get("related_heading", "## Mindmap"))
     write_mindmap_section = config.get("write_mindmap_section", config.get("write_related_section", False))
-    remove_mindmap_section = config.get("remove_mindmap_section", False)
+    remove_mindmap_section = resolve_remove_mindmap_section(config)
     controlled_tags_path = config.get("controlled_tags_path")
     tag_aliases_path = config.get("tag_aliases_path")
     allow_free_tags = config.get("allow_free_tags", True)
@@ -2788,20 +2829,36 @@ def main():
                 continue
 
             relpath = entry["path"]
-            updates = {
-                "summary": entry.get("summary", ""),
-                "tags": entry.get("tags", []),
-                "concepts": entry.get("concepts", []),
-                "related": entry.get("related", []),
-            }
+            summary = entry.get("summary", "")
+            tags = entry.get("tags", [])
+            concepts = entry.get("concepts", [])
+            related = entry.get("related", [])
 
             try:
                 original = file_path.read_text(encoding="utf-8", errors="ignore")
-                updated = update_frontmatter(original, updates, config["frontmatter_keys"])
-                if write_mindmap_section:
-                    updated = update_related_section(updated, mindmap_heading, updates["related"])
-                elif remove_mindmap_section:
-                    updated = strip_related_section(updated, mindmap_heading)
+                fm, _body = parse_frontmatter(original)
+                # A stale preview entry for an Apple Books annotation must go
+                # through the same annotation-safe write rules as the live
+                # daily path: no generated summary/tags, concepts/related as
+                # readable wikilinks, and no generated Mindmap/Related body
+                # section. Ordinary notes keep the existing plain behavior.
+                preview_note = Note(
+                    path=file_path,
+                    relpath=relpath,
+                    title=file_path.stem,
+                    body="",
+                    is_apple_annotation=frontmatter_is_apple_annotation(fm),
+                )
+                updates = build_metadata_updates(preview_note, summary, tags, concepts, related)
+                updated = apply_note_frontmatter_write(
+                    original,
+                    preview_note,
+                    updates,
+                    config["frontmatter_keys"],
+                    mindmap_heading,
+                    write_mindmap_section,
+                    remove_mindmap_section,
+                )
                 file_path.write_text(updated, encoding="utf-8")
                 log_lines.append(f"Applied preview: {relpath}")
             except Exception as exc:

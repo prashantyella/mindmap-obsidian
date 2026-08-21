@@ -4,8 +4,17 @@ All notable changes to this project should be documented in this file.
 
 ## Unreleased
 
+### Added
+- Reading Mode activation is import-only: the first enablement imports every eligible Apple Books annotation but processes none of the historical backlog automatically. A separately confirmed **Process Reading backlog** action (also available from the status menu) processes it explicitly; an annotation highlighted afterward is processed immediately and sequentially.
+- Annotation notes use a short, human-readable title derived from the quote instead of a date or opaque ID, and their body is just the annotation as a leading blockquote with no visible technical marker. Concepts and related notes are stored as readable `[[wikilink]]` values; generated summary/tag fields are never written to an annotation note.
+- Web Research for an Apple Books annotation is written to a separate companion note under the same book's `Research/` folder, linked from the annotation via a `research` frontmatter wikilink, keeping the annotation body annotation-only.
+- Daily scheduled maintenance extends its note universe with pending Reading annotations (`--include-reading-pending`); weekly refresh and manual runs never do. `Run Mindmap full rebuild (all notes)` preserves already-indexed Reading vector rows across the rebuild instead of discarding them.
+- Minimal pull-request CI workflow (`.github/workflows/ci.yml`) runs install, lint, typecheck, TypeScript tests, Python tests, build, and release validation on every PR, using the repository's pinned lockfile/dependency versions and no secrets.
+
 ### Fixed
-- Notes no longer lose hand-authored `## Related` / `## Mindmap` sections when `write_mindmap_section` is `false`. Stripping now requires the explicit `remove_mindmap_section` option (default `false`).
+- Notes no longer lose hand-authored `## Related` / `## Mindmap` sections when `write_mindmap_section` is `false`. Stripping now requires the explicit `remove_mindmap_section` option (default `false`), and only the literal JSON boolean `true` enables it — a truthy non-boolean config value (e.g. the string `"false"`) no longer silently enables the strip.
+- The configured LLM API key is trimmed on every resolution path, including when read from an environment variable, before its truthiness selects an authentication mode; a whitespace-only value no longer triggers a Bearer-auth request with a garbage token.
+- `--apply-preview` now routes a stale Apple Books annotation preview entry through the same annotation-safe write rules as live/scheduled processing (no generated summary/tags, wikilink concepts/related, no generated body section) instead of writing the plain format; ordinary note preview entries are unchanged. Preview entries targeting plugin/runtime internals or carrying malformed metadata field types are now rejected rather than applied.
 
 ### Release process
 - Update this changelog for every user-visible plugin release.

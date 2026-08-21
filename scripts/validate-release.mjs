@@ -84,6 +84,12 @@ if (serialized.includes("/Users/") || serialized.includes("\\Users\\")) {
 if (config.vault_root !== "../../../../") {
   throw new Error(`config.template.json vault_root must be "../../../../", got ${String(config.vault_root)}`);
 }
+if (config.llm_api_key !== "" || config.llm_api_key_env !== "") {
+  throw new Error("config.template.json must not ship a baked-in llm_api_key or llm_api_key_env.");
+}
+if (config.remove_mindmap_section !== false) {
+  throw new Error(`config.template.json remove_mindmap_section must be the literal boolean false, got ${JSON.stringify(config.remove_mindmap_section)}`);
+}
 
 const distManifest = JSON.parse(fs.readFileSync(path.join("dist", "manifest.json"), "utf8"));
 if (distManifest.version !== manifest.version) {
@@ -121,6 +127,22 @@ for (const asset of ["release/main.js", "release/manifest.json", "release/styles
   if (!workflow.includes(asset)) {
     throw new Error(`Release workflow must publish ${asset}`);
   }
+}
+
+if (!fs.existsSync(".github/workflows/ci.yml")) {
+  throw new Error("Missing required file: .github/workflows/ci.yml");
+}
+const ciWorkflow = fs.readFileSync(".github/workflows/ci.yml", "utf8");
+if (!/on:[\s\S]*pull_request/.test(ciWorkflow)) {
+  throw new Error("CI workflow must trigger on pull_request.");
+}
+for (const step of ["npm ci", "npm run lint", "npm run typecheck", "npm test", "npm run build", "npm run validate"]) {
+  if (!ciWorkflow.includes(step)) {
+    throw new Error(`CI workflow must run: ${step}`);
+  }
+}
+if (!/discover -s tests/.test(ciWorkflow)) {
+  throw new Error("CI workflow must run the Python test suite.");
 }
 
 console.log("Release validation passed.");
