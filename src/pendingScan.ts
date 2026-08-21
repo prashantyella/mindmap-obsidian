@@ -183,7 +183,7 @@ function stripRelatedSection(text: string, heading: string): string {
   return `${cleaned.join("\n").trim()}\n`;
 }
 
-function computeBodyHash(text: string, heading: string): { hash: string | null; wordCount: number; normalizedWordCount: number } {
+export function computeBodyHash(text: string, heading: string): { hash: string | null; wordCount: number; normalizedWordCount: number } {
   const body = stripRelatedSection(stripFrontmatter(text), heading);
   const wordCount = body.split(/\s+/).filter(Boolean).length;
   const normalizedCount = normalizedWordCount(body);
@@ -198,7 +198,7 @@ function computeBodyHash(text: string, heading: string): { hash: string | null; 
   };
 }
 
-function buildStateHashes(rawState: unknown): Record<string, string> {
+export function buildStateHashes(rawState: unknown): Record<string, string> {
   if (!rawState || typeof rawState !== "object") {
     return {};
   }

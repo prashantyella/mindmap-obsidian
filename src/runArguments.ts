@@ -11,6 +11,16 @@ export const ALLOWED_PLUGIN_ARGS = new Set([
   "--index",
   "--tag",
   "--note",
+  "--include-reading-pending",
+]);
+
+const READING_PENDING_INCOMPATIBLE_FLAGS = new Set([
+  "--current",
+  "--note",
+  "--refresh-all",
+  "--rebuild",
+  "--preview",
+  "--apply-preview",
 ]);
 
 const NOTE_INCOMPATIBLE_FLAGS = new Set([
@@ -68,6 +78,19 @@ export function assertAllowedPluginArgs(args: string[]): void {
     const conflict = args.find((arg) => NOTE_INCOMPATIBLE_FLAGS.has(arg));
     if (conflict) {
       throw new Error(`Blocked incompatible Mindmap CLI arguments: --note cannot be combined with ${conflict}.`);
+    }
+  }
+
+  if (args.includes("--include-reading-pending")) {
+    if (!args.includes("--all")) {
+      throw new Error("Blocked incompatible Mindmap CLI arguments: --include-reading-pending requires --all.");
+    }
+    if (!args.includes("--apply")) {
+      throw new Error("Blocked incompatible Mindmap CLI arguments: --include-reading-pending requires --apply.");
+    }
+    const conflict = args.find((arg) => READING_PENDING_INCOMPATIBLE_FLAGS.has(arg));
+    if (conflict) {
+      throw new Error(`Blocked incompatible Mindmap CLI arguments: --include-reading-pending cannot be combined with ${conflict}.`);
     }
   }
 }

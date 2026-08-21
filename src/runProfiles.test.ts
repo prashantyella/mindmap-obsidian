@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { getRunProfile } from "./runProfiles";
+import { getDailyMaintenanceArgs, getRunProfile } from "./runProfiles";
 
 void test("getRunProfile returns current-scope apply arguments", () => {
   assert.deepEqual(getRunProfile("current"), {
@@ -48,6 +48,14 @@ void test("getRunProfile returns all-scope full refresh arguments", () => {
       confirmClass: "mod-cta",
     },
   });
+});
+
+void test("getDailyMaintenanceArgs extends the all-scope apply run with the Reading pending flag", () => {
+  assert.deepEqual(getDailyMaintenanceArgs(), ["--all", "--apply", "--include-reading-pending"]);
+});
+
+void test("getRunProfile('all') for manual runs never includes the Reading pending flag", () => {
+  assert.deepEqual(getRunProfile("all").args, ["--all", "--apply"]);
 });
 
 void test("getRunProfile returns all-scope full rebuild arguments", () => {

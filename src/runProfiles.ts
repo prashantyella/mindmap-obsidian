@@ -54,6 +54,15 @@ const RUN_PROFILES: Record<Exclude<RunScope, "note">, RunProfile> = {
   },
 };
 
+/**
+ * Daily scheduled maintenance only: extends the all-scope run's note universe
+ * with pending Books/Apple Books annotations. Weekly, manual, current, and
+ * individual-note runs must never include this flag.
+ */
+export function getDailyMaintenanceArgs(): string[] {
+  return [...RUN_PROFILES.all.args, "--include-reading-pending"];
+}
+
 export function getRunProfile(scope: RunScope, notePath?: string): RunProfile {
   if (scope === "note") {
     if (!notePath) {

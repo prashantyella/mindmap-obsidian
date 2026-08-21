@@ -40,3 +40,23 @@ void test("assertAllowedPluginArgs rejects repeated and incompatible individual 
     assert.throws(() => assertAllowedPluginArgs(args));
   }
 });
+
+void test("assertAllowedPluginArgs accepts --include-reading-pending only with --all --apply maintenance", () => {
+  assert.doesNotThrow(() => assertAllowedPluginArgs(["--all", "--apply", "--include-reading-pending"]));
+  assert.doesNotThrow(() => assertAllowedPluginArgs(["--all", "--apply", "--include-reading-pending", "--tag", "--index", "--quiet"]));
+});
+
+void test("assertAllowedPluginArgs rejects invalid --include-reading-pending combinations", () => {
+  for (const args of [
+    ["--apply", "--include-reading-pending"],
+    ["--all", "--include-reading-pending"],
+    ["--all", "--apply", "--include-reading-pending", "--current"],
+    ["--note", "Notes/one.md", "--include-reading-pending"],
+    ["--all", "--apply", "--include-reading-pending", "--refresh-all"],
+    ["--all", "--apply", "--include-reading-pending", "--rebuild"],
+    ["--all", "--apply", "--include-reading-pending", "--preview"],
+    ["--all", "--apply", "--include-reading-pending", "--apply-preview"],
+  ]) {
+    assert.throws(() => assertAllowedPluginArgs(args), /Blocked incompatible Mindmap CLI arguments/);
+  }
+});

@@ -15,7 +15,7 @@ import {
 import { formatTimestamp, isLaunchAgentSchedulerEnabled } from "./scheduler";
 import type { RuntimeCommand } from "./pathResolver";
 import type { PendingSnapshot } from "./pendingScan";
-import { getRunProfile } from "./runProfiles";
+import { getDailyMaintenanceArgs, getRunProfile } from "./runProfiles";
 import type { SchedulerMode } from "./settings";
 
 export interface PluginLaunchAgentSettings {
@@ -70,7 +70,7 @@ export function buildPluginLaunchAgentSpecs(options: {
       hour: options.settings.launchAgentWeeklyHour,
       minute: options.settings.launchAgentWeeklyMinute,
     },
-    dailyArgs: getRunProfile("all").args,
+    dailyArgs: getDailyMaintenanceArgs(),
     weeklyArgs: getRunProfile("refreshAll").args,
   });
 }

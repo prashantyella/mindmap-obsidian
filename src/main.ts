@@ -24,6 +24,7 @@ import { prepareActiveNoteResearchInput } from "./researchInput";
 import { renderCompanionResearchContent } from "./researchWriter";
 import { MAX_RESEARCH_INPUT_CHARS, WebResearchError } from "./webResearchTypes";
 import { createReadingStateStore, type ReadingStateStore } from "./readingState";
+import { reconcileReadingProcessedFromPythonState, shouldTriggerDailyReconciliation } from "./readingPythonReconciliation";
 import { createObsidianVaultApi } from "./readingVault";
 import { ReadingModeController, type ReadingHealth, type ReadingPreview } from "./readingMode";
 import { registerMindmapCommands } from "./pluginCommands";
@@ -96,6 +97,7 @@ import type { LaunchAgentDetail } from "./launchAgentHealth";
 import { registerVaultRefreshEvents } from "./vaultRefreshEvents";
 
 const LOG_LIMIT = 50;
+const READING_RECONCILIATION_FAILURE_COOLDOWN_MS = 30 * 60 * 1000;
 
 function splitLogLines(text: string): string[] {
   return text
@@ -131,6 +133,9 @@ export default class MindmapPlugin extends Plugin {
   private launchAgentManagedThisSession = false;
   private launchAgentSyncId = 0;
   private launchAgentHealthRefreshInFlight: Promise<void> | null = null;
+  private lastReconciledDailySuccessAt: number | null = null;
+  private lastReconciliationFailureAt: number | null = null;
+  private readingReconciliationInFlight = false;
   private schedulerState: SchedulerState = {
     nextRunAt: null,
     lastRunAt: null,
@@ -1071,11 +1076,79 @@ export default class MindmapPlugin extends Plugin {
       this.schedulerState.launchAgentDetails = summary.details;
       this.schedulerState.launchAgentMessage = summary.message;
       this.updateStatusBar();
+      const decision = shouldTriggerDailyReconciliation(
+        summary.details,
+        DAILY_LAUNCH_AGENT_LABEL,
+        { lastReconciledDailySuccessAt: this.lastReconciledDailySuccessAt, lastReconciliationFailureAt: this.lastReconciliationFailureAt },
+        Date.now(),
+        READING_RECONCILIATION_FAILURE_COOLDOWN_MS,
+      );
+      if (decision.trigger && decision.dailySuccessAt !== null && !this.readingReconciliationInFlight) {
+        void this.reconcileReadingFromPythonState(decision.dailySuccessAt);
+      }
     }).finally(() => {
       this.launchAgentHealthRefreshInFlight = null;
     });
     this.launchAgentHealthRefreshInFlight = refresh;
     return refresh;
+  }
+
+  /**
+   * After a newly-observed successful DAILY scheduled run (never an
+   * aggregate or weekly success), reconciles Reading `processedAt` from the
+   * Python worker's state.json. Read-only against Python state and the
+   * vault; mutates only reading-state.json. The daily watermark advances
+   * only once this resolves successfully; a failure is cached (not thrown,
+   * not retried on every poll) so the next few health polls don't spam
+   * retries against a state.json that is still broken.
+   */
+  private async reconcileReadingFromPythonState(dailySuccessAt: number): Promise<void> {
+    const stateStore = this.readingStateStore;
+    if (!stateStore || this.readingReconciliationInFlight) {
+      return;
+    }
+    this.readingReconciliationInFlight = true;
+    try {
+      const runtime = this.getResolvedRuntime();
+      if (!runtime.valid) {
+        return;
+      }
+      const config = JSON.parse(await fs.promises.readFile(runtime.configPath, "utf8")) as Record<string, unknown>;
+      const heading = typeof config.mindmap_heading === "string"
+        ? config.mindmap_heading
+        : typeof config.related_heading === "string"
+          ? config.related_heading
+          : "## Mindmap";
+      const statePathValue = typeof config.state_path === "string"
+        ? config.state_path
+        : ".obsidian/plugins/mindmap-ai/data/state.json";
+      const pythonStatePath = path.isAbsolute(statePathValue)
+        ? statePathValue
+        : path.resolve(this.getRuntimeContext().vaultRoot, statePathValue);
+      const vault = createObsidianVaultApi(this.app.vault);
+
+      const result = await reconcileReadingProcessedFromPythonState(stateStore, {
+        heading,
+        readPythonStateText: () => fs.promises.readFile(pythonStatePath, "utf8"),
+        readNoteText: async (notePath) => {
+          const entry = vault.get(notePath);
+          return entry ? await vault.read(entry) : null;
+        },
+        now: () => new Date().toISOString(),
+      });
+      this.appendLog(`Reading reconciliation: ${result.reason}`);
+      if (result.ok) {
+        this.lastReconciledDailySuccessAt = dailySuccessAt;
+        this.lastReconciliationFailureAt = null;
+      } else {
+        this.lastReconciliationFailureAt = Date.now();
+      }
+    } catch (error) {
+      this.lastReconciliationFailureAt = Date.now();
+      this.appendLog(`Reading reconciliation failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      this.readingReconciliationInFlight = false;
+    }
   }
 
   private async reconcileLaunchAgents(): Promise<void> {

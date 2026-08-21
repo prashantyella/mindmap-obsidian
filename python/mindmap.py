@@ -13,6 +13,7 @@ import os
 import re
 import socket
 import shlex
+import unicodedata
 import subprocess
 import sys
 import time
@@ -20,7 +21,7 @@ from dataclasses import dataclass
 import difflib
 from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Callable
+from typing import Dict, Iterable, List, Tuple, Optional, Callable
 from urllib import request
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -42,6 +43,7 @@ class Note:
     relpath: str
     title: str
     body: str
+    is_apple_annotation: bool = False
 
 
 @dataclass
@@ -140,9 +142,281 @@ def minimum_words_for_note(frontmatter: Dict, configured_minimum: int) -> int:
 def note_meets_minimum(text: str, frontmatter: Dict, configured_minimum: int, body: Optional[str] = None) -> bool:
     content = text if body is None else body
     minimum = minimum_words_for_note(frontmatter, configured_minimum)
-    is_annotation = str(frontmatter.get("type", "")).strip().lower() == "apple-books-annotation"
+    is_annotation = frontmatter_is_apple_annotation(frontmatter)
     count = normalized_word_count(content) if is_annotation else len(content.split())
     return count >= minimum
+
+
+def frontmatter_is_apple_annotation(frontmatter: Dict) -> bool:
+    return str(frontmatter.get("type", "")).strip().lower() == "apple-books-annotation"
+
+
+MAX_ANNOTATION_COMPONENT_LENGTH = 80
+RESERVED_ANNOTATION_COMPONENTS = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
+
+
+def sanitize_apple_annotation_concept(value: str, fallback: str) -> str:
+    """Mirrors the TS `sanitizePathComponent` rules used for concept
+    wikilinks: strip control/path-unsafe characters, bound length, and fall
+    back rather than silently dropping an unusable concept."""
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    cleaned = "".join(ch for ch in normalized if ord(ch) > 31 and ord(ch) != 127)
+    cleaned = re.sub(r"[\\/]+", "-", cleaned)
+    cleaned = re.sub(r"\.{2,}", "-", cleaned)
+    cleaned = re.sub(r'[<>:"|?*#\[\]]', "-", cleaned)
+    cleaned = re.sub(r"-+", "-", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"[. ]+$", "", cleaned)
+    cleaned = re.sub(r"^\.+", "", cleaned).strip()
+    bounded = cleaned[:MAX_ANNOTATION_COMPONENT_LENGTH]
+    if not bounded or bounded in (".", "..") or not any(ch.isalnum() for ch in bounded):
+        return fallback
+    if bounded.lower() in RESERVED_ANNOTATION_COMPONENTS:
+        return f"{bounded}-"
+    return bounded
+
+
+def apple_annotation_concept_wikilink(concept: str) -> str:
+    cleaned = sanitize_apple_annotation_concept(concept, "Concept")
+    return f"[[{cleaned}]]"
+
+
+def apple_annotation_concept_wikilinks(concepts: List[str]) -> List[str]:
+    """Concepts arrive already bounded by `normalize_concepts`'s configured
+    limit; this only sanitizes and deduplicates."""
+    seen = set()
+    out = []
+    for concept in concepts:
+        link = apple_annotation_concept_wikilink(concept)
+        if link and link not in seen:
+            seen.add(link)
+            out.append(link)
+    return out
+
+
+def is_safe_apple_annotation_related_target(relpath: str) -> bool:
+    """Mirrors the TS `isSafeRelatedTarget` rules: reject anything unsafe
+    (absolute paths, traversal, plugin internals, non-Markdown targets,
+    control characters, or wikilink delimiters) instead of sanitizing it,
+    so a valid Unicode vault-relative path is passed through untouched."""
+    text = str(relpath)
+    if not text.strip():
+        return False
+    if any(ord(ch) <= 31 or ord(ch) == 127 for ch in text):
+        return False
+    if re.search(r"[\[\]|]", text):
+        return False
+    normalized = text.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\"):
+        return False
+    segments = normalized.split("/")
+    if ".." in segments or ".obsidian" in segments:
+        return False
+    return normalized.lower().endswith(".md")
+
+
+def apple_annotation_related_wikilink(relpath: str) -> str:
+    text = str(relpath)
+    if not is_safe_apple_annotation_related_target(text):
+        return ""
+    normalized = text.replace("\\", "/")
+    target = normalized[:-3]
+    label = target.rsplit("/", 1)[-1] or target
+    return f"[[{target}|{label}]]"
+
+
+def apple_annotation_related_wikilinks(related: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for relpath in related:
+        link = apple_annotation_related_wikilink(relpath)
+        if link and link not in seen:
+            seen.add(link)
+            out.append(link)
+    return out
+
+
+def is_under_reading_root(relpath: str) -> bool:
+    return relpath == READING_NOTES_ROOT or relpath.startswith(f"{READING_NOTES_ROOT}/")
+
+
+def compute_removed_paths(state_paths: Iterable[str], current_paths: set, notes_paths: List[str]) -> List[str]:
+    """A run whose note universe does not cover the Reading root (weekly
+    refresh/rebuild, --current, or a daily run without
+    --include-reading-pending) must not treat untouched Reading entries as
+    deleted just because this run didn't scan that folder.
+
+    This holds for --rebuild too: `rebuild_collections_preserving_reading`
+    snapshots and restores any tracked Reading Chroma rows across the
+    delete/recreate, so a Reading state hash surviving a non-Reading rebuild
+    still describes vectors that are genuinely still present.
+    """
+    scanning_reading_root = is_relpath_in_scope(READING_NOTES_ROOT, notes_paths)
+    return [
+        p for p in state_paths
+        if p not in current_paths and (scanning_reading_root or not is_under_reading_root(p))
+    ]
+
+
+def reading_paths_excluded_from_rebuild_scan(state_paths: Iterable[str], notes_paths: List[str]) -> List[str]:
+    """The Reading rows a --rebuild run must preserve: previously-tracked
+    Reading paths that this run's note universe does not cover (so it will
+    not re-scan/re-tag/re-write them itself)."""
+    if is_relpath_in_scope(READING_NOTES_ROOT, notes_paths):
+        return []
+    return [p for p in state_paths if is_under_reading_root(p)]
+
+
+def _snapshot_chroma_rows(rows: Dict) -> Optional[Dict]:
+    ids = list(rows.get("ids") or [])
+    if not ids:
+        return None
+
+    def as_list(value):
+        if value is None:
+            return None
+        if hasattr(value, "tolist"):
+            return value.tolist()
+        return list(value)
+
+    snapshot = {
+        "ids": ids,
+        "embeddings": as_list(rows.get("embeddings")),
+        "metadatas": list(rows.get("metadatas") or []),
+        "documents": list(rows.get("documents") or []),
+    }
+    if any(snapshot[key] is None or len(snapshot[key]) != len(ids) for key in ("embeddings", "metadatas", "documents")):
+        raise ValueError("Chroma snapshot payload is incomplete.")
+    return snapshot
+
+
+def rebuild_collections_preserving_reading(
+    client,
+    chunks_collection_name: str,
+    notes_collection_name: str,
+    tracked_reading_paths: List[str],
+    collection_metadata: Dict,
+):
+    """Deletes and recreates both Chroma collections for --rebuild while
+    preserving any tracked Reading annotation rows across the delete:
+    --rebuild is mutually exclusive with --include-reading-pending, so a
+    non-Reading rebuild cannot re-scan/re-tag/re-write those notes itself to
+    regenerate their vectors. Snapshotting and restoring the existing rows
+    (a pure data copy through the Chroma API, no LLM/embedding calls, no
+    vault reads/writes) is the lightest way to keep them intact.
+
+    Fails with RuntimeError *before* deleting anything if a tracked row
+    cannot be safely snapshotted first, rather than deleting the index and
+    then discovering the preserved copy is incomplete.
+    """
+    preserved_chunks: List[Dict] = []
+    preserved_notes: List[Dict] = []
+    if tracked_reading_paths:
+        try:
+            pre_chunks = client.get_or_create_collection(name=chunks_collection_name, metadata=collection_metadata)
+            pre_notes = client.get_or_create_collection(name=notes_collection_name, metadata=collection_metadata)
+            for reading_path in tracked_reading_paths:
+                chunk_rows = _snapshot_chroma_rows(
+                    pre_chunks.get(where={"path": reading_path}, include=["embeddings", "metadatas", "documents"])
+                )
+                note_rows = _snapshot_chroma_rows(
+                    pre_notes.get(where={"path": reading_path}, include=["embeddings", "metadatas", "documents"])
+                )
+                if chunk_rows is None or note_rows is None:
+                    raise ValueError(f"Tracked Reading path has incomplete Chroma rows: {reading_path}")
+                preserved_chunks.append(chunk_rows)
+                preserved_notes.append(note_rows)
+        except Exception as exc:
+            raise RuntimeError(
+                diagnostic_line(
+                    "error",
+                    "REBUILD_READING_PRESERVATION_FAILED",
+                    f"Cannot safely rebuild: {len(tracked_reading_paths)} Reading annotation row(s) could not be "
+                    "snapshotted before deleting the vector index.",
+                    guidance="Retry after resolving the ChromaDB read failure, or include Books/Apple Books in "
+                    "this run's scope to let the rebuild cover it directly.",
+                    context={"tracked_reading_paths": len(tracked_reading_paths)},
+                )
+            ) from exc
+
+    for collection_name in (chunks_collection_name, notes_collection_name):
+        try:
+            client.delete_collection(collection_name)
+        except Exception:
+            pass
+
+    chunks = client.get_or_create_collection(name=chunks_collection_name, metadata=collection_metadata)
+    notes_col = client.get_or_create_collection(name=notes_collection_name, metadata=collection_metadata)
+
+    try:
+        for rows in preserved_chunks:
+            chunks.add(ids=rows["ids"], embeddings=rows["embeddings"], metadatas=rows["metadatas"], documents=rows["documents"])
+        for rows in preserved_notes:
+            notes_col.add(ids=rows["ids"], embeddings=rows["embeddings"], metadatas=rows["metadatas"], documents=rows["documents"])
+    except Exception as exc:
+        raise RuntimeError(
+            diagnostic_line(
+                "error",
+                "REBUILD_READING_RESTORE_FAILED",
+                f"Rebuild deleted the vector index but restoring {len(tracked_reading_paths)} preserved Reading "
+                f"row(s) failed: {exc}",
+                guidance="Reading notes may need daily reprocessing to recover; check ChromaDB health.",
+                context={"tracked_reading_paths": len(tracked_reading_paths)},
+            )
+        ) from exc
+
+    return chunks, notes_col
+
+
+APPLE_ANNOTATION_CLEARED_KEYS = ["summary", "tags"]
+
+
+def apply_note_frontmatter_write(
+    original: str,
+    note: "Note",
+    updates: Dict,
+    frontmatter_keys: List[str],
+    mindmap_heading: str,
+    write_mindmap_section: bool,
+    remove_mindmap_section: bool,
+    related_items: Optional[List] = None,
+) -> str:
+    """The single write seam for note frontmatter/body updates. Apple Books
+    annotation notes clear generated summary/tags and never gain (and always
+    lose any existing) generated Mindmap/Related body section, regardless of
+    write_mindmap_section/remove_mindmap_section; ordinary notes keep the
+    existing behavior unchanged."""
+    remove_keys = APPLE_ANNOTATION_CLEARED_KEYS if note.is_apple_annotation else None
+    updated = update_frontmatter(original, updates, frontmatter_keys, remove_keys=remove_keys)
+    if note.is_apple_annotation:
+        # Skip the strip entirely (rather than a no-op strip) when there is
+        # nothing managed to remove, to preserve byte-for-byte output (e.g.
+        # CRLF line endings) on annotation notes that never had one.
+        if contains_managed_related_content(updated, mindmap_heading):
+            updated = f"{strip_trailing_dividers(strip_related_section(updated, mindmap_heading))}\n"
+    elif write_mindmap_section:
+        links = related_items or updates.get("related", [])
+        updated = update_related_section(updated, mindmap_heading, links)
+    elif remove_mindmap_section:
+        updated = strip_related_section(updated, mindmap_heading)
+    return updated
+
+
+def build_metadata_updates(note: "Note", summary: str, tags: List[str], concepts: List[str], related: List[str]) -> Dict:
+    """Apple Books annotation notes never persist generated summary/tags, and
+    render concepts/related as readable Obsidian wikilinks instead of raw
+    values; ordinary notes keep the existing plain-value metadata shape."""
+    if note.is_apple_annotation:
+        return {
+            "concepts": apple_annotation_concept_wikilinks(concepts),
+            "related": apple_annotation_related_wikilinks(related),
+        }
+    return {
+        "summary": summary,
+        "tags": tags,
+        "concepts": concepts,
+        "related": related,
+    }
 
 
 def normalize_scope_folder(folder: str) -> str:
@@ -528,6 +802,20 @@ def strip_related_section(text: str, heading: str) -> str:
         i += 1
 
     return "\n".join(cleaned).strip() + "\n"
+
+
+def contains_managed_related_content(text: str, heading: str) -> bool:
+    """True only when `strip_related_section` would actually change `text`,
+    so callers can skip it and keep byte-for-byte (e.g. CRLF) output when
+    there is nothing to remove."""
+    lowered = text.lower()
+    if "mindmap:start" in lowered or "mindmap:end" in lowered:
+        return True
+    heading_line = heading.strip().lower()
+    legacy_headings = {heading_line, "## related", "## mindmap"}
+    if any(line.strip().lower() in legacy_headings for line in text.splitlines()):
+        return True
+    return bool(re.search(r"^>\s*\[!.*\]-\s*(mindmap|related)\s*$", text, re.I | re.M))
 
 
 def normalize_tags(tags: List[str]) -> List[str]:
@@ -1012,7 +1300,13 @@ def list_notes(vault_root: Path, notes_paths: List[str], min_words: int, related
             body = strip_related_section(body, related_heading)
             if not note_meets_minimum(text, fm, min_words, body=body):
                 continue
-            notes.append(Note(path=path, relpath=relpath, title=title, body=body))
+            notes.append(Note(
+                path=path,
+                relpath=relpath,
+                title=title,
+                body=body,
+                is_apple_annotation=frontmatter_is_apple_annotation(fm),
+            ))
     return notes
 
 
@@ -1137,7 +1431,7 @@ def select_mindmap_links(
     return picked[:related_limit]
 
 
-def update_frontmatter(text: str, updates: Dict, preferred_order: List[str]) -> str:
+def update_frontmatter(text: str, updates: Dict, preferred_order: List[str], remove_keys: Optional[List[str]] = None) -> str:
     frontmatter, body = split_frontmatter(text)
     yaml = make_yaml_round_trip()
     data = yaml.load(frontmatter) if frontmatter is not None else None
@@ -1151,6 +1445,8 @@ def update_frontmatter(text: str, updates: Dict, preferred_order: List[str]) -> 
             data[key] = updates[key]
     for key, value in updates.items():
         data[key] = value
+    for key in remove_keys or []:
+        data.pop(key, None)
 
     fm_text = dump_frontmatter(data)
     if frontmatter is None:
@@ -2086,7 +2382,13 @@ def load_note_by_relpath(vault_root: Path, relpath: str, related_heading: str, m
                 context={"path": relpath, "min_words": minimum_words_for_note(fm, min_words)},
             )
         )
-    return Note(path=target, relpath=target.relative_to(vault_root).as_posix(), title=target.stem, body=body)
+    return Note(
+        path=target,
+        relpath=target.relative_to(vault_root).as_posix(),
+        title=target.stem,
+        body=body,
+        is_apple_annotation=frontmatter_is_apple_annotation(fm),
+    )
 
 
 def list_notes_from_relpaths(vault_root: Path, relpaths: List[str], min_words: int, related_heading: str) -> List[Note]:
@@ -2305,6 +2607,11 @@ def main():
     parser.add_argument("--preview", action="store_true", help="Log generated metadata JSON")
     parser.add_argument("--apply-preview", action="store_true", help="Apply the last preview.jsonl to notes")
     parser.add_argument("--quiet", action="store_true", help="Reduce progress output")
+    parser.add_argument(
+        "--include-reading-pending",
+        action="store_true",
+        help="Extend an --all --apply maintenance run's note universe with pending Books/Apple Books annotations",
+    )
     scope_group = parser.add_mutually_exclusive_group()
     scope_group.add_argument("--current", action="store_true", help="Use current scope folders from config")
     scope_group.add_argument("--all", action="store_true", help="Use all scope folders from config")
@@ -2320,6 +2627,21 @@ def main():
         ):
             if enabled:
                 parser.error(f"argument --note: not allowed with argument {flag}")
+    if args.include_reading_pending:
+        for flag, enabled in (
+            ("--current", args.current),
+            ("--note", bool(args.note)),
+            ("--refresh-all", args.refresh_all),
+            ("--rebuild", args.rebuild),
+            ("--preview", args.preview),
+            ("--apply-preview", args.apply_preview),
+        ):
+            if enabled:
+                parser.error(f"argument --include-reading-pending: not allowed with argument {flag}")
+        if not args.all:
+            parser.error("argument --include-reading-pending: requires --all")
+        if not args.apply:
+            parser.error("argument --include-reading-pending: requires --apply")
     config_path = resolve_config_path(args.config)
 
     if args.apple_books_preflight:
@@ -2358,6 +2680,10 @@ def main():
         notes_paths = config["notes_paths"]
     else:
         notes_paths = [config["notes_path"]]
+    if args.all and args.include_reading_pending and not is_relpath_in_scope(READING_NOTES_ROOT, notes_paths):
+        # Extends only this run's in-memory note universe; the loaded config
+        # dict (and therefore config.json) is never written back to disk.
+        notes_paths = [*notes_paths, READING_NOTES_ROOT]
     db_path = vault_root / config["db_path"]
     state_path = vault_root / config["state_path"]
     log_path = vault_root / config["log_path"]
@@ -2579,19 +2905,20 @@ def main():
         return 1
     chunks_collection = "mindmap_chunks"
     notes_collection = "mindmap_notes"
+    collection_metadata = {"hnsw:space": "cosine"}
 
     if args.rebuild:
+        tracked_reading_paths = reading_paths_excluded_from_rebuild_scan(state_files.keys(), notes_paths)
         try:
-            client.delete_collection(chunks_collection)
-        except Exception:
-            pass
-        try:
-            client.delete_collection(notes_collection)
-        except Exception:
-            pass
-
-    chunks = client.get_or_create_collection(name=chunks_collection, metadata={"hnsw:space": "cosine"})
-    notes_col = client.get_or_create_collection(name=notes_collection, metadata={"hnsw:space": "cosine"})
+            chunks, notes_col = rebuild_collections_preserving_reading(
+                client, chunks_collection, notes_collection, tracked_reading_paths, collection_metadata,
+            )
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr, flush=True)
+            return 1
+    else:
+        chunks = client.get_or_create_collection(name=chunks_collection, metadata=collection_metadata)
+        notes_col = client.get_or_create_collection(name=notes_collection, metadata=collection_metadata)
 
     log_lines = []
     preview_lines = []
@@ -2647,12 +2974,16 @@ def main():
             )
 
         original = target_path.read_text(encoding="utf-8", errors="ignore")
-        updated = update_frontmatter(original, updates, config["frontmatter_keys"])
-        if write_mindmap_section:
-            links = related_items or updates.get("related", [])
-            updated = update_related_section(updated, mindmap_heading, links)
-        elif remove_mindmap_section:
-            updated = strip_related_section(updated, mindmap_heading)
+        updated = apply_note_frontmatter_write(
+            original,
+            note,
+            updates,
+            config["frontmatter_keys"],
+            mindmap_heading,
+            write_mindmap_section,
+            remove_mindmap_section,
+            related_items,
+        )
         if updated != original:
             target_path.write_text(updated, encoding="utf-8")
             return True
@@ -2687,7 +3018,7 @@ def main():
 
     # Clean up removed notes
     current_paths = {n.relpath for n in notes}
-    removed_paths = [] if individual_target else [p for p in state_files.keys() if p not in current_paths]
+    removed_paths = [] if individual_target else compute_removed_paths(state_files.keys(), current_paths, notes_paths)
     if removed_paths:
         for path in removed_paths:
             chunks.delete(where={"path": path})
@@ -2951,12 +3282,7 @@ def main():
 
             if args.apply and apply_per_note:
                 staged_write_ok[note.relpath] = False
-                updates = {
-                    "summary": summary,
-                    "tags": tags,
-                    "concepts": concepts,
-                    "related": related,
-                }
+                updates = build_metadata_updates(note, summary, tags, concepts, related)
                 try:
                     changed = write_note_update(note, updates, related_items)
                     staged_write_ok[note.relpath] = True
@@ -2979,12 +3305,7 @@ def main():
         for item in staged:
             note = item["note"]
             final_tags = item.get("tags_filtered", item["tags"])
-            updates = {
-                "summary": item["summary"],
-                "tags": final_tags,
-                "concepts": item["concepts"],
-                "related": item["related"],
-            }
+            updates = build_metadata_updates(note, item["summary"], final_tags, item["concepts"], item["related"])
 
             if args.apply:
                 if apply_per_note and final_tags == item["tags"]:

@@ -34,6 +34,19 @@ void test("plugin-managed agents use protected-independent working and log paths
   assert.notEqual(specs[0].stderrPath, specs[1].stderrPath);
 });
 
+void test("only the daily LaunchAgent includes the Reading pending backlog flag", () => {
+  const command = { command: "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3", args: ["/vault/.obsidian/plugins/mindmap-ai/python/mindmap.py", "--config", "/vault/.obsidian/plugins/mindmap-ai/python/config.json"], cwd: "/vault/.obsidian/plugins/mindmap-ai/python" };
+  const homeDirectory = "/Users/me";
+  const specs = buildPluginLaunchAgentSpecs({ command, homeDirectory, plistDirectory: path.join(homeDirectory, "Library", "LaunchAgents"), pathEnvironment: "/usr/bin:/bin", settings: { launchAgentDailyHour: 2, launchAgentDailyMinute: 30, launchAgentWeeklyEnabled: true, launchAgentWeeklyHour: 3, launchAgentWeeklyMinute: 0 } });
+  const daily = specs.find((spec) => spec.label === "com.mindmap.daily");
+  const weekly = specs.find((spec) => spec.label === "com.mindmap.weekly");
+  assert.ok(daily?.programArguments.includes("--include-reading-pending"));
+  assert.ok(!weekly?.programArguments.includes("--include-reading-pending"));
+  assert.ok(daily?.programArguments.includes("--all"));
+  assert.ok(daily?.programArguments.includes("--apply"));
+  assert.ok(weekly?.programArguments.includes("--refresh-all"));
+});
+
 void test("aggregates agent health and keeps the latest successful heartbeat", () => {
   const observations: LaunchAgentObservation[] = [
     { label: "com.mindmap.daily", launchctl: { loaded: true, state: "exited", lastExitCode: 0 }, health: "healthy", lastSuccessfulRunAt: 100 },
