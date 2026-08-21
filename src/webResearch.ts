@@ -15,15 +15,17 @@ export interface LocalResearchModel {
   synthesize(request: ResearchRequest, sources: ResearchResult["sources"]): Promise<string>;
 }
 
-export interface ManualResearchDependencies {
+export interface ResearchCollector {
   provider: ResearchProvider;
   model: LocalResearchModel;
+}
+
+export interface ManualResearchDependencies extends ResearchCollector {
   vault: ReadingVault;
 }
 
-export async function researchNote(
-  deps: ManualResearchDependencies,
-  note: VaultEntry,
+export async function collectResearch(
+  deps: ResearchCollector,
   request: ResearchRequest,
 ): Promise<ResearchResult | null> {
   const bounded = { ...request, text: boundResearchText(request.text, request.maxChars) };
@@ -36,7 +38,16 @@ export async function researchNote(
     .filter((source): source is NonNullable<typeof source> => source !== null));
   if (sources.length === 0) return null;
   const synthesis = await deps.model.synthesize(bounded, sources);
-  const result = { synthesis, sources };
+  return { synthesis, sources };
+}
+
+export async function researchNote(
+  deps: ManualResearchDependencies,
+  note: VaultEntry,
+  request: ResearchRequest,
+): Promise<ResearchResult | null> {
+  const result = await collectResearch(deps, request);
+  if (!result) return null;
   if (!(await writeResearch(deps.vault, note, result))) return null;
   return result;
 }

@@ -57,6 +57,7 @@ export interface ReadingStateEntry {
   importedAt: string;
   researchStatus: ResearchStatus;
   processedAt: string | null;
+  researchPath?: string;
 }
 
 export interface ReadingState {
@@ -233,12 +234,17 @@ export function parseReadingState(value: unknown): ReadingState {
       throw new Error(`Invalid Reading Mode state: duplicate note path ${rawEntry.notePath}.`);
     }
     notePaths.add(rawEntry.notePath);
+    const researchPath = rawEntry.researchPath;
+    const validResearchPath = typeof researchPath === "string" && isValidResearchPathForNote(researchPath, rawEntry.notePath)
+      ? researchPath
+      : undefined;
     annotations[id] = {
       contentHash: rawEntry.contentHash,
       notePath: rawEntry.notePath,
       importedAt: rawEntry.importedAt,
       researchStatus: rawEntry.researchStatus,
       processedAt: rawEntry.processedAt,
+      ...(validResearchPath ? { researchPath: validResearchPath } : {}),
     };
   }
   return { version: READING_STATE_VERSION, lastSyncAt: value.lastSyncAt, annotations };
@@ -362,6 +368,30 @@ export function annotationContentHash(annotation: AppleBooksAnnotation): string 
     created_at: annotation.created_at ?? null,
     modified_at: annotation.modified_at ?? null,
   })).digest("hex");
+}
+
+export function hasControlOrDelimiterChar(value: string): boolean {
+  return Array.from(value).some((ch) => {
+    const code = ch.codePointAt(0) ?? 0;
+    return code <= 31 || code === 127 || ch === "[" || ch === "]" || ch === "|";
+  });
+}
+
+export function isValidResearchPathForNote(researchPath: string, notePath: string): boolean {
+  const rp = researchPath.replace(/\\/g, "/");
+  if (!isSafeReadingPath(rp)) return false;
+  if (hasControlOrDelimiterChar(rp)) return false;
+  const rParts = rp.split("/");
+  if (rParts.length !== 6 || rParts[4] !== "Research") return false;
+  const np = notePath.replace(/\\/g, "/");
+  if (!isSafeReadingPath(np)) return false;
+  if (hasControlOrDelimiterChar(np)) return false;
+  const nParts = np.split("/");
+  if (nParts.length !== 6 || nParts[4] !== READING_ANNOTATIONS_FOLDER) return false;
+  for (let i = 0; i < 4; i++) {
+    if (rParts[i] !== nParts[i]) return false;
+  }
+  return true;
 }
 
 export function annotationIsTooShort(annotation: AppleBooksAnnotation): boolean {

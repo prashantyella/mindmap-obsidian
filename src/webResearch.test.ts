@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { ExaResearchProvider } from "./exaResearchProvider";
 import { getExaCredential } from "./keychainCredential";
 import { RESEARCH_END, RESEARCH_START, renderCompanionResearchContent, renderResearchBlock, upsertResearchBlock } from "./researchWriter";
-import { researchNote } from "./webResearch";
+import { collectResearch, researchNote } from "./webResearch";
 import type { ReadingVault, VaultEntry } from "./readingVault";
 
 class MemoryVault implements ReadingVault {
@@ -154,4 +154,38 @@ test("renderResearchBlock output is byte-identical to the original format", () =
   assert.ok(block.endsWith(RESEARCH_END));
   assert.ok(block.includes("## Research"));
   assert.ok(block.includes("### Sources"));
+});
+
+test("collectResearch returns a validated result without writing to the vault", async () => {
+  const model = { deriveQueries: async () => ["query"], synthesize: async () => "Grounded [1]" };
+  const provider = { search: async () => [{ title: "Source", url: "https://example.com/s", retrievedAt: "2026-01-01T00:00:00Z", highlights: ["fact"] }] };
+  const result = await collectResearch({ provider, model }, { text: "bounded text for research", maxChars: 100 });
+  assert.ok(result);
+  assert.equal(result.synthesis, "Grounded [1]");
+  assert.equal(result.sources.length, 1);
+  assert.equal(result.sources[0]?.url, "https://example.com/s");
+});
+
+test("collectResearch returns null on empty sources without throwing", async () => {
+  const model = { deriveQueries: async () => ["query"], synthesize: async () => "Claim [1]" };
+  const empty = { search: async () => [] };
+  const result = await collectResearch({ provider: empty, model }, { text: "bounded text", maxChars: 100 });
+  assert.equal(result, null);
+});
+
+test("collectResearch throws on empty input text", async () => {
+  const model = { deriveQueries: async () => ["query"], synthesize: async () => "Claim [1]" };
+  const provider = { search: async () => [] };
+  await assert.rejects(() => collectResearch({ provider, model }, { text: "", maxChars: 100 }), /text/i);
+});
+
+test("researchNote remains API-compatible: collects and writes inline", async () => {
+  const vault = new MemoryVault();
+  const note = vault.get("Notes/a.md")!;
+  const model = { deriveQueries: async () => ["query"], synthesize: async () => "Grounded [1]" };
+  const provider = { search: async () => [{ title: "Source", url: "https://example.com/s", retrievedAt: "2026-01-01T00:00:00Z", highlights: ["fact"] }] };
+  const result = await researchNote({ provider, model, vault }, note, { text: "bounded text for research", maxChars: 100 });
+  assert.ok(result);
+  assert.match(vault.text, /mindmap:research:start/);
+  assert.match(vault.text, /Grounded \[1\]/);
 });

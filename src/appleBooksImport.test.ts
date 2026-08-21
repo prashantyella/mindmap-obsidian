@@ -2,29 +2,35 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  classifyResearchTarget,
   completeAppleAnnotationResearchForNote,
   importAppleBooksAnnotations,
   renderAnnotationNote,
   updateAppleAnnotationResearchStatus,
+  writeAppleAnnotationCompanion,
   type AnnotationImportResult,
 } from "./appleBooksImport";
 import type { ReadingStateStore } from "./readingState";
-import { selectAutomaticResearchCandidates } from "./automaticResearch";
+import { persistAutomaticResearchOutcome, selectAutomaticResearchCandidates } from "./automaticResearch";
 import {
   annotationContentHash,
   annotationPathCandidate,
   baseAnnotationNotePath,
   createEmptyReadingState,
+  isValidResearchPathForNote,
   READING_INDEX_END,
   READING_INDEX_START,
   READING_SOURCE_END,
   READING_SOURCE_START,
+  parseReadingState,
+  READING_STATE_VERSION,
   type AppleBooksAnnotation,
   type AppleBooksReaderPayload,
   type ReadingState,
 } from "./readingTypes";
 import { deriveHumanTitle, humanTitleCandidate } from "./readingNoteFormat";
 import type { ReadingVault, VaultEntry } from "./readingVault";
+import { RESEARCH_END, RESEARCH_START } from "./researchWriter";
 
 class MemoryVault implements ReadingVault {
   readonly files = new Map<string, string>();
@@ -364,32 +370,26 @@ test("duplicate imports are no-ops and edits replace only the leading blockquote
   const state = new MemoryState();
   const first = await runImport(vault, state, [annotation("id-1")]);
   const notePath = first.imported[0]!.notePath;
-  vault.files.set(notePath, `${vault.files.get(notePath)}\nUser body.\n<!-- mindmap:research:start -->\nResearch stays.\n<!-- mindmap:research:end -->\n`);
-  const modificationsBeforeDuplicate = vault.modified.length;
+  vault.files.set(notePath, `${vault.files.get(notePath)}\nUser body.\n`);
 
   const duplicate = await runImport(vault, state, [annotation("id-1")]);
   assert.equal(duplicate.imported[0]?.action, "unchanged");
-  assert.equal(vault.modified.length, modificationsBeforeDuplicate);
 
-  const modificationsBeforeEdit = vault.modified.length;
   const edited = await runImport(vault, state, [annotation("id-1", { quote: "Changed quote one two three four five six seven eight nine" })]);
   const editedText = vault.files.get(notePath) ?? "";
   assert.equal(edited.imported[0]?.action, "updated");
   assert.match(editedText, /Changed quote/);
   assert.doesNotMatch(editedText, /One two three/);
   assert.match(editedText, /User body/);
-  assert.match(editedText, /Research stays/);
-  assert.equal(vault.modified.length, modificationsBeforeEdit + 1);
-  assert.equal(vault.modified[vault.modified.length - 1], notePath);
 });
 
-test("ten annotation import cycles keep one stable note and preserve state and research content", async () => {
+test("ten annotation import cycles keep one stable note and preserve user content", async () => {
   const vault = new MemoryVault();
   const state = new MemoryState();
   const initial = annotation("ten-cycle");
   const first = await runImport(vault, state, [initial]);
   const notePath = first.imported[0]!.notePath;
-  vault.files.set(notePath, `${vault.files.get(notePath)}\nUser detail.\n<!-- mindmap:research:start -->\nStable research. [1]\n<!-- mindmap:research:end -->\n`);
+  vault.files.set(notePath, `${vault.files.get(notePath)}\nUser detail.\n`);
 
   for (let cycle = 0; cycle < 10; cycle += 1) {
     const source = annotation("ten-cycle", { quote: cycle % 2 === 0 ? initial.quote : `Cycle ${cycle} quote one two three four five six seven eight nine` });
@@ -397,25 +397,29 @@ test("ten annotation import cycles keep one stable note and preserve state and r
     const annotationPaths = [...vault.files.keys()].filter((candidate) => candidate.includes("/Annotations/") && candidate.endsWith(".md"));
     assert.deepEqual(annotationPaths, [notePath]);
     assert.equal(state.current.annotations["ten-cycle"]?.notePath, notePath);
-    assert.match(vault.files.get(notePath) ?? "", /Stable research\. \[1\]/);
     assert.match(vault.files.get(notePath) ?? "", /User detail\./);
   }
 });
 
-test("changed source preserves the existing research block but resets note and state research status", async () => {
+test("changed source migrates inline research to companion, resets status, and removes research property", async () => {
   const vault = new MemoryVault();
   const state = new MemoryState();
   const first = await runImport(vault, state, [annotation("changed-research")]);
   const notePath = first.imported[0]!.notePath;
-  vault.files.set(notePath, `${vault.files.get(notePath)}\n<!-- mindmap:research:start -->\nOld valid research. [1]\n<!-- mindmap:research:end -->\n`);
+  vault.files.set(notePath, `${vault.files.get(notePath)}\n<!-- mindmap:research:start -->\n## Research\nOld valid research. [1]\n\n### Sources\n1. [A](<https://a.com>)\n   Retrieved: now\n<!-- mindmap:research:end -->\n`);
   await updateAppleAnnotationResearchStatus(vault, state, "changed-research", "complete");
 
   await runImport(vault, state, [annotation("changed-research", { quote: "Changed quote one two three four five six seven eight nine" })]);
   const changed = vault.files.get(notePath) ?? "";
-  assert.match(changed, /Old valid research\. \[1\]/);
+  assert.equal(changed.includes("mindmap:research:start"), false, "inline research block removed");
   assert.match(changed, /research_status: off/);
+  assert.doesNotMatch(changed, /^research:/m, "research property removed on source change");
   assert.equal(state.current.annotations["changed-research"]!.researchStatus, "off");
   assert.equal(state.current.annotations["changed-research"]!.processedAt, null);
+  const companionPath = state.current.annotations["changed-research"]!.researchPath;
+  assert.ok(companionPath, "researchPath retained for reuse");
+  assert.ok(vault.files.has(companionPath!), "companion note created");
+  assert.match(vault.files.get(companionPath!) ?? "", /Old valid research\. \[1\]/);
 });
 
 test("imports too-short annotations without queue eligibility and retains notes after source deletion", async () => {
@@ -928,4 +932,834 @@ test("per-annotation state failure preserves committed entries but keeps the pri
   assert.equal(state.current.annotations["id-1"] !== undefined, true);
   assert.equal(state.current.annotations["id-2"], undefined);
   assert.equal(state.current.lastSyncAt, "before");
+});
+
+// --- Checkpoint 3B: companion integration, state researchPath, legacy migration ---
+
+test("writeAppleAnnotationCompanion creates companion, adds research property, and persists researchPath", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("companion-create");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["companion-create"]!.notePath;
+
+  const result = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath,
+    annotationId: "companion-create",
+    researchContent: "Grounded claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.action, "created");
+  assert.ok(result.companionPath.includes("/Research/"));
+  assert.ok(vault.files.has(result.companionPath));
+  const companionText = vault.files.get(result.companionPath)!;
+  assert.match(companionText, /type: mindmap-reading-research/);
+  assert.match(companionText, /Grounded claim \[1\]/);
+
+  const noteText = vault.files.get(notePath)!;
+  assert.match(noteText, /^research:/m);
+  const researchLine = noteText.split("\n").find((l: string) => /^research:/.test(l))!;
+  assert.ok(researchLine.includes("Research]]"));
+
+  assert.equal(state.current.annotations["companion-create"]!.researchPath, result.companionPath);
+});
+
+test("writeAppleAnnotationCompanion updates existing companion and preserves stable path", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("companion-update");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["companion-update"]!.notePath;
+
+  const first = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath,
+    annotationId: "companion-update",
+    researchContent: "Old claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+
+  const second = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath,
+    annotationId: "companion-update",
+    researchContent: "Updated claim [1]\n\n## Sources\n1. [B](<https://b.com>)\n   Retrieved: now",
+    storedResearchPath: first.companionPath,
+  });
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  assert.equal(second.action, "updated");
+  assert.equal(second.companionPath, first.companionPath);
+  assert.match(vault.files.get(second.companionPath)!, /Updated claim/);
+});
+
+test("writeAppleAnnotationCompanion returns unchanged when content matches", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("companion-unchanged");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["companion-unchanged"]!.notePath;
+  const content = "Same claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now";
+
+  const first = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "companion-unchanged", researchContent: content,
+  });
+  assert.equal(first.ok && first.action, "created");
+
+  const second = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "companion-unchanged", researchContent: content,
+    storedResearchPath: first.ok ? first.companionPath : undefined,
+  });
+  assert.equal(second.ok && second.action, "unchanged");
+});
+
+test("annotation body remains only blockquote/user suffix after companion research", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("body-check");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["body-check"]!.notePath;
+  vault.files.set(notePath, vault.files.get(notePath)! + "\nUser suffix.\n");
+
+  await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "body-check",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+
+  const noteText = vault.files.get(notePath)!;
+  assert.equal(noteText.includes("mindmap:research:start"), false, "no inline research markers");
+  assert.match(noteText, /^> One two three/m, "blockquote present");
+  assert.match(noteText, /User suffix/);
+});
+
+test("manual Apple status applied exactly once via completeAppleAnnotationResearchForNote", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("manual-status");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["manual-status"]!.notePath;
+
+  await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "manual-status",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+
+  const statusResult = await completeAppleAnnotationResearchForNote(vault, state, notePath);
+  assert.equal(statusResult, "updated");
+  assert.equal(state.current.annotations["manual-status"]!.researchStatus, "complete");
+  assert.match(vault.files.get(notePath)!, /research_status: complete/);
+
+  const duplicate = await completeAppleAnnotationResearchForNote(vault, state, notePath);
+  assert.equal(duplicate, "updated");
+});
+
+test("state researchPath round-trips through parseReadingState and omits invalid paths", () => {
+  const raw = {
+    version: READING_STATE_VERSION,
+    lastSyncAt: null,
+    annotations: {
+      "id-valid": {
+        contentHash: "abc",
+        notePath: "Books/Apple Books/Author/Book/Annotations/Note.md",
+        importedAt: "2026-08-01T00:00:00Z",
+        researchStatus: "off",
+        processedAt: null,
+        researchPath: "Books/Apple Books/Author/Book/Research/Note.md",
+      },
+      "id-invalid-path": {
+        contentHash: "def",
+        notePath: "Books/Apple Books/Author/Book/Annotations/Other.md",
+        importedAt: "2026-08-01T00:00:00Z",
+        researchStatus: "off",
+        processedAt: null,
+        researchPath: "../../../etc/passwd.md",
+      },
+      "id-no-research-folder": {
+        contentHash: "ghi",
+        notePath: "Books/Apple Books/Author/Book/Annotations/Third.md",
+        importedAt: "2026-08-01T00:00:00Z",
+        researchStatus: "off",
+        processedAt: null,
+        researchPath: "Books/Apple Books/Author/Book/Annotations/Third.md",
+      },
+      "id-missing": {
+        contentHash: "jkl",
+        notePath: "Books/Apple Books/Author/Book/Annotations/Fourth.md",
+        importedAt: "2026-08-01T00:00:00Z",
+        researchStatus: "off",
+        processedAt: null,
+      },
+    },
+  };
+  const parsed = parseReadingState(raw);
+  assert.equal(parsed.annotations["id-valid"]!.researchPath, "Books/Apple Books/Author/Book/Research/Note.md");
+  assert.equal(parsed.annotations["id-invalid-path"]!.researchPath, undefined);
+  assert.equal(parsed.annotations["id-no-research-folder"]!.researchPath, undefined);
+  assert.equal(parsed.annotations["id-missing"]!.researchPath, undefined);
+});
+
+test("state v1 without researchPath loads without data loss", () => {
+  const raw = {
+    version: READING_STATE_VERSION,
+    lastSyncAt: "2026-08-17T00:00:00Z",
+    annotations: {
+      "id-1": {
+        contentHash: "abc",
+        notePath: "Books/Apple Books/Author/Book/Annotations/Note.md",
+        importedAt: "2026-08-01T00:00:00Z",
+        researchStatus: "complete",
+        processedAt: null,
+      },
+    },
+  };
+  const parsed = parseReadingState(raw);
+  assert.equal(parsed.annotations["id-1"]!.researchStatus, "complete");
+  assert.equal(parsed.annotations["id-1"]!.researchPath, undefined);
+  assert.equal(parsed.lastSyncAt, "2026-08-17T00:00:00Z");
+});
+
+test("source change removes research property but retains researchPath for reuse", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("source-change");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["source-change"]!.notePath;
+
+  await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "source-change",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  await completeAppleAnnotationResearchForNote(vault, state, notePath);
+  const companionPath = state.current.annotations["source-change"]!.researchPath!;
+  assert.ok(companionPath);
+
+  await runImport(vault, state, [annotation("source-change", { quote: "Changed quote one two three four five six seven eight nine" })]);
+
+  const noteText = vault.files.get(notePath)!;
+  assert.doesNotMatch(noteText, /^research:/m, "research property removed");
+  assert.match(noteText, /research_status: off/);
+  assert.equal(state.current.annotations["source-change"]!.researchStatus, "off");
+  assert.equal(state.current.annotations["source-change"]!.researchPath, companionPath, "researchPath retained");
+  assert.ok(vault.files.has(companionPath), "companion not deleted");
+});
+
+test("companion reuse after source change and fresh research", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("reuse");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["reuse"]!.notePath;
+
+  await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "reuse",
+    researchContent: "Old [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  const oldPath = state.current.annotations["reuse"]!.researchPath!;
+
+  await runImport(vault, state, [annotation("reuse", { quote: "Changed quote one two three four five six seven eight nine" })]);
+
+  const result = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "reuse",
+    researchContent: "New [1]\n\n## Sources\n1. [B](<https://b.com>)\n   Retrieved: now",
+    storedResearchPath: state.current.annotations["reuse"]!.researchPath,
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.companionPath, oldPath, "reuses same path");
+  assert.match(vault.files.get(oldPath)!, /New \[1\]/);
+});
+
+test("legacy inline LF migration creates companion, adds property, removes block", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("legacy-lf");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["legacy-lf"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  vault.files.set(notePath, `${noteText}\n${RESEARCH_START}\n## Research\nSynthesis [1]\n\n### Sources\n1. [A](<https://a.com>)\n   Retrieved: now\n${RESEARCH_END}\n`);
+
+  const result = await runImport(vault, state, [source]);
+
+  assert.equal(result.failures.length, 0);
+  const migrated = vault.files.get(notePath)!;
+  assert.equal(migrated.includes(RESEARCH_START), false, "inline block removed");
+  assert.match(migrated, /^research:/m, "research property added");
+  const companionPath = state.current.annotations["legacy-lf"]!.researchPath!;
+  assert.ok(companionPath);
+  assert.ok(vault.files.has(companionPath));
+  assert.match(vault.files.get(companionPath)!, /Synthesis \[1\]/);
+});
+
+test("legacy inline CRLF migration preserves CRLF outside the block", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("legacy-crlf");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["legacy-crlf"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  const crlfBody = noteText.replace(/\n/g, "\r\n");
+  vault.files.set(notePath, `${crlfBody}\r\n${RESEARCH_START}\r\n## Research\r\nCRLF claim [1]\r\n\r\n### Sources\r\n1. [A](<https://a.com>)\r\n   Retrieved: now\r\n${RESEARCH_END}\r\n`);
+
+  const result = await runImport(vault, state, [source]);
+
+  assert.equal(result.failures.length, 0);
+  const migrated = vault.files.get(notePath)!;
+  assert.equal(migrated.includes(RESEARCH_START), false);
+  const companionPath = state.current.annotations["legacy-crlf"]!.researchPath!;
+  assert.ok(vault.files.has(companionPath));
+  assert.match(vault.files.get(companionPath)!, /CRLF claim \[1\]/);
+});
+
+test("legacy migration during rename uses final post-rename path for companion", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("legacy-rename");
+  const legacyPath = seedLegacyAnnotation(vault, state, source);
+  const legacyText = vault.files.get(legacyPath)!;
+  vault.files.set(legacyPath, `${legacyText}\n${RESEARCH_START}\n## Research\nRename claim [1]\n\n### Sources\n1. [A](<https://a.com>)\n   Retrieved: now\n${RESEARCH_END}\n`);
+
+  const result = await runImport(vault, state, [source]);
+  const expectedPath = readablePath(source);
+
+  assert.equal(result.failures.length, 0);
+  assert.equal(result.imported[0]?.notePath, expectedPath);
+  const companionPath = state.current.annotations["legacy-rename"]!.researchPath!;
+  assert.ok(companionPath);
+  assert.ok(companionPath.startsWith("Books/Apple Books/Author/The Book/Research/"));
+});
+
+test("malformed legacy markers refuse before rename or annotation modification", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("legacy-malformed");
+  const legacyPath = seedLegacyAnnotation(vault, state, source);
+  const legacyText = vault.files.get(legacyPath)!;
+  vault.files.set(legacyPath, `${legacyText}\n${RESEARCH_START}\nresearch without end marker\n`);
+
+  const result = await runImport(vault, state, [source]);
+
+  assert.equal(result.failures.some((f) => f.annotationId === "legacy-malformed" && f.stage === "note"), true);
+  assert.equal(vault.files.has(legacyPath), true, "file not renamed/modified");
+  assert.equal(state.current.annotations["legacy-malformed"]!.notePath, legacyPath, "state unchanged");
+});
+
+test("companion write failure returns typed failure and companion remains adoptable on retry", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("companion-fail");
+  await runImport(vault, state, [source]);
+
+  const result = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: "invalid/path.md",
+    annotationId: "companion-fail",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.ok(result.code);
+  assert.ok(result.message);
+});
+
+test("state save failure after companion write returns failure; retry adopts companion", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("state-fail-adopt");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["state-fail-adopt"]!.notePath;
+
+  state.failNextSave = true;
+  const first = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "state-fail-adopt",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(first.ok, false);
+  if (first.ok) return;
+  assert.equal(first.code, "STATE_SAVE_FAILED");
+  assert.equal(state.current.annotations["state-fail-adopt"]!.researchPath, undefined);
+  assert.match(vault.files.get(notePath)!, /^research:/m, "property written despite state failure");
+
+  const companionFiles = [...vault.files.keys()].filter((p) => p.includes("/Research/"));
+  assert.equal(companionFiles.length, 1, "companion written");
+
+  const retry = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "state-fail-adopt",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(retry.ok, true);
+  if (!retry.ok) return;
+  assert.equal(retry.action, "unchanged");
+  assert.equal(state.current.annotations["state-fail-adopt"]!.researchPath, retry.companionPath);
+});
+
+test("durable adoption on next sync when state save failed after companion write", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("durable-adopt");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["durable-adopt"]!.notePath;
+
+  state.failNextSave = true;
+  await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "durable-adopt",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(state.current.annotations["durable-adopt"]!.researchPath, undefined);
+
+  await runImport(vault, state, [source]);
+  assert.ok(state.current.annotations["durable-adopt"]!.researchPath, "researchPath adopted on next sync");
+});
+
+test("ordinary notes never create companion via writeAppleAnnotationCompanion", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  await vault.create("Notes/ordinary.md", "---\ntype: note\n---\nOrdinary note.\n");
+
+  const result = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: "Notes/ordinary.md",
+    annotationId: "ordinary-id",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+
+  assert.equal(result.ok, false, "rejects non-Reading annotation path");
+  assert.equal(result.ok === false && result.code, "ANNOTATION_UNTRACKED");
+  const companionFiles = [...vault.files.keys()].filter((p) => p.includes("/Research/"));
+  assert.equal(companionFiles.length, 0);
+});
+
+// --- Fix 1: isValidResearchPathForNote ---
+
+test("isValidResearchPathForNote rejects other-book research paths", () => {
+  const notePath = "Books/Apple Books/Author A/Book A/Annotations/Note.md";
+  assert.equal(isValidResearchPathForNote("Books/Apple Books/Author B/Book B/Research/Note.md", notePath), false);
+  assert.equal(isValidResearchPathForNote("Books/Apple Books/Author A/Book B/Research/Note.md", notePath), false);
+  assert.equal(isValidResearchPathForNote("Books/Apple Books/Author A/Book A/Research/Note.md", notePath), true);
+});
+
+test("isValidResearchPathForNote rejects nested Research paths", () => {
+  const notePath = "Books/Apple Books/Author/Book/Annotations/Note.md";
+  assert.equal(isValidResearchPathForNote("Books/Apple Books/Author/Book/Research/sub/Note.md", notePath), false);
+});
+
+test("isValidResearchPathForNote rejects paths with delimiter/control characters", () => {
+  const notePath = "Books/Apple Books/Author/Book/Annotations/Note.md";
+  assert.equal(isValidResearchPathForNote("Books/Apple Books/Author/Book/Research/Note[1].md", notePath), false);
+  assert.equal(isValidResearchPathForNote("Books/Apple Books/Author/Book/Research/Note|R.md", notePath), false);
+  assert.equal(isValidResearchPathForNote("Books/Apple Books/Author/Book/Research/Note]].md", notePath), false);
+});
+
+test("isValidResearchPathForNote accepts valid collision-path variants", () => {
+  const notePath = "Books/Apple Books/Author/Book/Annotations/Note.md";
+  assert.equal(isValidResearchPathForNote("Books/Apple Books/Author/Book/Research/Note.md", notePath), true);
+  assert.equal(isValidResearchPathForNote("Books/Apple Books/Author/Book/Research/Note · 2.md", notePath), true);
+  assert.equal(isValidResearchPathForNote("Books/Apple Books/Author/Book/Research/Note · 3.md", notePath), true);
+});
+
+test("parseReadingState rejects researchPath under wrong book folder", () => {
+  const raw = {
+    version: READING_STATE_VERSION,
+    lastSyncAt: null,
+    annotations: {
+      "id-1": {
+        contentHash: "abc",
+        notePath: "Books/Apple Books/Author A/Book A/Annotations/Note.md",
+        importedAt: "2026-08-01T00:00:00Z",
+        researchStatus: "off",
+        processedAt: null,
+        researchPath: "Books/Apple Books/Author B/Book B/Research/Note.md",
+      },
+    },
+  };
+  const parsed = parseReadingState(raw);
+  assert.equal(parsed.annotations["id-1"]!.researchPath, undefined);
+});
+
+// --- Fix 2: writeAppleAnnotationCompanion pre-validation ---
+
+test("writeAppleAnnotationCompanion rejects untracked annotationId", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  await runImport(vault, state, [annotation("tracked")]);
+  const result = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: "Books/Apple Books/Author/The Book/Annotations/some.md",
+    annotationId: "not-tracked",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, "ANNOTATION_UNTRACKED");
+  assert.equal([...vault.files.keys()].filter((p) => p.includes("/Research/")).length, 0, "no companion created");
+});
+
+test("writeAppleAnnotationCompanion rejects mismatched annotationPath", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  await runImport(vault, state, [annotation("mismatch")]);
+  const result = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: "Books/Apple Books/Author/The Book/Annotations/wrong.md",
+    annotationId: "mismatch",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, "PATH_MISMATCH");
+});
+
+test("writeAppleAnnotationCompanion rejects frontmatter annotation_id mismatch", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  await runImport(vault, state, [annotation("fm-mismatch")]);
+  const notePath = state.current.annotations["fm-mismatch"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  vault.files.set(notePath, noteText.replace("fm-mismatch", "different-id"));
+  const result = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath,
+    annotationId: "fm-mismatch",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, "ANNOTATION_ID_MISMATCH");
+});
+
+test("writeAppleAnnotationCompanion state mutate detects stale entry", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  await runImport(vault, state, [annotation("stale-entry")]);
+  const notePath = state.current.annotations["stale-entry"]!.notePath;
+  const originalMutate = state.mutate.bind(state);
+  let mutateCount = 0;
+  state.mutate = async <T>(fn: (s: ReadingState) => T | Promise<T>) => {
+    mutateCount++;
+    if (mutateCount === 1) {
+      return await originalMutate(async (s: ReadingState) => {
+        delete s.annotations["stale-entry"];
+        return await fn(s);
+      });
+    }
+    return await originalMutate(fn);
+  };
+  const result = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath,
+    annotationId: "stale-entry",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, "STATE_ENTRY_STALE");
+});
+
+// --- Fix 3: legacy migration ordering tests ---
+
+test("legacy migration: companion-create failure leaves inline block intact", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("legacy-fail-companion");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["legacy-fail-companion"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  vault.files.set(notePath, `${noteText}\n${RESEARCH_START}\n## Research\nClaim [1]\n\n### Sources\n1. [A](<https://a.com>)\n   Retrieved: now\n${RESEARCH_END}\n`);
+
+  const researchFolder = notePath.replace(/\/Annotations\/.*$/, "/Research");
+  vault.files.set(`${researchFolder}/placeholder`, "occupied");
+  vault.failCreatePath = `${researchFolder}/${notePath.split("/").pop()!}`;
+
+  const result = await runImport(vault, state, [source]);
+
+  assert.equal(result.failures.some((f) => f.annotationId === "legacy-fail-companion" && f.stage === "note"), true);
+  const finalText = vault.files.get(notePath)!;
+  assert.ok(finalText.includes(RESEARCH_START), "inline block still intact");
+  assert.ok(finalText.includes(RESEARCH_END), "inline end marker intact");
+  assert.ok(finalText.includes("Claim [1]"), "research content preserved");
+});
+
+test("legacy migration: annotation-modify failure after companion success still preserves research in companion", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("legacy-modify-fail");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["legacy-modify-fail"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  vault.files.set(notePath, `${noteText}\n${RESEARCH_START}\n## Research\nPreserved claim [1]\n\n### Sources\n1. [A](<https://a.com>)\n   Retrieved: now\n${RESEARCH_END}\n`);
+
+  const originalModify = vault.modify.bind(vault);
+  vault.modify = async (entry: VaultEntry, content: string) => {
+    if (entry.path === notePath) {
+      throw new Error("modify failed");
+    }
+    return await originalModify(entry, content);
+  };
+
+  const result = await runImport(vault, state, [source]);
+
+  assert.equal(result.failures.some((f) => f.annotationId === "legacy-modify-fail" && f.stage === "note"), true);
+  const companionFiles = [...vault.files.keys()].filter((p) => p.includes("/Research/"));
+  assert.equal(companionFiles.length, 1, "companion was created before modify failed");
+  assert.match(vault.files.get(companionFiles[0]!)!, /Preserved claim \[1\]/);
+});
+
+// --- Fix 4: reconcile research property from stored researchPath ---
+
+test("unchanged source reconciles missing research property from valid stored researchPath", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("reconcile-prop");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["reconcile-prop"]!.notePath;
+
+  await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "reconcile-prop",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  const companionPath = state.current.annotations["reconcile-prop"]!.researchPath!;
+  assert.ok(companionPath);
+
+  const noteText = vault.files.get(notePath)!;
+  const stripped = noteText.split("\n").filter((l: string) => !/^research:/.test(l)).join("\n");
+  vault.files.set(notePath, stripped);
+  assert.doesNotMatch(vault.files.get(notePath)!, /^research:/m, "property removed");
+
+  await runImport(vault, state, [source]);
+
+  assert.match(vault.files.get(notePath)!, /^research:/m, "property reconciled");
+  assert.match(vault.files.get(notePath)!, /Research\]\]/);
+});
+
+test("unchanged source with valid research property remains no-op", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("noop-link");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["noop-link"]!.notePath;
+
+  await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "noop-link",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+
+  vault.modified.length = 0;
+  await runImport(vault, state, [source]);
+  assert.equal(vault.modified.filter((p) => p === notePath).length, 0, "note not modified when link already correct");
+});
+
+test("source change removes research property but companion and researchPath survive for reuse", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("change-unlink");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["change-unlink"]!.notePath;
+
+  await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "change-unlink",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  const companionPath = state.current.annotations["change-unlink"]!.researchPath!;
+
+  await runImport(vault, state, [annotation("change-unlink", { quote: "New quote one two three four five six seven eight" })]);
+
+  assert.doesNotMatch(vault.files.get(notePath)!, /^research:/m, "link removed");
+  assert.equal(state.current.annotations["change-unlink"]!.researchPath, companionPath, "researchPath retained");
+  assert.ok(vault.files.has(companionPath), "companion preserved");
+});
+
+// --- Fix 5: classifyResearchTarget ---
+
+test("classifyResearchTarget returns companion for tracked annotations with correct type", () => {
+  assert.equal(classifyResearchTarget("---\ntype: apple-books-annotation\n---\nbody", "tracked-id"), "companion");
+});
+
+test("classifyResearchTarget returns type-mismatch for tracked ID with wrong/missing type", () => {
+  assert.equal(classifyResearchTarget("---\ntype: note\n---\nbody", "tracked-id"), "type-mismatch");
+  assert.equal(classifyResearchTarget("no frontmatter", "tracked-id"), "type-mismatch");
+  assert.equal(classifyResearchTarget("---\nfoo: bar\n---\nbody", "tracked-id"), "type-mismatch");
+});
+
+test("classifyResearchTarget returns inline for ordinary notes", () => {
+  assert.equal(classifyResearchTarget("---\ntype: note\n---\nbody", undefined), "inline");
+  assert.equal(classifyResearchTarget("no frontmatter", undefined), "inline");
+});
+
+test("classifyResearchTarget returns reading-state-missing for untracked apple annotations", () => {
+  assert.equal(classifyResearchTarget("---\ntype: apple-books-annotation\n---\nbody", undefined), "reading-state-missing");
+});
+
+// --- Fix 6: status sequencing ---
+
+test("manual research companion then one completeAppleAnnotationResearchForNote transition", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("manual-seq");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["manual-seq"]!.notePath;
+  assert.equal(state.current.annotations["manual-seq"]!.researchStatus, "off");
+
+  await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "manual-seq",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(state.current.annotations["manual-seq"]!.researchStatus, "off", "companion write does not change status");
+
+  const first = await completeAppleAnnotationResearchForNote(vault, state, notePath);
+  assert.equal(first, "updated");
+  assert.equal(state.current.annotations["manual-seq"]!.researchStatus, "complete");
+
+  const second = await completeAppleAnnotationResearchForNote(vault, state, notePath);
+  assert.equal(second, "updated");
+  assert.equal(state.current.annotations["manual-seq"]!.researchStatus, "complete");
+});
+
+test("automatic research companion then one persistAutomaticResearchOutcome transition", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("auto-seq");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["auto-seq"]!.notePath;
+
+  await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "auto-seq",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(state.current.annotations["auto-seq"]!.researchStatus, "off");
+
+  await persistAutomaticResearchOutcome({
+    outcome: { ok: true },
+    updateStatus: async (status) => await updateAppleAnnotationResearchStatus(vault, state, "auto-seq", status),
+  });
+  assert.equal(state.current.annotations["auto-seq"]!.researchStatus, "complete");
+});
+
+// --- Validation guards regressions ---
+
+test("isValidResearchPathForNote rejects when notePath is not six-part Annotations shape", () => {
+  assert.equal(isValidResearchPathForNote(
+    "Books/Apple Books/Author/Book/Research/Note.md",
+    "Books/Apple Books/Author/Book/Note.md",
+  ), false, "notePath missing Annotations folder");
+  assert.equal(isValidResearchPathForNote(
+    "Books/Apple Books/Author/Book/Research/Note.md",
+    "Books/Apple Books/Author/Book/Annotations/sub/Note.md",
+  ), false, "notePath is nested in Annotations");
+  assert.equal(isValidResearchPathForNote(
+    "Books/Apple Books/Author/Book/Research/Index.md",
+    "Books/Apple Books/Author/Book/Index.md",
+  ), false, "notePath is an index note");
+});
+
+test("writeAppleAnnotationCompanion rejects note with wrong frontmatter type", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("type-guard");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["type-guard"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  vault.files.set(notePath, noteText.replace("apple-books-annotation", "note"));
+  const result = await writeAppleAnnotationCompanion(vault, state, {
+    annotationPath: notePath, annotationId: "type-guard",
+    researchContent: "Claim [1]\n\n## Sources\n1. [A](<https://a.com>)\n   Retrieved: now",
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, "TYPE_MISMATCH");
+  assert.equal([...vault.files.keys()].filter((p) => p.includes("/Research/")).length, 0, "no companion created");
+});
+
+test("updateAppleAnnotationResearchStatus rejects note with wrong frontmatter type", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("status-type-guard");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["status-type-guard"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  vault.files.set(notePath, noteText.replace("apple-books-annotation", "note"));
+  const result = await updateAppleAnnotationResearchStatus(vault, state, "status-type-guard", "complete");
+  assert.equal(result, false, "status not applied to wrong type");
+  assert.equal(state.current.annotations["status-type-guard"]!.researchStatus, "off");
+});
+
+test("completeAppleAnnotationResearchForNote rejects note with wrong frontmatter type", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("complete-type-guard");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["complete-type-guard"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  vault.files.set(notePath, noteText.replace("apple-books-annotation", "note"));
+  const result = await completeAppleAnnotationResearchForNote(vault, state, notePath);
+  assert.equal(result, false);
+});
+
+test("fast-path adoption ignores unsafe research property and never reads companion", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("unsafe-adopt");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["unsafe-adopt"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  vault.files.set(notePath, noteText.replace(/---\n$/, 'research: "[[../../../etc/passwd|Research]]"\n---\n'));
+
+  const originalRead = vault.read.bind(vault);
+  const readPaths: string[] = [];
+  vault.read = async (entry: VaultEntry) => {
+    readPaths.push(entry.path);
+    return await originalRead(entry);
+  };
+
+  await runImport(vault, state, [source]);
+
+  assert.equal(state.current.annotations["unsafe-adopt"]!.researchPath, undefined, "unsafe path not adopted");
+  assert.equal(readPaths.some((p) => p.includes("etc/passwd")), false, "never read unsafe companion");
+});
+
+test("fast-path adoption ignores other-book research property", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("other-book-adopt");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["other-book-adopt"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  vault.files.set(notePath, noteText.replace(/---\n$/, 'research: "[[Books/Apple Books/Other Author/Other Book/Research/Note|Research]]"\n---\n'));
+  const otherCompanionPath = "Books/Apple Books/Other Author/Other Book/Research/Note.md";
+  await vault.create(otherCompanionPath, "---\ntype: mindmap-reading-research\nannotation_id: other-book-adopt\n---\nContent\n");
+
+  await runImport(vault, state, [source]);
+
+  assert.equal(state.current.annotations["other-book-adopt"]!.researchPath, undefined, "other-book path not adopted");
+});
+
+test("fast-path adoption ignores nested Research path in property", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("nested-adopt");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["nested-adopt"]!.notePath;
+  const noteText = vault.files.get(notePath)!;
+  vault.files.set(notePath, noteText.replace(/---\n$/, 'research: "[[Books/Apple Books/Author/The Book/Research/sub/Note|Research]]"\n---\n'));
+
+  await runImport(vault, state, [source]);
+
+  assert.equal(state.current.annotations["nested-adopt"]!.researchPath, undefined, "nested path not adopted");
+});
+
+test("reconciliation skips effectiveResearchPath that fails validation against current notePath", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const source = annotation("recon-invalid");
+  await runImport(vault, state, [source]);
+  const notePath = state.current.annotations["recon-invalid"]!.notePath;
+
+  state.current.annotations["recon-invalid"]!.researchPath = "Books/Apple Books/Other/Other/Research/Note.md";
+
+  const originalRead = vault.read.bind(vault);
+  const readPaths: string[] = [];
+  vault.read = async (entry: VaultEntry) => {
+    readPaths.push(entry.path);
+    return await originalRead(entry);
+  };
+
+  await runImport(vault, state, [source]);
+
+  assert.equal(readPaths.some((p) => p.includes("Other/Other/Research")), false, "never read invalid companion");
+  assert.doesNotMatch(vault.files.get(notePath)!, /^research:/m, "no research property added");
 });

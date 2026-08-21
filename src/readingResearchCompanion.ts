@@ -1,6 +1,7 @@
 import {
   READING_ANNOTATIONS_FOLDER,
   READING_ROOT,
+  hasControlOrDelimiterChar,
   isSafeReadingPath,
 } from "./readingTypes";
 import { RESEARCH_END, RESEARCH_START } from "./researchWriter";
@@ -8,17 +9,10 @@ import type { ReadingVault } from "./readingVault";
 
 const READING_RESEARCH_FOLDER = "Research";
 
-function hasControlOrWikilinkChar(value: string): boolean {
-  return Array.from(value).some((ch) => {
-    const code = ch.codePointAt(0) ?? 0;
-    return code <= 31 || code === 127 || ch === "[" || ch === "]" || ch === "|";
-  });
-}
-
 export function isValidAnnotationSourcePath(path: string): boolean {
   const normalized = path.replace(/\\/g, "/");
   if (!isSafeReadingPath(normalized)) return false;
-  if (hasControlOrWikilinkChar(normalized)) return false;
+  if (hasControlOrDelimiterChar(normalized)) return false;
   const parts = normalized.split("/");
   return parts.length === 6 && parts[4] === READING_ANNOTATIONS_FOLDER;
 }
@@ -31,7 +25,7 @@ function expectedResearchFolder(annotationPath: string): string {
 function isSafeCompanionPath(path: string, annotationPath: string): boolean {
   const normalized = path.replace(/\\/g, "/");
   if (!normalized.toLowerCase().endsWith(".md")) return false;
-  if (hasControlOrWikilinkChar(normalized)) return false;
+  if (hasControlOrDelimiterChar(normalized)) return false;
   if (normalized.split("/").some((part) => part === ".." || part === "." || part.length === 0)) return false;
   const folder = expectedResearchFolder(annotationPath);
   if (!normalized.startsWith(`${folder}/`)) return false;

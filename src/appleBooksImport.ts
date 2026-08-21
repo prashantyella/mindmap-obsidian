@@ -12,6 +12,7 @@ import {
   READING_SOURCE_END,
   READING_SOURCE_START,
   isSafeReadingPath,
+  isValidResearchPathForNote,
   sanitizePathComponent,
   type AppleBooksAnnotation,
   type ReadingState,
@@ -28,6 +29,12 @@ import {
   replaceLeadingAnnotationSource,
 } from "./readingNoteFormat";
 import type { ReadingStateStore } from "./readingState";
+import { RESEARCH_END, RESEARCH_START } from "./researchWriter";
+import {
+  extractLegacyInlineResearch,
+  writeCompanionNote,
+  type LegacyExtractionResult,
+} from "./readingResearchCompanion";
 
 export interface ImportFailure {
   annotationId?: string;
@@ -68,6 +75,7 @@ export async function updateAppleAnnotationResearchStatus(
   const note = vault.get(previewEntry.notePath);
   if (!note) return false;
   const text = await vault.read(note);
+  if (readFrontmatterValue(text, "type") !== "apple-books-annotation") return false;
   if (readFrontmatterValue(text, "annotation_id") !== annotationId) return false;
   const next = replaceFrontmatterScalar(text, "research_status", status);
   const noteChanged = next !== text;
@@ -100,6 +108,94 @@ export async function completeAppleAnnotationResearchForNote(
   const annotationId = Object.entries(state.annotations).find(([, entry]) => entry.notePath === notePath)?.[0];
   if (!annotationId) return false;
   return await updateAppleAnnotationResearchStatus(vault, stateStore, annotationId, "complete");
+}
+
+export type AppleAnnotationCompanionResult =
+  | { ok: true; companionPath: string; action: "created" | "updated" | "unchanged" }
+  | { ok: false; code: string; message: string };
+
+export async function writeAppleAnnotationCompanion(
+  vault: ReadingVault,
+  stateStore: ReadingStateStore,
+  options: {
+    annotationPath: string;
+    annotationId: string;
+    researchContent: string;
+    storedResearchPath?: string;
+  },
+): Promise<AppleAnnotationCompanionResult> {
+  const preState = await stateStore.load();
+  const preEntry = preState.annotations[options.annotationId];
+  if (!preEntry) {
+    return { ok: false, code: "ANNOTATION_UNTRACKED", message: "Annotation is not tracked in Reading state." };
+  }
+  if (preEntry.notePath !== options.annotationPath) {
+    return { ok: false, code: "PATH_MISMATCH", message: "Annotation path does not match tracked state entry." };
+  }
+  const note = vault.get(options.annotationPath);
+  if (!note) {
+    return { ok: false, code: "NOTE_MISSING", message: "Annotation note not found in vault." };
+  }
+  const noteText = await vault.read(note);
+  if (readFrontmatterValue(noteText, "type") !== "apple-books-annotation") {
+    return { ok: false, code: "TYPE_MISMATCH", message: "Annotation note is not an apple-books-annotation." };
+  }
+  if (readFrontmatterValue(noteText, "annotation_id") !== options.annotationId) {
+    return { ok: false, code: "ANNOTATION_ID_MISMATCH", message: "Annotation note frontmatter annotation_id does not match." };
+  }
+
+  try {
+    const companionResult = await writeCompanionNote(vault, {
+      annotationPath: options.annotationPath,
+      annotationId: options.annotationId,
+      content: options.researchContent,
+      storedCompanionPath: options.storedResearchPath,
+    });
+
+    const currentNote = vault.get(options.annotationPath);
+    if (!currentNote) {
+      return { ok: false, code: "NOTE_MISSING", message: "Annotation note disappeared after companion write." };
+    }
+    const currentText = await vault.read(currentNote);
+    const link = `[[${companionResult.companionPath.replace(/\.md$/i, "")}|Research]]`;
+    const updated = upsertFrontmatterKey(currentText, "research", link);
+    if (updated !== currentText) {
+      await vault.modify(currentNote, updated);
+    }
+
+    try {
+      const { result: entryValid } = await stateStore.mutate((freshState) => {
+        const entry = freshState.annotations[options.annotationId];
+        if (!entry || entry.notePath !== options.annotationPath) return false;
+        entry.researchPath = companionResult.companionPath;
+        return true;
+      });
+      if (!entryValid) {
+        return { ok: false, code: "STATE_ENTRY_STALE", message: "Companion written but state entry changed during save." };
+      }
+    } catch {
+      return { ok: false, code: "STATE_SAVE_FAILED", message: "Companion written but state could not be saved." };
+    }
+
+    return { ok: true, companionPath: companionResult.companionPath, action: companionResult.action };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Companion write failed.";
+    return { ok: false, code: "COMPANION_WRITE_FAILED", message };
+  }
+}
+
+export type ResearchTargetClassification = "inline" | "companion" | "reading-state-missing" | "type-mismatch";
+
+export function classifyResearchTarget(
+  noteText: string,
+  trackedAnnotationId: string | undefined,
+): ResearchTargetClassification {
+  const noteType = readFrontmatterValue(noteText, "type");
+  if (trackedAnnotationId) {
+    return noteType === "apple-books-annotation" ? "companion" : "type-mismatch";
+  }
+  if (noteType === "apple-books-annotation") return "reading-state-missing";
+  return "inline";
 }
 
 interface FrontmatterParts {
@@ -261,6 +357,54 @@ export async function importAppleBooksAnnotations(
           });
           currentState = adopted;
         }
+        if (!previous.researchPath) {
+          const researchProp = readFrontmatterValue(existingText, "research");
+          if (researchProp) {
+            const target = wikilinkTarget(researchProp);
+            if (target) {
+              const companionPath = `${target}.md`;
+              if (isValidResearchPathForNote(companionPath, notePath)) {
+                try {
+                  const companionEntry = options.vault.get(companionPath);
+                  if (companionEntry) {
+                    const companionText = await options.vault.read(companionEntry);
+                    if (readFrontmatterValue(companionText, "annotation_id") === annotation.annotation_id) {
+                      const { state: adopted } = await options.state.mutate((s) => {
+                        const e = s.annotations[annotation.annotation_id];
+                        if (e) e.researchPath = companionPath;
+                      });
+                      currentState = adopted;
+                    }
+                  }
+                } catch {
+                  // best-effort adoption
+                }
+              }
+            }
+          }
+        }
+        const effectiveResearchPath = currentState.annotations[annotation.annotation_id]?.researchPath;
+        if (effectiveResearchPath && isValidResearchPathForNote(effectiveResearchPath, notePath)) {
+          try {
+            const companionEntry = options.vault.get(effectiveResearchPath);
+            if (companionEntry) {
+              const companionText = await options.vault.read(companionEntry);
+              if (readFrontmatterValue(companionText, "annotation_id") === annotation.annotation_id) {
+                const expectedLink = `[[${effectiveResearchPath.replace(/\.md$/i, "")}|Research]]`;
+                const freshNote = options.vault.get(notePath);
+                if (freshNote) {
+                  const freshText = await options.vault.read(freshNote);
+                  const withProp = upsertFrontmatterKey(freshText, "research", expectedLink);
+                  if (withProp !== freshText) {
+                    await options.vault.modify(freshNote, withProp);
+                  }
+                }
+              }
+            }
+          } catch {
+            // best-effort reconciliation
+          }
+        }
         imported.push({
           annotationId: annotation.annotation_id,
           notePath,
@@ -283,20 +427,28 @@ export async function importAppleBooksAnnotations(
       const sourceChanged = Boolean(previous && previous.contentHash !== contentHash);
       const researchStatus = sourceChanged && !tooShort ? "off" : chooseResearchStatus(annotation, previous, existingText);
       const processedAt = previous && previous.contentHash !== contentHash ? null : previous?.processedAt ?? null;
-      // Render (and thus validate) before touching the Vault at all, so an incomplete-marker
-      // refusal never leaves a rename half-done or the old stable path/state disturbed.
-      const noteText = renderAnnotationNote(existingText, annotation, {
+
+      // Legacy inline research extraction — validates markers before any note
+      // modification so incomplete/duplicate markers fail safely before rename.
+      let legacyExtraction: LegacyExtractionResult | null = null;
+      if (existingText) {
+        legacyExtraction = extractLegacyInlineResearch(existingText);
+      }
+
+      const renderInput = legacyExtraction ? legacyExtraction.annotationText : existingText;
+      let noteText = renderAnnotationNote(renderInput, annotation, {
         importedAt,
         researchStatus,
       });
+
+      if (sourceChanged) {
+        noteText = removeFrontmatterKeysFromText(noteText, ["research"]);
+      }
 
       if (oldEntry && migrationSourcePath) {
         try {
           await ensureVaultFolders(options.vault, notePath);
           await options.vault.rename(oldEntry, notePath);
-          // A fresh lookup can transiently miss right after a successful rename (e.g. Obsidian's
-          // vault index catching up); fall back to the renamed file's own raw reference rather
-          // than treating a null lookup as "nothing here" and creating a duplicate.
           existing = options.vault.get(notePath) ?? { path: notePath, raw: oldEntry.raw };
         } catch {
           notePath = migrationSourcePath;
@@ -306,6 +458,23 @@ export async function importAppleBooksAnnotations(
 
       const resolvedNotePath: string = notePath;
       await ensureVaultFolders(options.vault, resolvedNotePath);
+
+      let researchPath = previous?.researchPath;
+      if (legacyExtraction) {
+        const companionResult = await writeCompanionNote(options.vault, {
+          annotationPath: resolvedNotePath,
+          annotationId: annotation.annotation_id,
+          content: legacyExtraction.companionContent,
+          storedCompanionPath: researchPath,
+        });
+        researchPath = companionResult.companionPath;
+
+        if (!sourceChanged) {
+          const link = `[[${companionResult.companionPath.replace(/\.md$/i, "")}|Research]]`;
+          noteText = upsertFrontmatterKey(noteText, "research", link);
+        }
+      }
+
       let action: ImportedAnnotationResult["action"] = existing ? "updated" : "created";
       if (existing) {
         if (noteText !== existingText) {
@@ -325,6 +494,7 @@ export async function importAppleBooksAnnotations(
             importedAt,
             researchStatus,
             processedAt,
+            ...(researchPath ? { researchPath } : {}),
           };
         });
         currentState = nextState;
@@ -507,6 +677,20 @@ function replaceFrontmatterScalar(text: string, key: string, value: string): str
   return text.replace(pattern, `$1 ${yamlScalar(value)}`);
 }
 
+function upsertFrontmatterKey(text: string, key: string, value: string): string {
+  const parts = splitFrontmatter(text);
+  if (!parts.frontmatter) return text;
+  const lines = parts.frontmatter.split("\n");
+  const line = `${key}: ${yamlScalar(value)}`;
+  const index = lines.findIndex((candidate) => new RegExp(`^${key}\\s*:`).test(candidate));
+  if (index >= 0) {
+    lines[index] = line;
+  } else {
+    lines.push(line);
+  }
+  return composeFrontmatter(lines.join("\n"), parts.body);
+}
+
 function yamlScalar(value: string): string {
   return /^[A-Za-z0-9][A-Za-z0-9 .,_-]*$/.test(value) && !["true", "false", "null"].includes(value.toLowerCase())
     ? value
@@ -640,6 +824,9 @@ function convertFrontmatterWikilinkLists(text: string): string {
  */
 function noteNeedsFormatCleanup(existingText: string, annotation: AppleBooksAnnotation): boolean {
   if (existingText.includes(READING_SOURCE_START) || existingText.includes(READING_SOURCE_END)) {
+    return true;
+  }
+  if (existingText.includes(RESEARCH_START) || existingText.includes(RESEARCH_END)) {
     return true;
   }
   const frontmatter = splitFrontmatter(existingText).frontmatter;

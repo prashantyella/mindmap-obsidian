@@ -10,7 +10,7 @@ import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } f
 import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { discoverAppleBooksDatabasePaths } from "./appleBooksDiscovery";
-import { completeAppleAnnotationResearchForNote, importAppleBooksAnnotations, updateAppleAnnotationResearchStatus } from "./appleBooksImport";
+import { classifyResearchTarget, completeAppleAnnotationResearchForNote, importAppleBooksAnnotations, updateAppleAnnotationResearchStatus, writeAppleAnnotationCompanion } from "./appleBooksImport";
 import { clearTransientAutomaticPause, createAutomaticResearchPolicy, createAutomaticResearchPolicyStore, loadAutomaticResearchPolicySafely, localResearchDay, type AutomaticResearchPolicyState, type AutomaticResearchPolicyStore } from "./automaticResearchPolicy";
 import { persistAutomaticResearchOutcome, runAutomaticResearch, selectAutomaticResearchCandidates } from "./automaticResearch";
 import { ExaResearchProvider } from "./exaResearchProvider";
@@ -18,9 +18,10 @@ import { getExaCredential } from "./keychainCredential";
 import { createConfiguredLocalResearchModel } from "./localResearchModel";
 import { resolveLocalModelApiKey } from "./localModelApiKey";
 import { isSafeManualResearchPath } from "./manualResearchGuard";
-import { researchNote } from "./webResearch";
+import { collectResearch, researchNote } from "./webResearch";
 import { startAppleBooksReaderProcess } from "./appleBooksReaderProcess";
 import { prepareActiveNoteResearchInput } from "./researchInput";
+import { renderCompanionResearchContent } from "./researchWriter";
 import { MAX_RESEARCH_INPUT_CHARS, WebResearchError } from "./webResearchTypes";
 import { createReadingStateStore, type ReadingStateStore } from "./readingState";
 import { createObsidianVaultApi } from "./readingVault";
@@ -603,15 +604,56 @@ export default class MindmapPlugin extends Plugin {
     this.updateStatusBar();
     try {
       const { credential, model } = await this.getWebResearchPrerequisites();
+      const vault = createObsidianVaultApi(this.app.vault);
+      const note = vault.get(file.path);
+      if (!note) throw new WebResearchError("NOTE_MISSING", "The active note is unavailable.");
+
+      let trackedAnnotationId: string | undefined;
+      let trackedEntry: { researchPath?: string } | undefined;
+      if (this.readingStateStore) {
+        const currentState = await this.readingStateStore.load();
+        const found = Object.entries(currentState.annotations).find(([, entry]) => entry.notePath === file.path);
+        if (found) {
+          trackedAnnotationId = found[0];
+          trackedEntry = found[1];
+        }
+      }
+
+      const noteContent = await vault.read(note);
+      const classification = classifyResearchTarget(noteContent, trackedAnnotationId);
+      if (classification === "reading-state-missing") {
+        throw new WebResearchError("READING_STATE_MISSING", "This Apple Books annotation is not tracked in Reading state.");
+      }
+      if (classification === "type-mismatch") {
+        throw new WebResearchError("TYPE_MISMATCH", "Note type does not match its tracked Reading state entry.");
+      }
+
       this.webResearchActivity = "searching";
       this.updateStatusBar();
-      const note = createObsidianVaultApi(this.app.vault).get(file.path);
-      if (!note) throw new WebResearchError("NOTE_MISSING", "The active note is unavailable.");
-      this.webResearchActivity = "writing";
-      const result = await researchNote({ provider: new ExaResearchProvider(credential), model, vault: createObsidianVaultApi(this.app.vault) }, note, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
-      if (!result) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
+
+      if (classification === "companion" && trackedAnnotationId && this.readingStateStore) {
+        const result = await collectResearch({ provider: new ExaResearchProvider(credential), model }, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
+        if (!result) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
+        const companionContent = renderCompanionResearchContent(result);
+        if (!companionContent) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
+        this.webResearchActivity = "writing";
+        this.updateStatusBar();
+        const companionResult = await writeAppleAnnotationCompanion(vault, this.readingStateStore, {
+          annotationPath: file.path,
+          annotationId: trackedAnnotationId,
+          researchContent: companionContent,
+          storedResearchPath: trackedEntry?.researchPath,
+        });
+        if (!companionResult.ok) throw new WebResearchError(companionResult.code, companionResult.message);
+      } else {
+        this.webResearchActivity = "writing";
+        this.updateStatusBar();
+        const result = await researchNote({ provider: new ExaResearchProvider(credential), model, vault }, note, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
+        if (!result) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
+      }
+
       if (origin === "manual" && this.readingStateStore) {
-        const statusResult = await completeAppleAnnotationResearchForNote(createObsidianVaultApi(this.app.vault), this.readingStateStore, file.path);
+        const statusResult = await completeAppleAnnotationResearchForNote(vault, this.readingStateStore, file.path);
         if (statusResult === "state-pending") this.webResearchLastError = "Research saved; annotation status will repair on next sync.";
       }
       this.webResearchActivity = "ready";
