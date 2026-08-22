@@ -12,7 +12,7 @@ Reading Mode maintains two distinct classes of work.
 
 On first enablement, Mindmap reads Apple Books and imports every annotation into the vault. It does not immediately run Qwen across the historical backlog.
 
-After import, the user may explicitly confirm a separate **Process imported backlog now** action. If they do not, pending Reading notes remain visible in the status menu and are processed by the regular daily Mindmap schedule.
+After import, the user may explicitly confirm a separate **Process Reading backlog** action. If they do not, pending Reading notes remain visible in the status menu and are processed by the regular daily Mindmap schedule.
 
 The daily schedule includes pending Apple Books annotation notes when Reading Mode consent is active. The weekly refresh/rebuild schedule remains unchanged and does not gain the Reading root implicitly.
 
@@ -94,7 +94,7 @@ Opaque test-vault filenames may be migrated to the new readable allocation. Coll
 
 After first import, the status menu shows the imported backlog count and exposes:
 
-- **Process imported backlog now**, with explicit confirmation and an honest note-count warning;
+- **Process Reading backlog**, with explicit confirmation and an honest note-count warning;
 - existing individual-note processing actions;
 - normal Reading sync and health details.
 

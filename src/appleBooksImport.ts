@@ -38,7 +38,7 @@ import {
 
 export interface ImportFailure {
   annotationId?: string;
-  stage: "validation" | "note" | "state" | "index";
+  stage: "validation" | "note" | "state" | "index" | "modify" | "mutate";
   message: string;
 }
 
@@ -342,22 +342,41 @@ export async function importAppleBooksAnnotations(
     const previous = currentState.annotations[annotation.annotation_id];
     let existing = options.vault.get(notePath);
     if (previous?.contentHash === contentHash && previous.notePath === notePath && existing) {
-      const existingText = await options.vault.read(existing);
+      let existingText: string;
+      try {
+        existingText = await options.vault.read(existing);
+      } catch (error) {
+        annotationFailure = true;
+        failures.push({ annotationId: annotation.annotation_id, stage: "note", message: errorMessage(error) });
+        continue;
+      }
       if (!noteNeedsFormatCleanup(existingText, annotation)) {
         const durableStatus = readFrontmatterValue(existingText, "research_status");
         if (previous.researchStatus === "too-short" || annotationIsTooShort(annotation)) {
           if (durableStatus !== "too-short") {
-            await options.vault.modify(existing, replaceFrontmatterScalar(existingText, "research_status", "too-short"));
+            try {
+              await options.vault.modify(existing, replaceFrontmatterScalar(existingText, "research_status", "too-short"));
+            } catch (error) {
+              annotationFailure = true;
+              failures.push({ annotationId: annotation.annotation_id, stage: "modify", message: errorMessage(error) });
+              continue;
+            }
           }
         } else if (durableStatus === "complete" && previous.researchStatus !== "complete") {
-          const { state: adopted } = await options.state.mutate((state) => {
-            const entry = state.annotations[annotation.annotation_id];
-            if (entry && entry.researchStatus !== "complete") {
-              entry.researchStatus = "complete";
-              entry.processedAt = null;
-            }
-          });
-          currentState = adopted;
+          try {
+            const { state: adopted } = await options.state.mutate((state) => {
+              const entry = state.annotations[annotation.annotation_id];
+              if (entry && entry.researchStatus !== "complete") {
+                entry.researchStatus = "complete";
+                entry.processedAt = null;
+              }
+            });
+            currentState = adopted;
+          } catch (error) {
+            annotationFailure = true;
+            failures.push({ annotationId: annotation.annotation_id, stage: "mutate", message: errorMessage(error) });
+            continue;
+          }
         }
         if (!previous.researchPath) {
           const researchProp = readFrontmatterValue(existingText, "research");

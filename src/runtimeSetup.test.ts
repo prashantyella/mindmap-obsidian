@@ -18,7 +18,7 @@ import {
 import { computeRequirementsFingerprint, getManagedInterpreterPath, getManagedRuntimeDir, getManagedStagingDir, isWithinManagedRuntimeRoot, type InterpreterProbeResult } from "./runtimeDiscovery";
 
 const APP_SUPPORT_ROOT = path.normalize("/Users/tester/Library/Application Support/Mindmap AI");
-const REQUIREMENTS = "chromadb==1.4.0\nruamel.yaml>=0.18.10\n";
+const REQUIREMENTS = "chromadb==1.4.0\nruamel.yaml==0.19.1\n";
 const REQUIREMENTS_PATH = "/plugin/python/requirements.txt";
 const BOOTSTRAP_PYTHON = "/usr/bin/python3";
 const FINGERPRINT = computeRequirementsFingerprint(REQUIREMENTS);
@@ -766,4 +766,62 @@ void test("promotion uses the injected now() clock for the stale-backup name", a
 
   const renameCalls = harness.fs.calls.filter((call) => call.kind === "rename");
   assert.equal(renameCalls[0].to, `${FINAL_DIR}.stale-1234567890`);
+});
+
+void test("promotion removes only the exact validated stale backup after a successful promote", async () => {
+  const harness = makeController({
+    existingFs: [FINAL_DIR, FINAL_INTERPRETER],
+    probeResults: (interpreterPath) => (interpreterPath === FINAL_INTERPRETER ? notReadyProbeResult(interpreterPath, "incompatible") : readyProbeResult(interpreterPath)),
+    now: () => 1_234_567_890,
+  });
+  const runPromise = harness.controller.start();
+  await waitForConfirmCount(harness, 1);
+  await waitForChildCount(harness, 1);
+  harness.respondToStep(0, "close", 0);
+  await waitForChildCount(harness, 2);
+  harness.respondToStep(1, "close", 0);
+
+  const finalState = await runPromise;
+  assert.equal(finalState.phase, "ready");
+
+  const expectedBackupDir = `${FINAL_DIR}.stale-1234567890`;
+  const rmCalls = harness.fs.calls.filter((call) => call.kind === "rm");
+  assert.deepEqual(rmCalls, [{ kind: "rm", from: expectedBackupDir }]);
+});
+
+void test("a failed stale-backup cleanup after successful promotion does not fail the install", async () => {
+  const harness = makeController({
+    existingFs: [FINAL_DIR, FINAL_INTERPRETER],
+    probeResults: (interpreterPath) => (interpreterPath === FINAL_INTERPRETER ? notReadyProbeResult(interpreterPath, "incompatible") : readyProbeResult(interpreterPath)),
+  });
+  harness.fs.failRm = true;
+  const runPromise = harness.controller.start();
+  await waitForConfirmCount(harness, 1);
+  await waitForChildCount(harness, 1);
+  harness.respondToStep(0, "close", 0);
+  await waitForChildCount(harness, 2);
+  harness.respondToStep(1, "close", 0);
+
+  const finalState = await runPromise;
+  assert.equal(finalState.phase, "ready");
+});
+
+void test("no stale-backup deletion is attempted unless promotion actually succeeded", async () => {
+  const harness = makeController({
+    existingFs: [FINAL_DIR, FINAL_INTERPRETER],
+    probeResults: (interpreterPath) => (interpreterPath === FINAL_INTERPRETER ? notReadyProbeResult(interpreterPath, "incompatible") : readyProbeResult(interpreterPath)),
+  });
+  harness.fs.failRename = (from, to) => from === STAGING_DIR && to === FINAL_DIR;
+  const runPromise = harness.controller.start();
+  await waitForConfirmCount(harness, 1);
+  await waitForChildCount(harness, 1);
+  harness.respondToStep(0, "close", 0);
+  await waitForChildCount(harness, 2);
+  harness.respondToStep(1, "close", 0);
+
+  const finalState = await runPromise;
+  assert.equal(finalState.phase, "failed");
+
+  const rmCalls = harness.fs.calls.filter((call) => call.kind === "rm");
+  assert.deepEqual(rmCalls, []);
 });

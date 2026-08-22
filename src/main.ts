@@ -290,6 +290,11 @@ export default class MindmapPlugin extends Plugin {
     return this.runtimeCoordinator?.getState() ?? null;
   }
 
+  /** Live runtime-setup state updates, including cancellable in-progress phases. Callers must invoke the returned unsubscribe on teardown. */
+  subscribeRuntimeSetupState(listener: (state: CoordinatorState) => void): () => void {
+    return this.runtimeCoordinator?.subscribe(listener) ?? (() => {});
+  }
+
   async startRuntimeSetup(): Promise<void> {
     const state = this.runtimeCoordinator?.getState();
     if (!state?.canSetup) return;

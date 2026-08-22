@@ -18,7 +18,7 @@ export interface RequiredPackageSpec {
 
 export const REQUIRED_PACKAGES: RequiredPackageSpec[] = [
   { distName: "chromadb", importName: "chromadb", constraint: { type: "exact", version: "1.4.0" } },
-  { distName: "ruamel.yaml", importName: "ruamel.yaml", constraint: { type: "min", version: "0.18.10" } },
+  { distName: "ruamel.yaml", importName: "ruamel.yaml", constraint: { type: "exact", version: "0.19.1" } },
 ];
 
 const RUNTIME_CONTRACT_VERSION = "1";

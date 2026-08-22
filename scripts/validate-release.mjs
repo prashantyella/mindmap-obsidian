@@ -123,7 +123,18 @@ if (readme.includes("restore its Python runtime automatically")) {
   throw new Error("README.md must not claim the plugin silently restores a Python runtime; describe explicit discovery/one-click setup instead.");
 }
 {
-  const installSection = readme.slice(readme.indexOf("## Install"), readme.indexOf("## First Run"));
+  const installIndex = readme.indexOf("## Install");
+  const firstRunIndex = readme.indexOf("## First Run");
+  if (installIndex === -1) {
+    throw new Error("README.md must include an ## Install heading.");
+  }
+  if (firstRunIndex === -1) {
+    throw new Error("README.md must include a ## First Run heading.");
+  }
+  if (firstRunIndex <= installIndex) {
+    throw new Error("README.md must present ## Install before ## First Run.");
+  }
+  const installSection = readme.slice(installIndex, firstRunIndex);
   if (installSection.includes("pip install")) {
     throw new Error("README.md primary Install section must not present a manual pip install command; keep it under Troubleshooting/Advanced only.");
   }

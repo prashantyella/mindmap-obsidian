@@ -415,6 +415,14 @@ export class RuntimeSetupController {
       return { ok: false, message: "Could not activate the newly installed Mindmap runtime." };
     }
 
+    if (staleBackupDir) {
+      try {
+        await this.options.fs.rm(staleBackupDir);
+      } catch {
+        // Best effort only; a leftover stale backup does not fail the install.
+      }
+    }
+
     return { ok: true };
   }
 

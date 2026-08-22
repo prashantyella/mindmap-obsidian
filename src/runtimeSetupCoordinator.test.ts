@@ -7,7 +7,7 @@ import { computeRequirementsFingerprint, getManagedInterpreterPath, type Discove
 import type { SetupChildProcess, SetupFs, SetupSpawner } from "./runtimeSetup";
 
 const APP_SUPPORT_ROOT = path.normalize("/Users/tester/Library/Application Support/Mindmap AI");
-const REQUIREMENTS = "chromadb==1.4.0\nruamel.yaml>=0.18.10\n";
+const REQUIREMENTS = "chromadb==1.4.0\nruamel.yaml==0.19.1\n";
 const FINGERPRINT = computeRequirementsFingerprint(REQUIREMENTS);
 const MANAGED_INTERPRETER = getManagedInterpreterPath(APP_SUPPORT_ROOT, FINGERPRINT);
 
@@ -15,7 +15,7 @@ const XCODE_PYTHON = "/usr/bin/python3";
 const FRAMEWORK_PYTHON = path.normalize("/Library/Frameworks/Python.framework/Versions/3.13/bin/python3");
 
 function readyPayload() {
-  return JSON.stringify({ version: "3.12.4", venv: true, packages: { chromadb: "1.4.0", "ruamel.yaml": "0.18.12" } });
+  return JSON.stringify({ version: "3.12.4", venv: true, packages: { chromadb: "1.4.0", "ruamel.yaml": "0.19.1" } });
 }
 
 function bootstrapOnlyPayload() {
@@ -320,6 +320,53 @@ void test("startDiscovery treats a synchronously throwing persist() the same as 
   });
 });
 
+void test("beginSetup() after a persist failure with no bootstrap candidate re-runs discovery/persistence instead of silently no-op'ing", async () => {
+  let persistAttempts = 0;
+  const harness = makeCoordinator({
+    discoveryExecutable: [FRAMEWORK_PYTHON],
+    persist: async (interpreterPath: string) => {
+      persistAttempts += 1;
+      if (persistAttempts === 1) {
+        throw new Error("boom");
+      }
+      harness.persistCalls.push(interpreterPath);
+    },
+  });
+
+  const failedState = await harness.coordinator.startDiscovery();
+  assert.equal(failedState.phase, "failed");
+  assert.equal(failedState.canSetup, true);
+  assert.equal(persistAttempts, 1);
+
+  const retriedState = await harness.coordinator.beginSetup();
+
+  assert.equal(persistAttempts, 2);
+  assert.equal(harness.persistCalls.length, 1);
+  assert.equal(retriedState.phase, "ready");
+});
+
+void test("retry() after a persist failure with no bootstrap candidate re-runs discovery the same as beginSetup()", async () => {
+  let persistAttempts = 0;
+  const harness = makeCoordinator({
+    discoveryExecutable: [FRAMEWORK_PYTHON],
+    persist: async (interpreterPath: string) => {
+      persistAttempts += 1;
+      if (persistAttempts === 1) {
+        throw new Error("boom");
+      }
+      harness.persistCalls.push(interpreterPath);
+    },
+  });
+
+  await harness.coordinator.startDiscovery();
+  assert.equal(persistAttempts, 1);
+
+  const retriedState = await harness.coordinator.retry();
+
+  assert.equal(persistAttempts, 2);
+  assert.equal(retriedState.phase, "ready");
+});
+
 void test("dispose() during an in-flight startDiscovery suppresses persistence and the ready state update", async () => {
   const release: { fn: (() => void) | null } = { fn: null };
   const invoke: ProcessInvoker = async () => {
@@ -360,4 +407,74 @@ void test("shouldTriggerRuntimeReadyKickoff fires exactly once for ready/not-app
   for (const phase of otherPhases) {
     assert.equal(shouldTriggerRuntimeReadyKickoff(phase, false), false, `expected false for phase ${phase}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// (H) subscribe()/unsubscribe seam for live state fanout through cancellable phases.
+// ---------------------------------------------------------------------------
+
+void test("subscribe() receives every phase update alongside onStateChange, in order", async () => {
+  const harness = makeCoordinator({ discoveryExecutable: [FRAMEWORK_PYTHON] });
+  const seen: CoordinatorPhase[] = [];
+  const unsubscribe = harness.coordinator.subscribe((state) => seen.push(state.phase));
+
+  await harness.coordinator.startDiscovery();
+
+  assert.ok(seen.length > 0);
+  assert.deepEqual(seen, harness.stateHistory.map((state) => state.phase));
+  unsubscribe();
+});
+
+void test("unsubscribe() stops further delivery to that listener without affecting others", async () => {
+  const harness = makeCoordinator({ discoveryExecutable: [FRAMEWORK_PYTHON] });
+  const a: CoordinatorPhase[] = [];
+  const b: CoordinatorPhase[] = [];
+  const unsubscribeA = harness.coordinator.subscribe((state) => a.push(state.phase));
+  harness.coordinator.subscribe((state) => b.push(state.phase));
+
+  unsubscribeA();
+  await harness.coordinator.startDiscovery();
+
+  assert.deepEqual(a, []);
+  assert.ok(b.length > 0);
+});
+
+void test("multiple subscribers all receive fanout for the same state change", async () => {
+  const harness = makeCoordinator({ discoveryExecutable: [FRAMEWORK_PYTHON] });
+  const counts = [0, 0, 0];
+  harness.coordinator.subscribe(() => { counts[0] += 1; });
+  harness.coordinator.subscribe(() => { counts[1] += 1; });
+  harness.coordinator.subscribe(() => { counts[2] += 1; });
+
+  await harness.coordinator.startDiscovery();
+
+  assert.ok(counts[0] > 0);
+  assert.equal(counts[0], counts[1]);
+  assert.equal(counts[1], counts[2]);
+});
+
+void test("a throwing subscriber does not break other subscribers or coordinator state", async () => {
+  const harness = makeCoordinator({ discoveryExecutable: [FRAMEWORK_PYTHON] });
+  let goodCalls = 0;
+  harness.coordinator.subscribe(() => {
+    throw new Error("bad subscriber");
+  });
+  harness.coordinator.subscribe(() => { goodCalls += 1; });
+
+  const state = await harness.coordinator.startDiscovery();
+
+  assert.equal(state.phase, "ready");
+  assert.ok(goodCalls > 0);
+});
+
+void test("dispose() clears all subscribers so a torn-down view never leaks a listener", async () => {
+  const harness = makeCoordinator({ discoveryExecutable: [FRAMEWORK_PYTHON] });
+  const seen: CoordinatorPhase[] = [];
+  harness.coordinator.subscribe((state) => seen.push(state.phase));
+
+  harness.coordinator.dispose();
+  seen.length = 0;
+  await harness.coordinator.startDiscovery();
+
+  assert.deepEqual(seen, []);
 });

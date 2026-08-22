@@ -33,11 +33,16 @@ function getPluginRuntimeRelativePath(configDir: string): string {
 }
 
 export class MindmapSettingTab extends PluginSettingTab {
+  private unsubscribeRuntimeSetup: (() => void) | null = null;
+
   constructor(app: MindmapPlugin["app"], private readonly plugin: MindmapPlugin) {
     super(app, plugin);
   }
 
   display(): void {
+    this.unsubscribeRuntimeSetup?.();
+    this.unsubscribeRuntimeSetup = this.plugin.subscribeRuntimeSetupState(() => this.display());
+
     const { containerEl } = this;
     containerEl.empty();
 
@@ -49,6 +54,12 @@ export class MindmapSettingTab extends PluginSettingTab {
     this.renderDiagnosticsSettings();
     this.renderAdvancedRuntimeSettings();
     this.renderSummary(this.plugin.getResolvedRuntime());
+  }
+
+  hide(): void {
+    this.unsubscribeRuntimeSetup?.();
+    this.unsubscribeRuntimeSetup = null;
+    super.hide();
   }
 
   private renderResearchSettings(): void {

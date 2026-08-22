@@ -40,6 +40,8 @@ class MemoryVault implements ReadingVault {
   readonly modified: string[] = [];
   failCreatePath: string | null = null;
   failRenamePath: string | null = null;
+  failModifyPath: string | null = null;
+  failReadPath: string | null = null;
   /** When true, the next get() for a just-renamed path returns null once, simulating a transient post-rename lookup miss. */
   simulateGetMissAfterRename = false;
   private pendingGetMiss: string | null = null;
@@ -56,6 +58,9 @@ class MemoryVault implements ReadingVault {
   }
 
   async read(entry: VaultEntry): Promise<string> {
+    if (entry.path === this.failReadPath) {
+      throw new Error(`read failed: ${entry.path}`);
+    }
     // A synthesized post-rename entry may carry the pre-rename raw identity; fall back to its
     // (already-correct) path, mirroring how a real TFile stays readable through its own object
     // reference even when a wrapper was built from a stale raw value.
@@ -78,6 +83,9 @@ class MemoryVault implements ReadingVault {
   }
 
   async modify(entry: VaultEntry, content: string): Promise<void> {
+    if (this.failModifyPath !== null && entry.path === this.failModifyPath) {
+      throw new Error(`modify failed: ${entry.path}`);
+    }
     this.files.set(entry.path, content);
     this.modified.push(entry.path);
   }
@@ -974,6 +982,73 @@ test("per-annotation state failure preserves committed entries but keeps the pri
   assert.equal(result.failures.some((failure) => failure.annotationId === "id-2" && failure.stage === "state"), true);
   assert.equal(state.current.annotations["id-1"] !== undefined, true);
   assert.equal(state.current.annotations["id-2"], undefined);
+  assert.equal(state.current.lastSyncAt, "before");
+});
+
+test("unchanged fast-path modify failure is contained per-annotation and later annotations still import", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const first = annotation("id-1");
+  const second = annotation("id-2", { quote: "Second annotation quote one two three four five six" });
+
+  await runImport(vault, state, [first]);
+  const notePath = state.current.annotations["id-1"]!.notePath;
+  // Simulate a prior sync that already recorded this annotation as too-short while the note's
+  // own frontmatter still says "off", forcing the unchanged fast-path to attempt a durable rewrite.
+  state.current.annotations["id-1"]!.researchStatus = "too-short";
+  state.current.lastSyncAt = "before";
+  vault.failModifyPath = notePath;
+
+  const result = await runImport(vault, state, [first, second]);
+
+  assert.equal(result.failures.some((failure) => failure.annotationId === "id-1" && failure.stage === "modify"), true);
+  assert.equal(state.current.annotations["id-1"]!.researchStatus, "too-short");
+  assert.equal(result.imported.some((entry) => entry.annotationId === "id-2"), true);
+  assert.equal(state.current.annotations["id-2"] !== undefined, true);
+  assert.equal(state.current.lastSyncAt, "before");
+});
+
+test("unchanged fast-path read failure is contained per-annotation and later annotations still import", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const first = annotation("id-1");
+  const second = annotation("id-2", { quote: "Second annotation quote one two three four five six" });
+
+  await runImport(vault, state, [first]);
+  state.current.lastSyncAt = "before";
+  vault.failReadPath = state.current.annotations["id-1"]!.notePath;
+
+  const result = await runImport(vault, state, [first, second]);
+
+  assert.equal(result.failures.some((failure) => failure.annotationId === "id-1" && failure.stage === "note"), true);
+  assert.equal(result.imported.some((entry) => entry.annotationId === "id-2"), true);
+  assert.equal(state.current.annotations["id-2"] !== undefined, true);
+  assert.equal(state.current.lastSyncAt, "before");
+});
+
+test("unchanged fast-path durable-complete mutate failure is contained per-annotation and later annotations still import", async () => {
+  const vault = new MemoryVault();
+  const state = new MemoryState();
+  const first = annotation("id-1");
+  const second = annotation("id-2", { quote: "Second annotation quote one two three four five six" });
+
+  await runImport(vault, state, [first]);
+  const notePath = state.current.annotations["id-1"]!.notePath;
+  state.failNextSave = true;
+  assert.equal(await updateAppleAnnotationResearchStatus(vault, state, "id-1", "complete"), "state-pending");
+  assert.equal(state.current.annotations["id-1"]!.researchStatus, "off");
+  assert.match(vault.files.get(notePath) ?? "", /research_status: complete/);
+
+  state.current.lastSyncAt = "before";
+  state.failNextSave = true;
+
+  const result = await runImport(vault, state, [first, second]);
+
+  assert.equal(result.failures.some((failure) => failure.annotationId === "id-1" && failure.stage === "mutate"), true);
+  assert.equal(state.current.annotations["id-1"]!.researchStatus, "off");
+  assert.match(vault.files.get(notePath) ?? "", /research_status: complete/);
+  assert.equal(result.imported.some((entry) => entry.annotationId === "id-2"), true);
+  assert.equal(state.current.annotations["id-2"] !== undefined, true);
   assert.equal(state.current.lastSyncAt, "before");
 });
 

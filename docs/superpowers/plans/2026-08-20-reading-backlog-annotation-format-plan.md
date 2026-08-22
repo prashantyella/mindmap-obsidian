@@ -127,7 +127,7 @@ Work:
 - First activation imports all annotations and processes zero historical notes automatically.
 - The first-use copy clearly separates import consent from backlog processing.
 - Normal subsequent syncs process only annotations created or source-changed by that sync.
-- Add a separately confirmed `Process imported backlog now` action.
+- Add a separately confirmed `Process Reading backlog` action.
 - Keep backlog count visible and preserve individual-note actions.
 - A failed live note remains pending without an immediate retry loop.
 - A newly detected annotation after activation processes immediately, sequentially.

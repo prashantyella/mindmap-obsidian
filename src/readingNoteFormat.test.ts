@@ -187,7 +187,7 @@ test("rejects a related target that points inside .obsidian", () => {
 });
 
 test("rejects a related target containing a control character", () => {
-  assert.equal(relatedNoteWikilink("Books/Apple Books/Author/Book/Annotations/Note.md"), undefined);
+  assert.equal(relatedNoteWikilink("Books/Apple Books/Author/Book/Annotations/Note\x07.md"), undefined);
 });
 
 test("rejects related targets that would inject wikilink delimiters", () => {

@@ -158,11 +158,26 @@ export class RuntimeReadinessCoordinator {
   private controller: RuntimeSetupController | null = null;
   private bootstrapInterpreterPath: string | null = null;
   private disposed = false;
+  private readonly listeners = new Set<(state: CoordinatorState) => void>();
 
   constructor(private readonly options: RuntimeCoordinatorOptions) {}
 
   getState(): CoordinatorState {
     return { ...this.state };
+  }
+
+  /**
+   * Subscribes to every state update, including the intermediate cancellable
+   * phases (confirming/creating/installing/verifying) that happen between a
+   * `beginSetup()` call and its resolution. Returns an unsubscribe function;
+   * callers (e.g. a UI panel torn down mid-setup) must call it on cleanup so
+   * the coordinator never accumulates listeners for closed views.
+   */
+  subscribe(listener: (state: CoordinatorState) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   private setState(next: CoordinatorState): CoordinatorState {
@@ -172,6 +187,13 @@ export class RuntimeReadinessCoordinator {
       this.options.onStateChange?.({ ...next });
     } catch {
       // A broken consumer state-change handler must never corrupt coordinator state.
+    }
+    for (const listener of [...this.listeners]) {
+      try {
+        listener({ ...next });
+      } catch {
+        // A broken subscriber must never corrupt coordinator state or block other subscribers.
+      }
     }
     return { ...next };
   }
@@ -301,7 +323,11 @@ export class RuntimeReadinessCoordinator {
   async beginSetup(): Promise<CoordinatorState> {
     if (this.disposed) return this.getState();
     if (!this.bootstrapInterpreterPath) {
-      return this.getState();
+      // No bootstrap candidate on file: either startDiscovery() has not run
+      // yet, or the prior run found a fully ready interpreter whose persist()
+      // failed (which never populates bootstrapInterpreterPath). Re-running
+      // discovery retries persistence in that case instead of silently no-op'ing.
+      return this.startDiscovery();
     }
 
     if (!this.controller) {
@@ -347,5 +373,6 @@ export class RuntimeReadinessCoordinator {
   dispose(): void {
     this.controller?.dispose();
     this.disposed = true;
+    this.listeners.clear();
   }
 }
