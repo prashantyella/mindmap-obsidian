@@ -3,30 +3,82 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 
-import { FileSystemAdapter, Notice, Plugin, TAbstractFile, TFile, TFolder } from "obsidian";
+import { FileSystemAdapter, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 
 import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput, type PreflightResult } from "./diagnostics";
-import { isScopeSetupComplete, listVaultFolderOptions, readScopeSelection, updateScopeSelection, type ScopeSelection, type VaultFolderOption } from "./onboarding";
+import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } from "./onboarding";
 import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
+import { createNodeDiscoveryFs, createNodeProcessInvoker, getDefaultAppSupportRoot } from "./runtimeDiscovery";
+import { createNodeSetupFs, createNodeSetupSpawner } from "./runtimeSetup";
+import { PYTHON_MACOS_DOWNLOAD_URL, RUNTIME_SETUP_CONFIRMATION_COPY, RuntimeReadinessCoordinator, shouldTriggerRuntimeReadyKickoff, type CoordinatorState } from "./runtimeSetupCoordinator";
+import { buildRuntimePreflightVerifier } from "./runtimeVerifier";
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
+import { discoverAppleBooksDatabasePaths } from "./appleBooksDiscovery";
+import { classifyResearchTarget, completeAppleAnnotationResearchForNote, importAppleBooksAnnotations, updateAppleAnnotationResearchStatus, writeAppleAnnotationCompanion } from "./appleBooksImport";
+import { clearTransientAutomaticPause, createAutomaticResearchPolicy, createAutomaticResearchPolicyStore, loadAutomaticResearchPolicySafely, localResearchDay, type AutomaticResearchPolicyState, type AutomaticResearchPolicyStore } from "./automaticResearchPolicy";
+import { persistAutomaticResearchOutcome, runAutomaticResearch, selectSyncResearchCandidates } from "./automaticResearch";
+import { ExaResearchProvider } from "./exaResearchProvider";
+import { getExaCredential } from "./keychainCredential";
+import { createConfiguredLocalResearchModel } from "./localResearchModel";
+import { resolveLocalModelApiKey } from "./localModelApiKey";
+import { isSafeManualResearchPath } from "./manualResearchGuard";
+import { collectResearch, researchNote } from "./webResearch";
+import { startAppleBooksReaderProcess } from "./appleBooksReaderProcess";
+import { prepareActiveNoteResearchInput } from "./researchInput";
+import { renderCompanionResearchContent } from "./researchWriter";
+import { MAX_RESEARCH_INPUT_CHARS, WebResearchError } from "./webResearchTypes";
+import { createReadingStateStore, type ReadingStateStore } from "./readingState";
+import { reconcileReadingProcessedFromPythonState, shouldTriggerDailyReconciliation } from "./readingPythonReconciliation";
+import { createObsidianVaultApi } from "./readingVault";
+import { ReadingModeController, type ReadingHealth, type ReadingPreview } from "./readingMode";
+import { registerMindmapCommands } from "./pluginCommands";
+import {
+  getLlmProviderConfigStatus as resolveLlmProviderConfigStatus,
+  getScopeSetupStatus as resolveScopeSetupStatus,
+  saveLlmProviderConfig as writeLlmProviderConfig,
+  saveScopeSetup as writeScopeSetup,
+  type LlmProviderConfig,
+  type LlmProviderConfigStatus,
+  type ScopeSetupStatus,
+} from "./pluginConfig";
+import {
+  buildDiagnosticsSummary,
+  buildPendingSummary,
+  buildSchedulerSummary,
+  buildScopeSetupSummary,
+  type DiagnosticsSummaryState,
+  type SchedulerSummaryState,
+} from "./pluginSummaries";
 import { assertAllowedPluginArgs } from "./runArguments";
-import { getRunProfile, type RunScope } from "./runProfiles";
+import { getRunProfile, type RunProfile, type RunScope } from "./runProfiles";
+import { NO_ACTIVE_NOTE, type ActiveNoteEligibility } from "./individualNote";
+import { resolveActiveNoteEligibility } from "./individualNoteActions";
+import { confirmMindmapRun } from "./runConfirmModal";
 import { migrateLegacyPluginVaultRoot } from "./runtimeConfigMigration";
 import { ensureBundledRuntimeAssets } from "./runtimeAssets";
+import { MindmapSemanticEnvironment, type SemanticEnvironmentStatus } from "./semanticEnvironment";
+import type { LiveRelatedResponse, LookupRelatedResponse } from "./semanticTypes";
+import { buildMindmapLocalGraphState, isMindmapLocalGraphLeaf } from "./localGraph";
 import {
-  buildDailyCalendarIntervals,
   buildLaunchAgentPlist,
-  buildLaunchAgentSpec,
-  buildWeeklyCalendarInterval,
   DAILY_LAUNCH_AGENT_LABEL,
   formatClockTime,
   normalizeHour,
   normalizeMinute,
+  shouldBootstrapLaunchAgent,
   WEEKLY_LAUNCH_AGENT_LABEL,
   type LaunchAgentSpec,
 } from "./launchAgent";
 import {
-  buildSchedulerStatus,
+  buildLaunchAgentCatchUpStatus,
+  buildPluginLaunchAgentSpecs,
+  ensureLaunchAgentDirectories,
+  getLaunchAgentPlistPath,
+  getLaunchAgentsDirectory,
+  isLaunchAgentLoaded,
+  refreshLaunchAgentHealth,
+} from "./launchAgentHealth";
+import {
   computeNextRunAt,
   formatTimestamp,
   getSchedulerAction,
@@ -37,9 +89,19 @@ import {
 } from "./scheduler";
 import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./settings";
 import { MindmapSettingTab } from "./settingsTab";
+import { MindmapWorkspaceView, MINDMAP_VIEW_TYPE } from "./workspaceView";
 import { BUNDLED_RUNTIME_ASSETS } from "virtual:runtime-assets";
+import {
+  configureStatusBarElement,
+  renderStatusBarElement,
+} from "./statusBarMenu";
+import { buildMindmapStatusBarState, openMindmapStatusMenu, type StatusBarInternalState } from "./statusBarIntegration";
+import { buildStatusSummary } from "./statusBarState";
+import type { LaunchAgentDetail } from "./launchAgentHealth";
+import { registerVaultRefreshEvents } from "./vaultRefreshEvents";
 
 const LOG_LIMIT = 50;
+const READING_RECONCILIATION_FAILURE_COOLDOWN_MS = 30 * 60 * 1000;
 
 function splitLogLines(text: string): string[] {
   return text
@@ -48,9 +110,9 @@ function splitLogLines(text: string): string[] {
     .filter(Boolean);
 }
 
-type RunTrigger = "manual" | "scheduled";
+type RunTrigger = "manual" | "scheduled" | "reading";
 
-interface SchedulerState {
+interface SchedulerState extends SchedulerSummaryState {
   nextRunAt: number | null;
   lastRunAt: number | null;
   lastTrigger: RunTrigger | null;
@@ -58,21 +120,13 @@ interface SchedulerState {
   lastMessage: string;
   launchAgentMessage: string;
   launchAgentPaths: string[];
+  launchAgentDetails: LaunchAgentDetail[];
 }
 
-interface DiagnosticsState {
+interface DiagnosticsState extends DiagnosticsSummaryState {
   inProgress: boolean;
   lastRunAt: number | null;
   result: PreflightResult | null;
-}
-
-export interface ScopeSetupStatus {
-  complete: boolean;
-  canManage: boolean;
-  configPath: string | null;
-  currentPaths: string[];
-  allPaths: string[];
-  guidance: string;
 }
 
 export default class MindmapPlugin extends Plugin {
@@ -82,6 +136,10 @@ export default class MindmapPlugin extends Plugin {
   private schedulerTimer: ReturnType<typeof setTimeout> | null = null;
   private launchAgentManagedThisSession = false;
   private launchAgentSyncId = 0;
+  private launchAgentHealthRefreshInFlight: Promise<void> | null = null;
+  private lastReconciledDailySuccessAt: number | null = null;
+  private lastReconciliationFailureAt: number | null = null;
+  private readingReconciliationInFlight = false;
   private schedulerState: SchedulerState = {
     nextRunAt: null,
     lastRunAt: null,
@@ -90,21 +148,61 @@ export default class MindmapPlugin extends Plugin {
     lastMessage: "Manual mode.",
     launchAgentMessage: "LaunchAgent scheduler not reconciled yet.",
     launchAgentPaths: [],
+    launchAgentDetails: [],
+    launchAgentHealth: null,
+    launchAgentLastSuccessfulRunAt: null,
+    launchAgentLastExitCode: null,
+    pendingAllCount: null,
   };
   private readonly recentLog: string[] = [];
-  private statusBarEl: HTMLElement | null = null;
+  statusBarEl: HTMLElement | null = null;
+  private activeRunStatus: string | null = null;
+  private activeNoteEligibility: ActiveNoteEligibility = NO_ACTIVE_NOTE;
   private pendingScanService: ReturnType<typeof createPendingScanService> | null = null;
+  private readingModeController: ReadingModeController | null = null;
+  private readingStateStore: ReadingStateStore | null = null;
+  private automaticResearchPolicyStore: AutomaticResearchPolicyStore | null = null;
+  private automaticResearchPolicyStatus: AutomaticResearchPolicyState = createAutomaticResearchPolicy(localResearchDay(new Date()));
+  private webResearchActivity: "off" | "ready" | "deriving" | "searching" | "writing" | "error" = "off";
+  private webResearchLastError: string | null = null;
+  private webResearchPromise: Promise<ResearchFileResult> | null = null;
+  private activeReaderChild: ChildProcess | null = null;
+  private semanticEnvironment: MindmapSemanticEnvironment | null = null;
+  private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
+  private mindmapLocalGraphPath: string | null = null;
+  private focusLookupOnNextRender = false;
   private diagnosticsState: DiagnosticsState = {
     inProgress: false,
     lastRunAt: null,
     result: null,
   };
+  private runtimeCoordinator: RuntimeReadinessCoordinator | null = null;
+  private runtimeReadyKicked = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
     await this.ensureBundledRuntime();
 
     this.statusBarEl = this.addStatusBarItem();
+    configureStatusBarElement(this.statusBarEl, (event) => this.openStatusMenu(event));
+    this.readingStateStore = createReadingStateStore(path.join(this.getRuntimeContext().pluginDir, "data", "reading-state.json"));
+    this.automaticResearchPolicyStore = createAutomaticResearchPolicyStore(path.join(this.getRuntimeContext().pluginDir, "data", "automatic-research-policy.json"), {
+      mkdir: async (directory, options) => { await fs.promises.mkdir(directory, options); },
+      readFile: async (filePath, encoding) => await fs.promises.readFile(filePath, encoding),
+      writeFile: async (filePath, content, encoding) => await fs.promises.writeFile(filePath, content, encoding),
+      rename: async (source, target) => await fs.promises.rename(source, target),
+      unlink: async (filePath) => await fs.promises.unlink(filePath),
+    });
+    await this.refreshAutomaticResearchPolicyStatus();
+    this.readingModeController = this.createReadingModeController();
+    this.registerView(MINDMAP_VIEW_TYPE, (leaf) => new MindmapWorkspaceView(leaf, this));
+    this.registerHoverLinkSource(MINDMAP_VIEW_TYPE, {
+      display: "Mindmap AI",
+      defaultMod: false,
+    });
+    this.addRibbonIcon("orbit", "Open Mindmap", () => {
+      void this.openMindmapView();
+    });
     this.addSettingTab(new MindmapSettingTab(this.app, this));
     this.pendingScanService = createPendingScanService(
       this.app.vault,
@@ -113,81 +211,49 @@ export default class MindmapPlugin extends Plugin {
       (message) => this.appendLog(message),
       () => this.updateStatusBar(),
     );
+    this.semanticEnvironment = new MindmapSemanticEnvironment(
+      () => this.getResolvedRuntime(),
+      (message) => this.appendLog(message),
+      () => this.updateStatusBar(),
+    );
 
-    this.addCommand({
-      id: "mindmap-run-now",
-      name: "Run mindmap (current scope)",
-      callback: () => {
-        void this.runMindmap("manual", "current");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-run-all",
-      name: "Run mindmap (all scopes)",
-      callback: () => {
-        void this.runMindmap("manual", "all");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-enable-scheduler",
-      name: "Enable mindmap interval scheduler",
-      callback: () => {
-        void this.setSchedulerMode("interval");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-enable-launchagent-scheduler",
-      name: "Enable mindmap LaunchAgent scheduler",
-      callback: () => {
-        void this.setSchedulerMode("launchAgent");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-disable-scheduler",
-      name: "Disable mindmap schedulers",
-      callback: () => {
-        void this.setSchedulerMode("manual");
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-open-status",
-      name: "Show mindmap status",
-      callback: () => {
-        this.showRuntimeNotice(this.getResolvedRuntime());
-      },
-    });
-
-    this.addCommand({
-      id: "mindmap-validate-runtime",
-      name: "Run mindmap preflight checks",
-      callback: () => {
-        void this.runPreflight("manual");
-      },
-    });
-
+    registerMindmapCommands(this);
     this.syncScheduler();
-    this.registerVaultRefreshEvents();
+    registerVaultRefreshEvents(this.app.vault, (event) => this.registerEvent(event), (reason, paths) => {
+      this.pendingScanService?.requestRefresh(reason, paths);
+    });
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => { void this.refreshActiveNoteEligibility(); }));
     void this.pendingScanService.warm().then(() => this.updateStatusBar());
-    void this.runPreflight("startup");
+    await this.startRuntimeCoordinator();
+    if (this.settings.readingMode === "reading") {
+      void this.readingModeController.start();
+    }
   }
 
   onunload(): void {
+    this.runtimeCoordinator?.dispose();
+    this.activeReaderChild?.kill();
+    this.activeReaderChild = null;
     this.pendingScanService?.dispose();
+    void this.readingModeController?.dispose();
+    void this.semanticEnvironment?.shutdown();
     this.stopScheduler("Plugin unloaded. Internal scheduler stopped.");
     if (this.currentProcess) {
       this.appendLog("Stopping active Mindmap run because the plugin is unloading.");
       this.currentProcess.kill();
       this.currentProcess = null;
+      this.activeRunStatus = null;
     }
   }
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings.readingMode = this.settings.readingMode === "reading" ? "reading" : "standard";
+    this.settings.webResearchMode = this.settings.webResearchMode === "manual" || this.settings.webResearchMode === "automatic-reading" ? this.settings.webResearchMode : "off";
+    this.webResearchActivity = this.settings.webResearchMode === "off" ? "off" : "ready";
+    if (typeof this.settings.pinnedConnections !== "object" || this.settings.pinnedConnections === null || Array.isArray(this.settings.pinnedConnections)) {
+      this.settings.pinnedConnections = {};
+    }
     this.settings.schedulerIntervalMinutes = normalizeSchedulerInterval(this.settings.schedulerIntervalMinutes);
     this.settings.launchAgentDailyHour = normalizeHour(this.settings.launchAgentDailyHour);
     this.settings.launchAgentDailyMinute = normalizeMinute(this.settings.launchAgentDailyMinute);
@@ -210,6 +276,154 @@ export default class MindmapPlugin extends Plugin {
     return resolveRuntime(this.settings, this.getRuntimeContext());
   }
 
+  /**
+   * True whenever the runtime is known to require setup, and also before
+   * discovery has even started (the coordinator is constructed only partway
+   * through onload()). The safe default while unknown is "blocked": nothing
+   * gated on this may run ahead of the discovery result it depends on.
+   */
+  private isRuntimeSetupBlocking(): boolean {
+    return this.runtimeCoordinator?.getState().blocking ?? true;
+  }
+
+  getRuntimeSetupState(): CoordinatorState | null {
+    return this.runtimeCoordinator?.getState() ?? null;
+  }
+
+  /** Live runtime-setup state updates, including cancellable in-progress phases. Callers must invoke the returned unsubscribe on teardown. */
+  subscribeRuntimeSetupState(listener: (state: CoordinatorState) => void): () => void {
+    return this.runtimeCoordinator?.subscribe(listener) ?? (() => {});
+  }
+
+  async startRuntimeSetup(): Promise<void> {
+    const state = this.runtimeCoordinator?.getState();
+    if (!state?.canSetup) return;
+    await this.runtimeCoordinator?.beginSetup();
+  }
+
+  retryRuntimeSetup(): Promise<void> {
+    return this.startRuntimeSetup();
+  }
+
+  cancelRuntimeSetup(): void {
+    this.runtimeCoordinator?.cancel();
+  }
+
+  /** Opens the official Python macOS download page in the user's default browser. */
+  openPythonRuntimeDownloadPage(): void {
+    window.open(PYTHON_MACOS_DOWNLOAD_URL, "_blank");
+  }
+
+  private async confirmRuntimeSetup(): Promise<boolean> {
+    return await confirmMindmapRun(this.app, RUNTIME_SETUP_CONFIRMATION_COPY);
+  }
+
+  private async startRuntimeCoordinator(): Promise<void> {
+    const context = this.getRuntimeContext();
+    const runtimeDir = getPluginRuntimeDir(context);
+    const runtime = this.getResolvedRuntime();
+
+    let requirementsFileContents = "";
+    try {
+      requirementsFileContents = await fs.promises.readFile(path.join(runtimeDir, "requirements.txt"), "utf8");
+    } catch (error) {
+      this.appendLog(`[runtime] Could not read bundled requirements.txt: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+
+    const invoke = createNodeProcessInvoker();
+    const verifyPreflight = buildRuntimePreflightVerifier({
+      scriptPath: runtime.scriptPath,
+      configPath: runtime.configPath,
+      invoke,
+    });
+
+    this.runtimeCoordinator = new RuntimeReadinessCoordinator({
+      platform: process.platform,
+      pythonCommandSetting: this.settings.pythonCommand,
+      homeDir: os.homedir(),
+      pathEnv: process.env.PATH ?? "",
+      arch: os.arch() === "arm64" ? "arm64" : "x64",
+      appSupportRoot: getDefaultAppSupportRoot(os.homedir()),
+      requirementsFileContents,
+      requirementsFilePath: path.join(runtimeDir, "requirements.txt"),
+      scriptPath: runtime.scriptPath,
+      configPath: runtime.configPath,
+      discoveryFs: createNodeDiscoveryFs(),
+      invoke,
+      setupFs: createNodeSetupFs(),
+      spawner: createNodeSetupSpawner(),
+      confirm: () => this.confirmRuntimeSetup(),
+      persist: async (interpreterPath) => {
+        this.settings.pythonCommand = interpreterPath;
+        await this.saveSettings();
+      },
+      verifyPreflight,
+      onStateChange: (state) => {
+        this.updateStatusBar();
+        if (shouldTriggerRuntimeReadyKickoff(state.phase, this.runtimeReadyKicked)) {
+          this.runtimeReadyKicked = true;
+          // The scheduler/LaunchAgent branches syncScheduler() gates on
+          // isRuntimeSetupBlocking() were skipped every time this coordinator
+          // reported blocking:true (including via persist()'s own saveSettings()
+          // call mid-install, which runs before this phase flips to ready) — so
+          // they must be re-evaluated now that blocking has actually cleared.
+          this.syncScheduler();
+          void this.runPreflight("startup");
+          if (this.settings.liveSemanticLookupEnabled) {
+            void this.startSemanticEnvironment(false);
+          }
+        }
+      },
+      log: (line) => this.appendLog(line),
+    });
+
+    await this.runtimeCoordinator.startDiscovery();
+  }
+
+  getSemanticStatus(): SemanticEnvironmentStatus {
+    return this.semanticEnvironment?.getStatus() ?? {
+      state: "off",
+      message: "Semantic environment is off.",
+      health: null,
+    };
+  }
+
+  async startSemanticEnvironment(showNotice: boolean): Promise<void> {
+    if (!this.semanticEnvironment) {
+      return;
+    }
+    if (this.isRuntimeSetupBlocking()) {
+      if (showNotice) {
+        new Notice("Mindmap runtime setup is required before the semantic environment can start.", 8000);
+      }
+      return;
+    }
+    const status = await this.semanticEnvironment.start("current");
+    if (showNotice) {
+      new Notice(status.message, 8000);
+    }
+  }
+
+  async queryLiveRelated(path: string): Promise<LiveRelatedResponse> {
+    if (!this.settings.liveSemanticLookupEnabled) {
+      throw new Error("Live semantic lookup is disabled.");
+    }
+    if (!this.semanticEnvironment) {
+      throw new Error("Semantic environment is not available.");
+    }
+    return this.semanticEnvironment.queryRelated(path, this.settings.liveSemanticEnsureActiveNoteIndexed);
+  }
+
+  async queryLookupRelated(query: string, limit?: number): Promise<LookupRelatedResponse> {
+    if (!this.settings.liveSemanticLookupEnabled) {
+      throw new Error("Live semantic lookup is disabled.");
+    }
+    if (!this.semanticEnvironment) {
+      throw new Error("Semantic environment is not available.");
+    }
+    return this.semanticEnvironment.queryText(query, limit);
+  }
+
   getSchedulerConfig(): SchedulerConfig {
     return {
       mode: this.settings.schedulerMode,
@@ -218,47 +432,516 @@ export default class MindmapPlugin extends Plugin {
   }
 
   getSchedulerSummary(): DocumentFragment {
+    this.refreshLaunchAgentHealth();
     const config = this.getSchedulerConfig();
-    const status = buildSchedulerStatus(config, this.schedulerState.nextRunAt);
-    const fragment = document.createDocumentFragment();
-    fragment.appendText(`Mode: ${config.mode}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Internal scheduler enabled: ${status.enabled ? "Yes" : "No"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Interval: ${status.intervalMinutes} minutes`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`LaunchAgent scheduler enabled: ${isLaunchAgentSchedulerEnabled(config.mode) ? "Yes" : "No"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(
+    return buildSchedulerSummary(
+      config,
+      this.schedulerState,
+      this.currentProcess !== null,
       `LaunchAgent daily: ${formatClockTime({ hour: this.settings.launchAgentDailyHour, minute: this.settings.launchAgentDailyMinute })} Mon-Sat`,
-    );
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(
       this.settings.launchAgentWeeklyEnabled
         ? `LaunchAgent weekly refresh: ${formatClockTime({ hour: this.settings.launchAgentWeeklyHour, minute: this.settings.launchAgentWeeklyMinute })} Sunday`
         : "LaunchAgent weekly refresh: disabled",
     );
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Next run: ${formatTimestamp(status.nextRunAt)}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Last result: ${this.schedulerState.lastMessage}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`LaunchAgent status: ${this.schedulerState.launchAgentMessage}`);
-    if (this.schedulerState.launchAgentPaths.length > 0) {
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText(`LaunchAgent files: ${this.schedulerState.launchAgentPaths.join(", ")}`);
-    }
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Active run: ${this.currentProcess ? "Yes" : "No"}`);
-    if (this.schedulerState.lastRunAt !== null) {
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText(`Last run at: ${formatTimestamp(this.schedulerState.lastRunAt)}`);
-    }
-    return fragment;
   }
 
-  getRecentLogLines(): string[] {
-    return [...this.recentLog];
+  getLaunchAgentCatchUpStatus(): { available: boolean; message: string } {
+    return buildLaunchAgentCatchUpStatus(this.settings.schedulerMode, this.schedulerState.launchAgentHealth, this.getPendingSnapshot());
+  }
+
+  private openStatusMenu(event?: MouseEvent | KeyboardEvent): void {
+    openMindmapStatusMenu(this, event);
+  }
+
+  getStatusBarInternalState(): StatusBarInternalState {
+    return {
+      running: this.currentProcess !== null,
+      runStatus: this.activeRunStatus,
+      preflightInProgress: this.diagnosticsState.inProgress,
+      preflightOk: this.diagnosticsState.result?.ok ?? null,
+      schedulerHealth: this.schedulerState.launchAgentHealth,
+      schedulerDetails: this.schedulerState.launchAgentDetails,
+    };
+  }
+
+  getReadingHealth(): ReadingHealth {
+    return this.readingModeController?.getHealth() ?? {
+      mode: this.settings.readingMode,
+      activity: this.settings.readingMode === "reading" ? "ready" : "disabled",
+      annotationCount: 0,
+      eligibleCount: 0,
+      pendingCount: 0,
+      importedCount: 0,
+      unresearchableCount: 0,
+      lastSyncAt: null,
+      lastError: null,
+    };
+  }
+
+  async toggleReadingMode(): Promise<void> {
+    if (!this.readingModeController) {
+      return;
+    }
+    if (this.settings.readingMode === "reading") {
+      await this.readingModeController.disable();
+      return;
+    }
+    const outcome = await this.readingModeController.enable();
+    if (outcome.enabled && outcome.initialImport) {
+      const health = this.readingModeController.getHealth();
+      if (health.pendingCount > 0) {
+        if (this.isRuntimeSetupBlocking()) {
+          new Notice(`${health.pendingCount} annotation${health.pendingCount === 1 ? "" : "s"} imported. Finish Mindmap runtime setup in Settings to process them.`, 10000);
+        } else {
+          const shouldProcess = await confirmMindmapRun(this.app, {
+            title: "Process Reading backlog?",
+            message: `${health.pendingCount} annotation${health.pendingCount === 1 ? "" : "s"} ready for processing. Process them now?`,
+            confirmText: "Process now",
+            confirmClass: "mod-cta",
+          });
+          if (shouldProcess) {
+            await this.readingModeController.processBacklog();
+          }
+        }
+      }
+    }
+  }
+
+  async syncReadingMode(): Promise<void> {
+    await this.readingModeController?.syncNow();
+  }
+
+  async processReadingBacklog(): Promise<void> {
+    if (this.isRuntimeSetupBlocking()) {
+      new Notice("Mindmap runtime setup is required before the Reading backlog can be processed. Finish setup in Settings.", 10000);
+      return;
+    }
+    await this.readingModeController?.processBacklog();
+  }
+
+  getWebResearchStatus(): { mode: "off" | "manual" | "automatic-reading"; activity: string; lastError: string | null; automatic: AutomaticResearchPolicyState } {
+    return { mode: this.settings.webResearchMode, activity: this.webResearchActivity, lastError: this.webResearchLastError, automatic: { ...this.automaticResearchPolicyStatus } };
+  }
+
+  async toggleWebResearchMode(): Promise<void> {
+    if (this.webResearchPromise) {
+      new Notice("Web Research is already running; mode cannot change yet.", 8000);
+      return;
+    }
+    if (this.settings.webResearchMode === "manual") {
+      const previous = this.settings.webResearchMode;
+      this.settings.webResearchMode = "off";
+      this.webResearchActivity = "off";
+      this.webResearchLastError = null;
+      try { await this.saveSettings(); } catch {
+        this.settings.webResearchMode = previous;
+        this.webResearchActivity = "error";
+        this.webResearchLastError = "Could not save Web Research mode.";
+        new Notice(this.webResearchLastError, 8000);
+        this.updateStatusBar();
+        return;
+      }
+      this.updateStatusBar();
+      new Notice("Manual Web Research disabled.", 5000);
+      return;
+    }
+    const confirmed = await confirmMindmapRun(this.app, {
+      title: "Enable Manual Web Research?",
+      message: "Selected text or a bounded active-note excerpt is processed locally by Qwen. Exa receives only one or two derived queries and returns up to five bounded source excerpts and metadata. Unrelated vault content is never sent externally.",
+      confirmText: "Enable manual research",
+      confirmClass: "mod-cta",
+    });
+    if (!confirmed) return;
+    try {
+      await this.getWebResearchPrerequisites();
+    } catch (error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research is not ready.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    const previous = this.settings.webResearchMode;
+    this.settings.webResearchMode = "manual";
+    this.webResearchActivity = "ready";
+    this.webResearchLastError = null;
+    try { await this.saveSettings(); } catch {
+      this.settings.webResearchMode = previous;
+      this.webResearchActivity = "error";
+      this.webResearchLastError = "Could not save Web Research mode.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    this.updateStatusBar();
+    new Notice("Manual Web Research enabled.", 5000);
+  }
+
+  async toggleAutomaticReadingResearch(): Promise<void> {
+    if (this.webResearchPromise) {
+      new Notice("Web Research is already running; automatic mode cannot change yet.", 8000);
+      return;
+    }
+    if (this.settings.webResearchMode === "automatic-reading") {
+      const previousMode = this.settings.webResearchMode;
+      const previousActivity = this.webResearchActivity;
+      const previousError = this.webResearchLastError;
+      this.settings.webResearchMode = "manual";
+      this.webResearchActivity = "ready";
+      try { await this.saveSettings(); } catch {
+        this.settings.webResearchMode = previousMode;
+        this.webResearchActivity = previousActivity;
+        this.webResearchLastError = previousError ?? "Could not save Automatic Reading Research mode.";
+        new Notice(this.webResearchLastError, 8000);
+        this.updateStatusBar();
+        return;
+      }
+      new Notice("Automatic Reading research paused; manual research remains available.", 5000);
+      this.updateStatusBar();
+      return;
+    }
+    if (this.settings.readingMode !== "reading") {
+      new Notice("Enable Reading Mode before automatic research.", 8000);
+      return;
+    }
+    if (this.isRuntimeSetupBlocking()) {
+      new Notice("Mindmap runtime setup is required before automatic Reading research can be enabled.", 8000);
+      return;
+    }
+    const confirmed = await confirmMindmapRun(this.app, {
+      title: "Enable Automatic Reading Research?",
+      message: "Apple annotation excerpts stay local to Qwen. Exa receives only one or two derived queries and returns up to five bounded source excerpts and metadata. Automatic work is limited to five notes per sync and ten per day.",
+      confirmText: "Enable automatic research",
+      confirmClass: "mod-cta",
+    });
+    if (!confirmed) return;
+    try { await this.getWebResearchPrerequisites(); } catch (error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = error instanceof WebResearchError ? error.message : "Automatic research is not ready.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    const previousMode = this.settings.webResearchMode;
+    const previousActivity = this.webResearchActivity;
+    const previousError = this.webResearchLastError;
+    this.settings.webResearchMode = "automatic-reading";
+    this.webResearchActivity = "ready";
+    this.webResearchLastError = null;
+    try { await this.saveSettings(); } catch {
+      this.settings.webResearchMode = previousMode;
+      this.webResearchActivity = previousActivity;
+      this.webResearchLastError = previousError ?? "Could not save Automatic Reading Research mode.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    await this.refreshAutomaticResearchPolicyStatus();
+    await this.syncReadingMode();
+    new Notice("Automatic Reading research enabled.", 5000);
+  }
+
+  async retryAutomaticResearch(): Promise<void> {
+    if (!this.automaticResearchPolicyStore || this.settings.webResearchMode !== "automatic-reading" || this.readingModeController?.getMode() !== "reading") {
+      new Notice("Automatic research retry requires active Reading Mode.", 8000);
+      return;
+    }
+    if (this.isRuntimeSetupBlocking()) {
+      new Notice("Mindmap runtime setup is required before automatic Reading research can retry.", 8000);
+      return;
+    }
+    const day = localResearchDay(new Date());
+    const loaded = await loadAutomaticResearchPolicySafely(this.automaticResearchPolicyStore, day);
+    const policy = loaded.state;
+    this.automaticResearchPolicyStatus = policy;
+    if (loaded.error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = loaded.error;
+      new Notice(loaded.error, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    if (policy.pauseReason === "daily-limit") {
+      new Notice("Daily automatic research limit has been reached.", 8000);
+      this.updateStatusBar();
+      return;
+    }
+    if (!policy.pauseReason) return;
+    try {
+      await this.automaticResearchPolicyStore.save(clearTransientAutomaticPause(policy));
+      await this.refreshAutomaticResearchPolicyStatus();
+      this.webResearchLastError = null;
+      this.webResearchActivity = "ready";
+    } catch (error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = error instanceof Error ? error.message : "Automatic research retry could not be saved.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return;
+    }
+    await this.syncReadingMode();
+  }
+
+  private async refreshAutomaticResearchPolicyStatus(now = new Date()): Promise<void> {
+    if (!this.automaticResearchPolicyStore) return;
+    const result = await loadAutomaticResearchPolicySafely(this.automaticResearchPolicyStore, localResearchDay(now));
+    this.automaticResearchPolicyStatus = result.state;
+    if (result.error) {
+      this.webResearchActivity = "error";
+      this.webResearchLastError = result.error;
+    }
+  }
+
+  async researchSelectedText(): Promise<void> {
+    const selected = this.app.workspace.activeEditor?.editor?.getSelection()?.trim() ?? "";
+    if (!selected) {
+      new Notice("Select text in a Markdown note to research.", 8000);
+      return;
+    }
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension.toLowerCase() !== "md") {
+      new Notice("Web Research requires a Markdown note.", 8000);
+      return;
+    }
+    if (!isSafeManualResearchPath(file.path)) {
+      new Notice("Web Research cannot write to this note path.", 8000);
+      return;
+    }
+    await this.researchFile(file, selected, false, "manual");
+  }
+
+  async researchActiveNote(reprocess = false): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension.toLowerCase() !== "md") {
+      new Notice("Open an eligible Markdown note to research.", 8000);
+      return;
+    }
+    if (!isSafeManualResearchPath(file.path)) {
+      new Notice("Web Research cannot write to this note path.", 8000);
+      return;
+    }
+    const text = prepareActiveNoteResearchInput(await this.app.vault.cachedRead(file), MAX_RESEARCH_INPUT_CHARS);
+    if (!text.trim()) {
+      new Notice("The active note is empty.", 8000);
+      return;
+    }
+    await this.researchFile(file, text, reprocess, "manual");
+  }
+
+  private async researchFile(file: TFile, text: string, reprocess: boolean, origin: "manual" | "automatic"): Promise<ResearchFileResult> {
+    const readingActivity = this.readingModeController?.getHealth().activity;
+    if (origin === "manual" && (readingActivity === "syncing" || readingActivity === "processing")) {
+      new Notice("Reading Mode is updating notes; try Web Research again when the sync finishes.", 8000);
+      return { ok: false, code: "READING_BUSY", message: "Reading Mode is updating notes." };
+    }
+    if (this.currentProcess) {
+      if (origin === "manual") new Notice("Mindmap is already running. Web Research will not start.", 8000);
+      return { ok: false, code: "MINDMAP_BUSY", message: "Mindmap is already running." };
+    }
+    if (this.webResearchPromise) {
+      if (origin === "manual") new Notice("Web Research is already running.", 8000);
+      return { ok: false, code: "RESEARCH_BUSY", message: "Web Research is already running." };
+    }
+    const work = this.runResearchFile(file, text, reprocess, origin);
+    this.webResearchPromise = work;
+    try { return await work; } finally { this.webResearchPromise = null; }
+  }
+
+  private async runResearchFile(file: TFile, text: string, reprocess: boolean, origin: "manual" | "automatic"): Promise<ResearchFileResult> {
+    if (this.settings.webResearchMode === "off") {
+      new Notice("Enable Manual Web Research before starting a request.", 8000);
+      return { ok: false, code: "RESEARCH_DISABLED", message: "Web Research is disabled." };
+    }
+    this.webResearchActivity = "deriving";
+    this.webResearchLastError = null;
+    this.updateStatusBar();
+    try {
+      const { credential, model } = await this.getWebResearchPrerequisites();
+      const vault = createObsidianVaultApi(this.app.vault);
+      const note = vault.get(file.path);
+      if (!note) throw new WebResearchError("NOTE_MISSING", "The active note is unavailable.");
+
+      let trackedAnnotationId: string | undefined;
+      let trackedEntry: { researchPath?: string } | undefined;
+      if (this.readingStateStore) {
+        const currentState = await this.readingStateStore.load();
+        const found = Object.entries(currentState.annotations).find(([, entry]) => entry.notePath === file.path);
+        if (found) {
+          trackedAnnotationId = found[0];
+          trackedEntry = found[1];
+        }
+      }
+
+      const noteContent = await vault.read(note);
+      const classification = classifyResearchTarget(noteContent, trackedAnnotationId);
+      if (classification === "reading-state-missing") {
+        throw new WebResearchError("READING_STATE_MISSING", "This Apple Books annotation is not tracked in Reading state.");
+      }
+      if (classification === "type-mismatch") {
+        throw new WebResearchError("TYPE_MISMATCH", "Note type does not match its tracked Reading state entry.");
+      }
+
+      this.webResearchActivity = "searching";
+      this.updateStatusBar();
+
+      if (classification === "companion" && trackedAnnotationId && this.readingStateStore) {
+        const result = await collectResearch({ provider: new ExaResearchProvider(credential), model }, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
+        if (!result) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
+        const companionContent = renderCompanionResearchContent(result);
+        if (!companionContent) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
+        this.webResearchActivity = "writing";
+        this.updateStatusBar();
+        const companionResult = await writeAppleAnnotationCompanion(vault, this.readingStateStore, {
+          annotationPath: file.path,
+          annotationId: trackedAnnotationId,
+          researchContent: companionContent,
+          storedResearchPath: trackedEntry?.researchPath,
+        });
+        if (!companionResult.ok) throw new WebResearchError(companionResult.code, companionResult.message);
+      } else {
+        this.webResearchActivity = "writing";
+        this.updateStatusBar();
+        const result = await researchNote({ provider: new ExaResearchProvider(credential), model, vault }, note, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
+        if (!result) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
+      }
+
+      if (origin === "manual" && this.readingStateStore) {
+        const statusResult = await completeAppleAnnotationResearchForNote(vault, this.readingStateStore, file.path);
+        if (statusResult === "state-pending") this.webResearchLastError = "Research saved; annotation status will repair on next sync.";
+      }
+      this.webResearchActivity = "ready";
+      if (reprocess && !(await this.runMindmap("reading", "note", file.path))) {
+        this.webResearchLastError = "Research was saved; Mindmap processing is retryable.";
+        new Notice(this.webResearchLastError, 8000);
+      } else {
+        if (origin === "manual") new Notice("Web Research saved.", 5000);
+      }
+      return { ok: true };
+    } catch (error) {
+      this.webResearchActivity = "error";
+      const researchError = error instanceof WebResearchError ? error : new WebResearchError("RESEARCH_FAILED", "Web Research failed without saving changes.");
+      this.webResearchLastError = researchError.message;
+      if (origin === "manual") new Notice(this.webResearchLastError, 8000);
+      return { ok: false, code: researchError.code, message: researchError.message };
+    } finally {
+      this.updateStatusBar();
+    }
+  }
+
+  private async getWebResearchPrerequisites(): Promise<{ credential: string; model: ReturnType<typeof createConfiguredLocalResearchModel> }> {
+    const credential = await getExaCredential({ allowDevelopmentOverride: false });
+    const config = JSON.parse(await fs.promises.readFile(this.getResolvedRuntime().configPath, "utf8")) as Record<string, unknown>;
+    const provider = config.llm_provider === "ollama" ? "ollama" : "openai_compatible";
+    const chatTemplateKwargs = config.llm_chat_template_kwargs && typeof config.llm_chat_template_kwargs === "object" && !Array.isArray(config.llm_chat_template_kwargs)
+      ? config.llm_chat_template_kwargs as Record<string, unknown>
+      : undefined;
+    const model = createConfiguredLocalResearchModel({
+      provider,
+      baseUrl: String(config.llm_base_url ?? config.ollama_base_url ?? ""),
+      model: String(config.llm_model ?? ""),
+      ...(resolveLocalModelApiKey(config, process.env) ? { apiKey: resolveLocalModelApiKey(config, process.env) } : {}),
+      ...(chatTemplateKwargs ? { chatTemplateKwargs } : {}),
+      temperature: 0.2,
+    });
+    return { credential, model };
+  }
+
+  async runLaunchAgentCatchUp(): Promise<void> {
+    const status = this.getLaunchAgentCatchUpStatus();
+    if (!status.available) {
+      new Notice(status.message, 8000);
+      return;
+    }
+    await this.runMindmap("manual", "all");
+  }
+
+  async openMindmapView(): Promise<void> {
+    this.app.workspace.detachLeavesOfType(MINDMAP_VIEW_TYPE);
+
+    const leaf = await this.app.workspace.ensureSideLeaf(MINDMAP_VIEW_TYPE, "right", {
+      active: true,
+      split: false,
+      reveal: true,
+    });
+    await leaf.setViewState({
+      type: MINDMAP_VIEW_TYPE,
+      active: true,
+    });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  async openMindmapLookup(): Promise<void> {
+    this.focusLookupOnNextRender = true;
+    await this.openMindmapView();
+  }
+
+  consumeLookupFocusRequest(): boolean {
+    const requested = this.focusLookupOnNextRender;
+    this.focusLookupOnNextRender = false;
+    return requested;
+  }
+
+  getPinnedConnections(sourcePath: string): string[] {
+    return [...(this.settings.pinnedConnections[sourcePath] ?? [])];
+  }
+
+  isConnectionPinned(sourcePath: string, targetPath: string): boolean {
+    return this.getPinnedConnections(sourcePath).includes(targetPath);
+  }
+
+  async togglePinnedConnection(sourcePath: string, targetPath: string): Promise<boolean> {
+    const current = this.getPinnedConnections(sourcePath);
+    const existingIndex = current.indexOf(targetPath);
+    const pinned = existingIndex < 0;
+    if (pinned) {
+      current.unshift(targetPath);
+    } else {
+      current.splice(existingIndex, 1);
+    }
+
+    this.settings.pinnedConnections = {
+      ...this.settings.pinnedConnections,
+      [sourcePath]: current,
+    };
+    if (current.length === 0) {
+      delete this.settings.pinnedConnections[sourcePath];
+    }
+    await this.saveSettings();
+    return pinned;
+  }
+
+  async syncMindmapLocalGraph(file: TFile | null): Promise<void> {
+    if (file === null) {
+      return;
+    }
+    if (this.mindmapLocalGraphPath === file.path && this.mindmapLocalGraphLeaf !== null) {
+      return;
+    }
+    if (this.mindmapLocalGraphLeaf === null) {
+      for (const leaf of this.app.workspace.getLeavesOfType("localgraph")) {
+        if (this.isMindmapLocalGraphLeaf(leaf)) {
+          this.mindmapLocalGraphLeaf = leaf;
+          break;
+        }
+      }
+    }
+
+    const state = buildMindmapLocalGraphState(this.manifest.id, file.path);
+    this.mindmapLocalGraphLeaf = await this.app.workspace.ensureSideLeaf("localgraph", "right", {
+      active: false,
+      split: true,
+      reveal: true,
+    });
+    await this.mindmapLocalGraphLeaf.setViewState({
+      type: "localgraph",
+      state,
+      active: false,
+    });
+    this.mindmapLocalGraphPath = file.path;
+  }
+
+  private isMindmapLocalGraphLeaf(leaf: WorkspaceLeaf): boolean {
+    return isMindmapLocalGraphLeaf(leaf, this.mindmapLocalGraphLeaf, this.manifest.id);
   }
 
   getPendingSnapshot(): PendingSnapshot {
@@ -282,77 +965,12 @@ export default class MindmapPlugin extends Plugin {
   }
 
   getPendingSummary(): DocumentFragment {
-    const snapshot = this.getPendingSnapshot();
-    const fragment = document.createDocumentFragment();
-    if (!snapshot.available) {
-      fragment.appendText(`Pending scan unavailable: ${snapshot.reason}`);
-      return fragment;
-    }
-
-    fragment.appendText(`Current scope: ${snapshot.current.total} pending`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`All scopes: ${snapshot.all.total} pending`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Top current items: ${snapshot.current.items.join(", ") || "None"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Top all items: ${snapshot.all.items.join(", ") || "None"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(
-      `Last scan: ${snapshot.metrics.durationMs}ms, listed ${snapshot.metrics.filesListed}, rescanned ${snapshot.metrics.filesScanned}, updated ${snapshot.metrics.filesUpdated}`,
-    );
-    return fragment;
+    return buildPendingSummary(this.getPendingSnapshot());
   }
 
   getScopeSetupStatus(): ScopeSetupStatus {
     const runtime = this.getResolvedRuntime();
-    if (!runtime.valid) {
-      const error = runtime.messages.find((message) => message.level === "error");
-      return {
-        complete: false,
-        canManage: false,
-        configPath: null,
-        currentPaths: [],
-        allPaths: [],
-        guidance: error?.message ?? "Mindmap runtime is not ready.",
-      };
-    }
-
-    if (!this.canManageConfig(runtime)) {
-      return {
-        complete: false,
-        canManage: false,
-        configPath: runtime.configPath,
-        currentPaths: [],
-        allPaths: [],
-        guidance: "Scope setup controls only the bundled plugin config. Reset config path to default or update your custom config manually.",
-      };
-    }
-
-    try {
-      const rawConfig = fs.readFileSync(runtime.configPath, "utf8");
-      const selection = readScopeSelection(rawConfig);
-      return {
-        complete: isScopeSetupComplete(selection),
-        canManage: true,
-        configPath: runtime.configPath,
-        currentPaths: selection.currentPaths,
-        allPaths: selection.allPaths,
-        guidance: isScopeSetupComplete(selection)
-          ? "Scope folders are configured."
-          : "Select at least one folder for current and all scopes, then save setup.",
-      };
-    } catch (error) {
-      return {
-        complete: false,
-        canManage: true,
-        configPath: runtime.configPath,
-        currentPaths: [],
-        allPaths: [],
-        guidance: error instanceof Error
-          ? `Mindmap config could not be read: ${error.message}`
-          : "Mindmap config could not be read.",
-      };
-    }
+    return resolveScopeSetupStatus(runtime, runtime.valid && this.canManageConfig(runtime));
   }
 
   getVaultFolderOptions(): VaultFolderOption[] {
@@ -370,97 +988,48 @@ export default class MindmapPlugin extends Plugin {
       throw new Error(status.guidance);
     }
 
-    const updated = updateScopeSelection(fs.readFileSync(status.configPath, "utf8"), selection);
-    fs.writeFileSync(status.configPath, updated, "utf8");
-    this.appendLog(`[setup] Updated scope folders in ${status.configPath}`);
+    const configPath = writeScopeSetup(status, selection);
+    this.appendLog(`[setup] Updated scope folders in ${configPath}`);
     this.pendingScanService?.requestRefresh("scope setup updated");
     this.updateStatusBar();
   }
 
+  getLlmProviderConfigStatus(): LlmProviderConfigStatus {
+    const runtime = this.getResolvedRuntime();
+    return resolveLlmProviderConfigStatus(runtime, runtime.valid && this.canManageConfig(runtime));
+  }
+
+  saveLlmProviderConfig(providerConfig: LlmProviderConfig): void {
+    const status = this.getLlmProviderConfigStatus();
+    if (!status.canManage || !status.configPath) {
+      throw new Error(status.guidance);
+    }
+
+    const configPath = writeLlmProviderConfig(status, providerConfig);
+    this.appendLog(`[setup] Updated LLM provider config in ${configPath}`);
+  }
+
   getScopeSetupSummary(): DocumentFragment {
-    const status = this.getScopeSetupStatus();
-    const fragment = document.createDocumentFragment();
-    fragment.appendText(`Configured: ${status.complete ? "Yes" : "No"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Config: ${status.configPath ?? "Unavailable"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Current scope: ${status.currentPaths.join(", ") || "None"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`All scopes: ${status.allPaths.join(", ") || "None"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(status.guidance);
-    return fragment;
+    return buildScopeSetupSummary(this.getScopeSetupStatus());
   }
 
   getDiagnosticsSummary(): DocumentFragment {
-    const fragment = document.createDocumentFragment();
-    const { result, inProgress, lastRunAt } = this.diagnosticsState;
-
-    fragment.appendText(`Preflight running: ${inProgress ? "Yes" : "No"}`);
-    fragment.appendChild(document.createElement("br"));
-    fragment.appendText(`Last preflight: ${formatTimestamp(lastRunAt)}`);
-
-    if (!result) {
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText("No preflight result recorded yet.");
-    } else {
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText(`Status: ${result.ok ? "Ready" : "Not ready"}`);
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText(`Summary: ${result.summary}`);
-      for (const check of result.checks) {
-        fragment.appendChild(document.createElement("br"));
-        fragment.appendText(`[${check.status}] ${check.label}: ${check.message}`);
-        if (check.guidance) {
-          fragment.appendChild(document.createElement("br"));
-          fragment.appendText(`Guidance: ${check.guidance}`);
-        }
-      }
-    }
-
-    const recent = this.getRecentLogLines().slice(-6);
-    if (recent.length > 0) {
-      fragment.appendChild(document.createElement("br"));
-      fragment.appendText("Recent diagnostics:");
-      for (const line of recent) {
-        fragment.appendChild(document.createElement("br"));
-        fragment.appendText(line);
-      }
-    }
-
-    return fragment;
+    return buildDiagnosticsSummary(this.diagnosticsState, [...this.recentLog]);
   }
 
-  showRuntimeNotice(runtime: ResolvedRuntime): void {
-    if (!runtime.valid) {
-      const error = runtime.messages.find((message) => message.level === "error");
-      new Notice(error?.message ?? "Mindmap runtime is not ready.", 12000);
-      return;
-    }
-
-    const scheduleLabel = isLaunchAgentSchedulerEnabled(this.settings.schedulerMode)
-      ? `Scheduler: LaunchAgent (${this.schedulerState.launchAgentMessage}).`
-      : isSchedulerEnabled(this.settings.schedulerMode)
-        ? `Scheduler: interval (next ${formatTimestamp(this.schedulerState.nextRunAt)}).`
-        : "Scheduler: manual.";
-    const pending = this.getPendingSnapshot();
-    const pendingLabel = pending.available
-      ? `Pending current/all: ${pending.current.total}/${pending.all.total}.`
-      : `Pending unavailable: ${pending.reason}.`;
-    const preflightLabel = this.diagnosticsState.result
-      ? `Preflight: ${this.diagnosticsState.result.ok ? "ready" : "failed"} (${this.diagnosticsState.result.summary}).`
-      : "Preflight: not run yet.";
-    const setup = this.getScopeSetupStatus();
-    const setupLabel = setup.complete
-      ? `Scope setup: ready (${setup.currentPaths.length}/${setup.allPaths.length}).`
-      : `Scope setup: required. ${setup.guidance}`;
-    const currentPreview = formatCommandPreview(runtime, getRunProfile("current").args);
-    const allPreview = formatCommandPreview(runtime, getRunProfile("all").args);
-
-    new Notice(
-      `Runtime trust: ${runtime.trust.level}. Runs: current ${currentPreview}; all ${allPreview}. ${scheduleLabel} ${pendingLabel} ${preflightLabel} ${setupLabel}`,
-      12000,
-    );
+  showStatusSummary(): void {
+    const runtime = this.getResolvedRuntime();
+    const state = buildMindmapStatusBarState(this, this.getStatusBarInternalState());
+    new Notice(buildStatusSummary({
+      ready: runtime.valid && state.scopeReady && state.preflightOk !== false,
+      pendingAvailable: state.pendingAvailable,
+      currentPending: state.currentPending,
+      allPending: state.allPending,
+      preflightInProgress: state.preflightInProgress,
+      preflightOk: state.preflightOk,
+      schedulerMode: state.schedulerMode,
+      schedulerDetails: state.schedulerDetails,
+    }), 8000);
   }
 
   buildRuntimeCommand(extraArgs: string[] = []): { command: string; args: string[]; cwd: string } {
@@ -485,6 +1054,38 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async runPreflight(trigger: "manual" | "startup"): Promise<PreflightResult> {
+    if (this.isRuntimeSetupBlocking()) {
+      // Never spawn the legacy pythonCommand (often a bare "python3" that
+      // discovery already knows is missing/incompatible) while setup is
+      // pending: return one fixed setup-required result instead.
+      const runtimeMessage = this.runtimeCoordinator?.getState().message ?? "Checking for a compatible Mindmap runtime.";
+      const summary = `Mindmap runtime setup is required before preflight can run. ${runtimeMessage}`;
+      const result: PreflightResult = {
+        ok: false,
+        summary,
+        checks: [
+          {
+            code: "RUNTIME_SETUP_REQUIRED",
+            label: "Mindmap runtime",
+            status: "error",
+            message: summary,
+            guidance: "Finish Mindmap runtime setup in Settings, then run preflight again.",
+          },
+        ],
+        rawStdout: "",
+        rawStderr: "",
+        exitCode: 1,
+      };
+      this.diagnosticsState.result = result;
+      this.diagnosticsState.lastRunAt = Date.now();
+      this.appendLog(`[preflight] ${summary}`);
+      if (trigger === "manual") {
+        new Notice(summary, 10000);
+      }
+      this.updateStatusBar();
+      return result;
+    }
+
     const runtime = this.getResolvedRuntime();
     if (!runtime.valid) {
       const error = runtime.messages.find((message) => message.level === "error");
@@ -591,13 +1192,15 @@ export default class MindmapPlugin extends Plugin {
   }
 
   private syncScheduler(): void {
-    if (isSchedulerEnabled(this.settings.schedulerMode)) {
+    if (isSchedulerEnabled(this.settings.schedulerMode) && !this.isRuntimeSetupBlocking()) {
       this.startScheduler();
+    } else if (isSchedulerEnabled(this.settings.schedulerMode)) {
+      this.stopScheduler("Mindmap runtime setup is required before the interval scheduler can run.");
     } else {
       this.stopScheduler("Manual mode. Interval scheduler disabled.");
     }
 
-    if (isLaunchAgentSchedulerEnabled(this.settings.schedulerMode)) {
+    if (isLaunchAgentSchedulerEnabled(this.settings.schedulerMode) && !this.isRuntimeSetupBlocking()) {
       void this.reconcileLaunchAgents();
     } else if (this.launchAgentManagedThisSession) {
       void this.disableManagedLaunchAgents("LaunchAgent scheduler disabled.");
@@ -606,50 +1209,110 @@ export default class MindmapPlugin extends Plugin {
     this.updateStatusBar();
   }
 
-  private getLaunchAgentsDirectory(): string {
-    return path.join(os.homedir(), "Library", "LaunchAgents");
-  }
-
-  private getLaunchAgentPlistPath(label: string): string {
-    return path.join(this.getLaunchAgentsDirectory(), `${label}.plist`);
-  }
-
   private getLaunchAgentSpecs(runtime: ResolvedRuntime): LaunchAgentSpec[] {
-    const logDir = path.join(runtime.command.cwd, "_logs");
-    const pathEnvironment = process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-    const daily = buildLaunchAgentSpec({
-      label: DAILY_LAUNCH_AGENT_LABEL,
-      plistPath: this.getLaunchAgentPlistPath(DAILY_LAUNCH_AGENT_LABEL),
+    return buildPluginLaunchAgentSpecs({
       command: runtime.command,
-      extraArgs: getRunProfile("all").args,
-      stdoutPath: path.join(logDir, "launchagent.out"),
-      stderrPath: path.join(logDir, "launchagent.err"),
-      startCalendarInterval: buildDailyCalendarIntervals({
-        hour: this.settings.launchAgentDailyHour,
-        minute: this.settings.launchAgentDailyMinute,
-      }),
-      pathEnvironment,
+      settings: this.settings,
+      plistDirectory: getLaunchAgentsDirectory(os.homedir()),
+      pathEnvironment: process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      homeDirectory: os.homedir(),
     });
+  }
 
-    if (!this.settings.launchAgentWeeklyEnabled) {
-      return [daily];
+  refreshLaunchAgentHealth(): Promise<void> {
+    if (!isLaunchAgentSchedulerEnabled(this.settings.schedulerMode) || process.platform !== "darwin") {
+      return Promise.resolve();
+    }
+    if (this.launchAgentHealthRefreshInFlight) {
+      return this.launchAgentHealthRefreshInFlight;
     }
 
-    const weekly = buildLaunchAgentSpec({
-      label: WEEKLY_LAUNCH_AGENT_LABEL,
-      plistPath: this.getLaunchAgentPlistPath(WEEKLY_LAUNCH_AGENT_LABEL),
-      command: runtime.command,
-      extraArgs: ["--all", "--refresh-all", "--apply"],
-      stdoutPath: path.join(logDir, "launchagent-weekly.out"),
-      stderrPath: path.join(logDir, "launchagent-weekly.err"),
-      startCalendarInterval: buildWeeklyCalendarInterval({
-        hour: this.settings.launchAgentWeeklyHour,
-        minute: this.settings.launchAgentWeeklyMinute,
-      }),
-      pathEnvironment,
-    });
+    const runtime = this.getResolvedRuntime();
+    if (!runtime.valid || typeof process.getuid !== "function") {
+      return Promise.resolve();
+    }
 
-    return [daily, weekly];
+    const specs = this.getLaunchAgentSpecs(runtime);
+    const refresh = refreshLaunchAgentHealth(specs, process.getuid(), (summary) => {
+      this.schedulerState.launchAgentHealth = summary.health;
+      this.schedulerState.launchAgentLastSuccessfulRunAt = summary.lastSuccessfulRunAt;
+      this.schedulerState.launchAgentLastExitCode = summary.lastExitCode;
+      this.schedulerState.launchAgentDetails = summary.details;
+      this.schedulerState.launchAgentMessage = summary.message;
+      this.updateStatusBar();
+      const decision = shouldTriggerDailyReconciliation(
+        summary.details,
+        DAILY_LAUNCH_AGENT_LABEL,
+        { lastReconciledDailySuccessAt: this.lastReconciledDailySuccessAt, lastReconciliationFailureAt: this.lastReconciliationFailureAt },
+        Date.now(),
+        READING_RECONCILIATION_FAILURE_COOLDOWN_MS,
+      );
+      if (decision.trigger && decision.dailySuccessAt !== null && !this.readingReconciliationInFlight) {
+        void this.reconcileReadingFromPythonState(decision.dailySuccessAt);
+      }
+    }).finally(() => {
+      this.launchAgentHealthRefreshInFlight = null;
+    });
+    this.launchAgentHealthRefreshInFlight = refresh;
+    return refresh;
+  }
+
+  /**
+   * After a newly-observed successful DAILY scheduled run (never an
+   * aggregate or weekly success), reconciles Reading `processedAt` from the
+   * Python worker's state.json. Read-only against Python state and the
+   * vault; mutates only reading-state.json. The daily watermark advances
+   * only once this resolves successfully; a failure is cached (not thrown,
+   * not retried on every poll) so the next few health polls don't spam
+   * retries against a state.json that is still broken.
+   */
+  private async reconcileReadingFromPythonState(dailySuccessAt: number): Promise<void> {
+    const stateStore = this.readingStateStore;
+    if (!stateStore || this.readingReconciliationInFlight) {
+      return;
+    }
+    this.readingReconciliationInFlight = true;
+    try {
+      const runtime = this.getResolvedRuntime();
+      if (!runtime.valid) {
+        return;
+      }
+      const config = JSON.parse(await fs.promises.readFile(runtime.configPath, "utf8")) as Record<string, unknown>;
+      const heading = typeof config.mindmap_heading === "string"
+        ? config.mindmap_heading
+        : typeof config.related_heading === "string"
+          ? config.related_heading
+          : "## Mindmap";
+      const statePathValue = typeof config.state_path === "string"
+        ? config.state_path
+        : ".obsidian/plugins/mindmap-ai/data/state.json";
+      const pythonStatePath = path.isAbsolute(statePathValue)
+        ? statePathValue
+        : path.resolve(this.getRuntimeContext().vaultRoot, statePathValue);
+      const vault = createObsidianVaultApi(this.app.vault);
+
+      const result = await reconcileReadingProcessedFromPythonState(stateStore, {
+        heading,
+        readPythonStateText: () => fs.promises.readFile(pythonStatePath, "utf8"),
+        readNoteText: async (notePath) => {
+          const entry = vault.get(notePath);
+          return entry ? await vault.read(entry) : null;
+        },
+        now: () => new Date().toISOString(),
+      });
+      this.appendLog(`Reading reconciliation: ${result.reason}`);
+      if (result.ok) {
+        this.lastReconciledDailySuccessAt = dailySuccessAt;
+        this.lastReconciliationFailureAt = null;
+      } else {
+        this.lastReconciliationFailureAt = Date.now();
+      }
+    } catch (error) {
+      this.lastReconciliationFailureAt = Date.now();
+      this.appendLog(`Reading reconciliation failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      this.readingReconciliationInFlight = false;
+    }
   }
 
   private async reconcileLaunchAgents(): Promise<void> {
@@ -672,12 +1335,14 @@ export default class MindmapPlugin extends Plugin {
     const activeLabels = new Set(specs.map((spec) => spec.label));
 
     try {
-      await fs.promises.mkdir(this.getLaunchAgentsDirectory(), { recursive: true });
-      await fs.promises.mkdir(path.join(runtime.command.cwd, "_logs"), { recursive: true });
+      await fs.promises.mkdir(getLaunchAgentsDirectory(os.homedir()), { recursive: true });
+      await ensureLaunchAgentDirectories(specs, os.homedir());
 
       for (const spec of specs) {
-        await this.writeLaunchAgentPlist(spec);
-        await this.bootstrapLaunchAgent(spec);
+        const changed = await this.writeLaunchAgentPlist(spec);
+        if (shouldBootstrapLaunchAgent(changed, await isLaunchAgentLoaded(spec.label))) {
+          await this.bootstrapLaunchAgent(spec);
+        }
       }
 
       if (!activeLabels.has(WEEKLY_LAUNCH_AGENT_LABEL)) {
@@ -694,11 +1359,19 @@ export default class MindmapPlugin extends Plugin {
       this.schedulerState.lastMessage = "LaunchAgent mode enabled. Scheduled runs use the plugin runtime.";
       this.appendLog(this.schedulerState.launchAgentMessage);
       this.updateStatusBar();
+      this.refreshLaunchAgentHealth();
     } catch (error) {
       if (syncId !== this.launchAgentSyncId) {
         return;
       }
       const message = error instanceof Error ? error.message : "LaunchAgent reconciliation failed.";
+      this.schedulerState.launchAgentHealth = "failing";
+      this.schedulerState.launchAgentDetails = specs.map((spec) => ({
+        label: spec.label,
+        health: "failing" as const,
+        lastSuccessfulRunAt: null,
+        lastExitCode: null,
+      }));
       this.schedulerState.launchAgentMessage = message;
       this.schedulerState.lastMessage = `LaunchAgent scheduler error: ${message}`;
       this.appendLog(this.schedulerState.lastMessage);
@@ -707,7 +1380,7 @@ export default class MindmapPlugin extends Plugin {
     }
   }
 
-  private async writeLaunchAgentPlist(spec: LaunchAgentSpec): Promise<void> {
+  private async writeLaunchAgentPlist(spec: LaunchAgentSpec): Promise<boolean> {
     const content = buildLaunchAgentPlist(spec);
     let existing: string | null;
     try {
@@ -719,7 +1392,9 @@ export default class MindmapPlugin extends Plugin {
     if (existing !== content) {
       await fs.promises.writeFile(spec.plistPath, content, "utf8");
       this.appendLog(`[launchagent] Wrote ${spec.plistPath}`);
+      return true;
     }
+    return false;
   }
 
   private async bootstrapLaunchAgent(spec: LaunchAgentSpec): Promise<void> {
@@ -735,7 +1410,7 @@ export default class MindmapPlugin extends Plugin {
   }
 
   private async removeLaunchAgent(label: string): Promise<void> {
-    const plistPath = this.getLaunchAgentPlistPath(label);
+    const plistPath = getLaunchAgentPlistPath(os.homedir(), label);
     const uid = typeof process.getuid === "function" ? process.getuid() : null;
     if (uid !== null) {
       await this.execLaunchctl(["bootout", `gui/${uid}`, plistPath], true);
@@ -755,6 +1430,10 @@ export default class MindmapPlugin extends Plugin {
     this.launchAgentManagedThisSession = false;
     this.schedulerState.launchAgentPaths = [];
     this.schedulerState.launchAgentMessage = message;
+    this.schedulerState.launchAgentHealth = null;
+    this.schedulerState.launchAgentDetails = [];
+    this.schedulerState.launchAgentLastSuccessfulRunAt = null;
+    this.schedulerState.launchAgentLastExitCode = null;
     this.appendLog(message);
     this.updateStatusBar();
   }
@@ -827,14 +1506,264 @@ export default class MindmapPlugin extends Plugin {
     this.scheduleNextTick(Date.now());
   }
 
-  private async runMindmap(trigger: RunTrigger, scope: RunScope = "current"): Promise<void> {
+  private updateRunStatusFromLine(line: string): void {
+    if (!this.currentProcess) {
+      return;
+    }
+
+    let status: string | null = null;
+    if (line.includes("[omlx] Started server for this run")) {
+      status = "Mindmap: starting oMLX";
+    } else if (line.includes("[omlx] Server ready")) {
+      status = "Mindmap: oMLX ready";
+    } else if (line.includes("[omlx] Server already running")) {
+      status = "Mindmap: oMLX already running";
+    } else if (line.includes("[omlx] Stopping server started by this run")) {
+      status = "Mindmap: stopping oMLX";
+    }
+
+    if (status) {
+      this.activeRunStatus = status;
+      this.updateStatusBar();
+    }
+  }
+
+  async runActiveNote(): Promise<void> {
+    await this.refreshActiveNoteEligibility();
+    if (!this.activeNoteEligibility.eligible || !this.activeNoteEligibility.path) {
+      new Notice(this.activeNoteEligibility.reason, 8000);
+      return;
+    }
+    await this.runMindmap("manual", "note", this.activeNoteEligibility.path);
+  }
+
+  async processPendingNote(notePath: string): Promise<void> {
+    await this.runMindmap("manual", "note", notePath);
+  }
+
+  getActiveNoteEligibility(): ActiveNoteEligibility {
+    return this.activeNoteEligibility;
+  }
+
+  async refreshActiveNoteEligibility(): Promise<void> {
+    this.activeNoteEligibility = await resolveActiveNoteEligibility(this);
+    this.updateStatusBar();
+  }
+
+  private createReadingModeController(): ReadingModeController {
+    const state = this.readingStateStore;
+    if (!state) {
+      throw new Error("Reading state store is not initialized.");
+    }
+    return new ReadingModeController({
+      initiallyEnabled: this.settings.readingMode === "reading",
+      readPayload: () => this.readAppleBooksPayload(),
+      readFingerprint: () => this.readAppleBooksFingerprint(),
+      importPayload: async (payload) => {
+        const result = await importAppleBooksAnnotations(payload, {
+          vault: createObsidianVaultApi(this.app.vault),
+          state,
+        });
+        return {
+          imported: result.imported,
+          failures: result.failures,
+          lastSyncAt: result.state.lastSyncAt,
+          initialImport: result.initialImport,
+        };
+      },
+      waitForManualResearch: async () => {
+        if (this.webResearchPromise) await this.webResearchPromise;
+      },
+      runAutomaticResearch: async (imported) => {
+        if (this.settings.webResearchMode !== "automatic-reading" || this.settings.readingMode !== "reading" || !this.automaticResearchPolicyStore) return;
+        if (this.isRuntimeSetupBlocking()) return;
+        const now = new Date();
+        try {
+          await this.refreshAutomaticResearchPolicyStatus(now);
+          const currentState = await state.load();
+          const candidates = selectSyncResearchCandidates(imported, currentState.annotations);
+          const policyResult = await runAutomaticResearch({
+            store: this.automaticResearchPolicyStore,
+            now,
+            candidates,
+            shouldContinue: () => this.readingModeController?.getMode() === "reading" && this.settings.webResearchMode === "automatic-reading" && !this.isRuntimeSetupBlocking(),
+            attempt: async (item) => {
+              const file = this.app.vault.getAbstractFileByPath(item.notePath);
+              if (!(file instanceof TFile)) throw new WebResearchError("NOTE_MISSING", "Automatic research note is unavailable.");
+              const text = prepareActiveNoteResearchInput(await this.app.vault.cachedRead(file), MAX_RESEARCH_INPUT_CHARS);
+              if (!text) {
+                return await persistAutomaticResearchOutcome({
+                  outcome: { ok: false, code: "RESEARCH_INPUT_EMPTY", message: "Automatic research note is empty." },
+                  updateStatus: async (status) => await updateAppleAnnotationResearchStatus(createObsidianVaultApi(this.app.vault), state, item.annotationId, status),
+                });
+              }
+              const outcome = await this.researchFile(file, text, false, "automatic");
+              return await persistAutomaticResearchOutcome({
+                outcome,
+                updateStatus: async (status) => await updateAppleAnnotationResearchStatus(createObsidianVaultApi(this.app.vault), state, item.annotationId, status),
+              });
+            },
+          });
+          if (policyResult.pauseReason) {
+            this.webResearchLastError = policyResult.lastError ?? `Automatic research paused: ${policyResult.pauseReason}.`;
+            this.webResearchActivity = "error";
+          } else if (this.settings.webResearchMode === "automatic-reading") {
+            this.webResearchLastError = null;
+            this.webResearchActivity = "ready";
+          }
+        } finally {
+          await this.refreshAutomaticResearchPolicyStatus(now);
+          this.updateStatusBar();
+        }
+      },
+      onAutomaticResearchError: (message) => {
+        this.webResearchActivity = "error";
+        this.webResearchLastError = message;
+        this.updateStatusBar();
+      },
+      listPendingEligibleNotes: async () => {
+        const current = await state.load();
+        return Object.values(current.annotations)
+          .filter((entry) => entry.researchStatus !== "too-short" && entry.processedAt === null)
+          .map((entry) => entry.notePath)
+          .sort();
+      },
+      countUnresearchable: async () => {
+        const current = await state.load();
+        return Object.values(current.annotations).filter((entry) => entry.researchStatus === "unresearchable").length;
+      },
+      processNote: async (notePath) => {
+        return await this.runMindmap("reading", "note", notePath);
+      },
+      markProcessed: async (notePath) => {
+        const { result: found } = await state.mutate((current) => {
+          const entry = Object.values(current.annotations).find((value) => value.notePath === notePath);
+          if (!entry) return false;
+          entry.processedAt = new Date().toISOString();
+          return true;
+        });
+        if (!found) {
+          throw new Error(`Reading state entry not found for ${notePath}.`);
+        }
+      },
+      confirmSetup: (preview) => this.confirmReadingSetup(preview),
+      onModeChange: async (mode) => {
+        const previous = this.settings.readingMode;
+        this.settings.readingMode = mode;
+        try {
+          await this.saveSettings();
+        } catch (error) {
+          this.settings.readingMode = previous;
+          throw error;
+        }
+      },
+      onHealthChange: () => this.updateStatusBar(),
+    });
+  }
+
+  private async confirmReadingSetup(preview: ReadingPreview): Promise<boolean> {
+    return await confirmMindmapRun(this.app, {
+      title: "Enable Reading Mode?",
+      message: `Apple Books access is ready. Found ${preview.annotationCount} annotations; ${preview.eligibleCount} meet the eight-word processing threshold and ${preview.tooShortCount} will be imported as too-short. No annotations will be imported unless you confirm this sync.`,
+      confirmText: "Enable and sync",
+      confirmClass: "mod-cta",
+    });
+  }
+
+  /**
+   * The Apple Books reader is stdlib-only, so it only needs a real Python
+   * executable — never the full chromadb/ruamel.yaml package set. Prefer
+   * checkpoint-1's discovered interpreter (verified executable, supported
+   * version) over the settings' raw pythonCommand default, since a blank
+   * "python3" may not exist or may resolve to an incompatible interpreter
+   * even while discovery already found a good one. An explicit custom
+   * pythonCommand (coordinator phase "not-applicable") always wins, as does
+   * any state before the coordinator has produced an interpreter at all.
+   */
+  private getAppleBooksInterpreterCommand(): string {
+    const coordinatorState = this.runtimeCoordinator?.getState();
+    if (coordinatorState && coordinatorState.phase !== "not-applicable" && coordinatorState.interpreterPath) {
+      return coordinatorState.interpreterPath;
+    }
+    return this.getResolvedRuntime().command.command;
+  }
+
+  private async readAppleBooksPayload(): Promise<unknown> {
+    const runtime = this.getResolvedRuntime();
+    if (!runtime.valid) {
+      throw new Error("Mindmap runtime is not ready for Apple Books reading.");
+    }
+    const readerPath = path.join(getPluginRuntimeDir(this.getRuntimeContext()), "apple_books_reader.py");
+    return await this.runReaderProcess(this.getAppleBooksInterpreterCommand(), [readerPath, "--config", runtime.configPath], path.dirname(readerPath));
+  }
+
+  private async readAppleBooksFingerprint(): Promise<string> {
+    const runtime = this.getResolvedRuntime();
+    if (!runtime.valid) {
+      throw new Error("Mindmap runtime is not ready for Apple Books watching.");
+    }
+    let config: Record<string, unknown> = {};
+    try {
+      config = JSON.parse(await fs.promises.readFile(runtime.configPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      // The reader will provide the actionable config diagnostic during sync.
+    }
+    const candidates = await discoverAppleBooksDatabasePaths({
+      config,
+      homeDirectory: os.homedir(),
+      fileSystem: { readdir: async (directory) => await fs.promises.readdir(directory) },
+    });
+    const fingerprints: string[] = [];
+    for (const candidate of candidates) {
+      for (const sidecar of [candidate, `${candidate}-wal`, `${candidate}-shm`]) {
+        try {
+          const stat = await fs.promises.stat(sidecar);
+          fingerprints.push(`${sidecar}:${stat.size}:${stat.mtimeMs}`);
+        } catch {
+          fingerprints.push(`${sidecar}:missing`);
+        }
+      }
+    }
+    return fingerprints.join("|");
+  }
+
+  private async runReaderProcess(command: string, args: string[], cwd: string): Promise<unknown> {
+    if (this.activeReaderChild) throw new Error("Apple Books reader is already running.");
+    const started = startAppleBooksReaderProcess({
+      spawn: () => spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] }),
+    });
+    this.activeReaderChild = started.child as ChildProcess;
+    try { return await started.promise; } finally {
+      if (this.activeReaderChild === started.child) this.activeReaderChild = null;
+    }
+  }
+
+  async runMindmap(trigger: RunTrigger, scope: RunScope = "current", notePath?: string): Promise<boolean> {
+    if (this.isRuntimeSetupBlocking()) {
+      const runtimeMessage = this.runtimeCoordinator?.getState().message ?? "Checking for a compatible Mindmap runtime.";
+      const message = `Mindmap ${trigger} run skipped: runtime setup is required. ${runtimeMessage}`;
+      this.schedulerState.lastMessage = message;
+      this.appendLog(message);
+      if (trigger === "manual") {
+        new Notice(message, 12000);
+      }
+      this.updateStatusBar();
+      return false;
+    }
+    if (["deriving", "searching", "writing"].includes(this.webResearchActivity)) {
+      const message = "Web Research is using the local model. Mindmap run skipped.";
+      this.appendLog(message);
+      if (trigger === "manual") new Notice(message, 8000);
+      this.updateStatusBar();
+      return false;
+    }
     if (this.currentProcess) {
       const message = "Mindmap is already running. Skipping the new request.";
       this.appendLog(message);
       if (trigger === "manual") {
         new Notice(message, 8000);
       }
-      return;
+      return false;
     }
 
     const runtime = this.getResolvedRuntime();
@@ -845,7 +1774,7 @@ export default class MindmapPlugin extends Plugin {
       this.appendLog(message);
       new Notice(message, 12000);
       this.updateStatusBar();
-      return;
+      return false;
     }
 
     const scopeSetup = this.getScopeSetupStatus();
@@ -855,11 +1784,41 @@ export default class MindmapPlugin extends Plugin {
       this.appendLog(message);
       new Notice(message, 12000);
       this.updateStatusBar();
-      return;
+      return false;
     }
 
     let command: { command: string; args: string[]; cwd: string };
-    const profile = getRunProfile(scope);
+    let profile: RunProfile;
+    try {
+      profile = getRunProfile(scope, notePath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "An individual note path is required.";
+      this.appendLog(message);
+      new Notice(message, 8000);
+      return false;
+    }
+
+    if (trigger === "manual" && profile.confirmation) {
+      const confirmed = await confirmMindmapRun(this.app, profile.confirmation);
+      if (!confirmed) {
+        const message = `Mindmap ${profile.label} run cancelled.`;
+        this.schedulerState.lastMessage = message;
+        this.appendLog(message);
+        this.updateStatusBar();
+        return false;
+      }
+    }
+
+    if (this.currentProcess) {
+      const message = "Mindmap is already running. Skipping the new request.";
+      this.appendLog(message);
+      if (trigger === "manual") {
+        new Notice(message, 8000);
+      }
+      this.updateStatusBar();
+      return false;
+    }
+
     try {
       command = this.buildRuntimeCommand(profile.args);
     } catch (error) {
@@ -868,7 +1827,7 @@ export default class MindmapPlugin extends Plugin {
       this.appendLog(message);
       new Notice(message, 12000);
       this.updateStatusBar();
-      return;
+      return false;
     }
 
     const preview = formatCommandPreview(runtime, profile.args);
@@ -877,12 +1836,13 @@ export default class MindmapPlugin extends Plugin {
       new Notice(`Mindmap run started (${profile.label}). ${preview}`, 8000);
     }
 
-    await new Promise<void>((resolve) => {
+    return await new Promise<boolean>((resolve) => {
       const child = spawn(command.command, command.args, {
         cwd: command.cwd,
         stdio: ["ignore", "pipe", "pipe"],
       });
       this.currentProcess = child;
+      this.activeRunStatus = `Mindmap: ${profile.label}`;
       this.schedulerState.lastTrigger = trigger;
       this.schedulerState.lastMessage = `Running ${profile.label} via ${trigger} trigger.`;
       this.updateStatusBar();
@@ -894,6 +1854,7 @@ export default class MindmapPlugin extends Plugin {
         for (const line of splitLogLines(chunk.toString())) {
           stdoutLines.push(line);
           this.appendLog(`[stdout] ${line}`);
+          this.updateRunStatusFromLine(line);
         }
       });
 
@@ -901,23 +1862,28 @@ export default class MindmapPlugin extends Plugin {
         for (const line of splitLogLines(chunk.toString())) {
           stderrLines.push(line);
           this.appendLog(`[stderr] ${line}`);
+          this.updateRunStatusFromLine(line);
         }
       });
 
       child.on("error", (error) => {
         const message = `Mindmap ${trigger} ${profile.label} run failed to start: ${error.message}`;
         this.currentProcess = null;
+        this.activeRunStatus = null;
         this.schedulerState.lastRunAt = Date.now();
         this.schedulerState.lastExitCode = -1;
         this.schedulerState.lastMessage = message;
         this.appendLog(message);
-        new Notice(message, 12000);
+        if (trigger === "manual") {
+          new Notice(message, 12000);
+        }
         this.updateStatusBar();
-        resolve();
+        resolve(false);
       });
 
       child.on("close", (code) => {
         this.currentProcess = null;
+        this.activeRunStatus = null;
         this.schedulerState.lastRunAt = Date.now();
         this.schedulerState.lastExitCode = code;
         const failureContext = stderrLines[stderrLines.length - 1] ?? stdoutLines[stdoutLines.length - 1];
@@ -930,7 +1896,7 @@ export default class MindmapPlugin extends Plugin {
         }
         this.pendingScanService?.requestRefresh("run completed");
         this.updateStatusBar();
-        resolve();
+        resolve(code === 0);
       });
     });
   }
@@ -949,42 +1915,9 @@ export default class MindmapPlugin extends Plugin {
       return;
     }
 
-    if (this.currentProcess) {
-      this.statusBarEl.setText("Mindmap: running");
-      return;
-    }
-
-    if (this.diagnosticsState.inProgress) {
-      this.statusBarEl.setText("Mindmap: preflight");
-      return;
-    }
-
-    if (this.diagnosticsState.result && !this.diagnosticsState.result.ok) {
-      this.statusBarEl.setText("Mindmap: preflight failed");
-      return;
-    }
-
-    if (!this.getScopeSetupStatus().complete) {
-      this.statusBarEl.setText("Mindmap: scope setup required");
-      return;
-    }
-
-    if (isLaunchAgentSchedulerEnabled(this.settings.schedulerMode)) {
-      const pending = this.getPendingSnapshot();
-      const pendingLabel = pending.available ? `${pending.current.total} pending` : "pending n/a";
-      this.statusBarEl.setText(`Mindmap: ${pendingLabel} • LaunchAgent`);
-      return;
-    }
-
-    if (isSchedulerEnabled(this.settings.schedulerMode)) {
-      const pending = this.getPendingSnapshot();
-      const pendingLabel = pending.available ? `${pending.current.total} pending` : "pending n/a";
-      this.statusBarEl.setText(`Mindmap: ${pendingLabel} • next ${formatTimestamp(this.schedulerState.nextRunAt)}`);
-      return;
-    }
-
-    const pending = this.getPendingSnapshot();
-    this.statusBarEl.setText(pending.available ? `Mindmap: ${pending.current.total} pending` : "Mindmap: manual");
+    const pendingSnapshot = this.getPendingSnapshot();
+    this.schedulerState.pendingAllCount = pendingSnapshot.available ? pendingSnapshot.all.total : null;
+    renderStatusBarElement(this.statusBarEl, buildMindmapStatusBarState(this, this.getStatusBarInternalState()));
   }
 
   private getRuntimeContext(): RuntimeContext {
@@ -1039,23 +1972,8 @@ export default class MindmapPlugin extends Plugin {
     return path.normalize(runtime.configPath).startsWith(path.normalize(runtimeDir));
   }
 
-  private registerVaultRefreshEvents(): void {
-    const markDirty = (file: TAbstractFile | null, oldPath?: string) => {
-      const relpaths: string[] = [];
-      if (oldPath && oldPath.endsWith(".md")) {
-        relpaths.push(oldPath);
-      }
-      if (file instanceof TFile && file.extension === "md") {
-        relpaths.push(file.path);
-      }
-      if (relpaths.length > 0) {
-        this.pendingScanService?.requestRefresh("vault file changed", relpaths);
-      }
-    };
-
-    this.registerEvent(this.app.vault.on("create", (file) => markDirty(file)));
-    this.registerEvent(this.app.vault.on("modify", (file) => markDirty(file)));
-    this.registerEvent(this.app.vault.on("delete", (file) => markDirty(file)));
-    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => markDirty(file, oldPath)));
-  }
 }
+
+type ResearchFileResult =
+  | { ok: true }
+  | { ok: false; code: string; message: string };

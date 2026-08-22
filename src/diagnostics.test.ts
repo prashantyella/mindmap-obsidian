@@ -36,3 +36,19 @@ void test("buildSpawnFailureResult maps missing executable to actionable guidanc
   assert.match(result.summary, /Python executable not found/);
   assert.match(formatPreflightNotice(result), /Install Python/);
 });
+
+void test("parsePreflightOutput accepts optional skipped checks", () => {
+  const result = parsePreflightOutput(JSON.stringify({
+    ok: true,
+    summary: "Preflight passed.",
+    checks: [{
+      code: "APPLE_BOOKS_DATABASE_UNAVAILABLE",
+      label: "Apple Books (optional)",
+      status: "skipped",
+      message: "Apple Books is unavailable.",
+    }],
+  }), "", 0);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.checks[0]?.status, "skipped");
+});

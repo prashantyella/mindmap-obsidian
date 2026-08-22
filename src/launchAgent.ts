@@ -14,6 +14,38 @@ export interface CalendarInterval extends ClockTime {
   weekday?: number;
 }
 
+export interface LaunchAgentLaunchctlStatus {
+  loaded: boolean;
+  state: string | null;
+  lastExitCode: number | null;
+}
+
+export type LaunchAgentHealth = "waiting" | "healthy" | "running" | "overdue" | "failing" | "disabled";
+
+/** A recovery affordance is useful only when scheduled work is overdue and work remains. */
+export function shouldOfferLaunchAgentCatchUp(health: LaunchAgentHealth | null, pendingAll: number): boolean {
+  return (health === "overdue" || health === "failing") && Number.isFinite(pendingAll) && pendingAll > 0;
+}
+
+/** Re-bootstrap only when the plist changed or the service is no longer loaded. */
+export function shouldBootstrapLaunchAgent(plistChanged: boolean, loaded: boolean): boolean {
+  return plistChanged || !loaded;
+}
+
+export interface LaunchAgentHealthInput {
+  launchctl: LaunchAgentLaunchctlStatus;
+  schedule: CalendarInterval | CalendarInterval[];
+  lastSuccessfulRunAt: number | null;
+  /** Timestamp of the latest successful reconciliation/load, when known. */
+  reconciledAt?: number | null;
+  /** Disabled agents are represented explicitly in detailed scheduler UI. */
+  enabled?: boolean;
+  now?: number;
+  graceMinutes?: number;
+}
+
+export const DEFAULT_LAUNCH_AGENT_GRACE_MINUTES = 15;
+
 export interface LaunchAgentSpec {
   label: string;
   plistPath: string;
@@ -44,6 +76,111 @@ export function normalizeClockTime(time: ClockTime): ClockTime {
     hour: normalizeHour(time.hour),
     minute: normalizeMinute(time.minute),
   };
+}
+
+/** Extract the small, useful subset of `launchctl print` output. */
+export function parseLaunchctlPrintOutput(output: string, _errorOutput = ""): LaunchAgentLaunchctlStatus {
+  const stateMatch = output.match(/^\s*state\s*=\s*(.+?)\s*$/im);
+  const exitMatch = output.match(/^\s*last exit code\s*=\s*(-?\d+)(?:\s*:\s*.*)?\s*$/im);
+  const serviceRecord = /^\s*gui\/\d+\/[A-Za-z0-9._-]+\s*=\s*\{/m.test(output);
+
+  return {
+    loaded: serviceRecord && Boolean(stateMatch),
+    state: stateMatch?.[1] ?? null,
+    lastExitCode: exitMatch ? Number(exitMatch[1]) : null,
+  };
+}
+
+function launchAgentWeekday(date: Date): number {
+  const day = date.getDay();
+  return day === 0 ? 7 : day;
+}
+
+function isMatchingWeekday(interval: CalendarInterval, date: Date): boolean {
+  return interval.weekday === undefined || interval.weekday === launchAgentWeekday(date);
+}
+
+function mostRecentOccurrenceForInterval(interval: CalendarInterval, now: number): number | null {
+  if (interval.weekday !== undefined && (interval.weekday < 1 || interval.weekday > 7)) {
+    return null;
+  }
+
+  const current = new Date(now);
+  if (!Number.isFinite(current.getTime())) {
+    return null;
+  }
+
+  const day = new Date(current);
+  day.setHours(0, 0, 0, 0);
+  for (let daysAgo = 0; daysAgo <= 7; daysAgo += 1) {
+    const candidate = new Date(day);
+    candidate.setDate(day.getDate() - daysAgo);
+    if (!isMatchingWeekday(interval, candidate)) {
+      continue;
+    }
+
+    candidate.setHours(normalizeHour(interval.hour), normalizeMinute(interval.minute), 0, 0);
+    if (candidate.getTime() <= now) {
+      return candidate.getTime();
+    }
+  }
+
+  return null;
+}
+
+/** Return the latest scheduled opportunity at or before `now` in local time. */
+export function getMostRecentScheduledOccurrence(
+  schedule: CalendarInterval | CalendarInterval[],
+  now: number,
+): number | null {
+  const intervals = Array.isArray(schedule) ? schedule : [schedule];
+  const occurrences = intervals
+    .map((interval) => mostRecentOccurrenceForInterval(interval, now))
+    .filter((occurrence): occurrence is number => occurrence !== null);
+  return occurrences.length > 0 ? Math.max(...occurrences) : null;
+}
+
+/** Classify a read-only LaunchAgent snapshot against its existing run-log heartbeat. */
+export function classifyLaunchAgentHealth(input: LaunchAgentHealthInput): LaunchAgentHealth {
+  if (input.enabled === false) {
+    return "disabled";
+  }
+
+  if (!input.launchctl.loaded || (input.launchctl.lastExitCode !== null && input.launchctl.lastExitCode !== 0)) {
+    return "failing";
+  }
+
+  if (input.launchctl.state?.toLowerCase() === "running") {
+    return "running";
+  }
+
+  const now = input.now ?? Date.now();
+  const expectedAt = getMostRecentScheduledOccurrence(input.schedule, now);
+  if (expectedAt === null) {
+    return "waiting";
+  }
+
+  const graceMinutes = Number.isFinite(input.graceMinutes)
+    ? Math.max(0, input.graceMinutes ?? DEFAULT_LAUNCH_AGENT_GRACE_MINUTES)
+    : DEFAULT_LAUNCH_AGENT_GRACE_MINUTES;
+  const heartbeat = input.lastSuccessfulRunAt;
+  if (heartbeat !== null && Number.isFinite(heartbeat) && heartbeat >= expectedAt) {
+    return "healthy";
+  }
+
+  // A reconciliation that happens after an occurrence has already passed has
+  // not missed a run. The first opportunity belongs to the newly loaded agent.
+  if (
+    heartbeat === null
+    && input.reconciledAt !== null
+    && input.reconciledAt !== undefined
+    && Number.isFinite(input.reconciledAt)
+    && input.reconciledAt >= expectedAt
+  ) {
+    return "waiting";
+  }
+
+  return now <= expectedAt + graceMinutes * 60_000 ? "waiting" : "overdue";
 }
 
 export function formatClockTime(time: ClockTime): string {
@@ -80,6 +217,7 @@ export function buildLaunchAgentSpec(options: {
   plistPath: string;
   command: RuntimeCommand;
   extraArgs: string[];
+  workingDirectory?: string;
   stdoutPath: string;
   stderrPath: string;
   startCalendarInterval: CalendarInterval | CalendarInterval[];
@@ -89,7 +227,7 @@ export function buildLaunchAgentSpec(options: {
     label: options.label,
     plistPath: options.plistPath,
     programArguments: buildLaunchAgentProgramArguments(options.command, options.extraArgs),
-    workingDirectory: options.command.cwd,
+    workingDirectory: options.workingDirectory ?? options.command.cwd,
     stdoutPath: options.stdoutPath,
     stderrPath: options.stderrPath,
     startCalendarInterval: options.startCalendarInterval,
@@ -98,6 +236,46 @@ export function buildLaunchAgentSpec(options: {
       MINDMAP_RUN_SOURCE: "obsidian-plugin-launchagent",
     },
   };
+}
+
+export function buildConfiguredLaunchAgentSpecs(options: {
+  command: RuntimeCommand;
+  plistDirectory: string;
+  logDirectory: string;
+  workingDirectory?: string;
+  pathEnvironment: string;
+  daily: ClockTime;
+  weeklyEnabled: boolean;
+  weekly: ClockTime;
+  dailyArgs: string[];
+  weeklyArgs: string[];
+}): LaunchAgentSpec[] {
+  const daily = buildLaunchAgentSpec({
+    label: DAILY_LAUNCH_AGENT_LABEL,
+    plistPath: path.join(options.plistDirectory, `${DAILY_LAUNCH_AGENT_LABEL}.plist`),
+    command: options.command,
+    extraArgs: options.dailyArgs,
+    workingDirectory: options.workingDirectory,
+    stdoutPath: path.join(options.logDirectory, "launchagent.out"),
+    stderrPath: path.join(options.logDirectory, "launchagent.err"),
+    startCalendarInterval: buildDailyCalendarIntervals(options.daily),
+    pathEnvironment: options.pathEnvironment,
+  });
+  if (!options.weeklyEnabled) {
+    return [daily];
+  }
+
+  return [daily, buildLaunchAgentSpec({
+    label: WEEKLY_LAUNCH_AGENT_LABEL,
+    plistPath: path.join(options.plistDirectory, `${WEEKLY_LAUNCH_AGENT_LABEL}.plist`),
+    command: options.command,
+    extraArgs: options.weeklyArgs,
+    workingDirectory: options.workingDirectory,
+    stdoutPath: path.join(options.logDirectory, "launchagent-weekly.out"),
+    stderrPath: path.join(options.logDirectory, "launchagent-weekly.err"),
+    startCalendarInterval: buildWeeklyCalendarInterval(options.weekly),
+    pathEnvironment: options.pathEnvironment,
+  })];
 }
 
 function escapeXml(value: string): string {

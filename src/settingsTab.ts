@@ -1,11 +1,12 @@
 import { FileSystemAdapter, Notice, PluginSettingTab, Setting } from "obsidian";
 
-import type { ScopeSelection } from "./onboarding";
 import { formatCommandPreview, type ResolvedRuntime } from "./pathResolver";
 import { getRunProfile } from "./runProfiles";
 import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
 import { normalizeHour, normalizeMinute } from "./launchAgent";
 import type MindmapPlugin from "./main";
+import { DEFAULT_METADATA_MODEL, type LlmProviderConfig } from "./pluginConfig";
+import { ScopeManager } from "./scopeManager";
 import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
 
 const FIELD_META: Record<RuntimeField, { name: string; description: string }> = {
@@ -32,45 +33,81 @@ function getPluginRuntimeRelativePath(configDir: string): string {
 }
 
 export class MindmapSettingTab extends PluginSettingTab {
-  private onboardingDraft: ScopeSelection | null = null;
+  private unsubscribeRuntimeSetup: (() => void) | null = null;
 
   constructor(app: MindmapPlugin["app"], private readonly plugin: MindmapPlugin) {
     super(app, plugin);
   }
 
   display(): void {
+    this.unsubscribeRuntimeSetup?.();
+    this.unsubscribeRuntimeSetup = this.plugin.subscribeRuntimeSetupState(() => this.display());
+
     const { containerEl } = this;
     containerEl.empty();
 
-    this.renderSection(
-      "Runtime",
-      "Use bundled defaults unless you need vault-relative overrides.",
-    );
-    containerEl.createEl("p", {
-      text: "This plugin runs a local runtime process and reads local files. Review custom executable, script, and config paths before running.",
-    });
-
-    this.renderPathSetting("pythonCommand");
-    this.renderPathSetting("scriptPath");
-    this.renderPathSetting("configPath");
+    this.renderRuntimeSetupSettings();
     this.renderScopeSetupSettings();
+    this.renderProviderSettings();
     this.renderSchedulerSettings();
+    this.renderResearchSettings();
     this.renderDiagnosticsSettings();
+    this.renderAdvancedRuntimeSettings();
     this.renderSummary(this.plugin.getResolvedRuntime());
   }
 
+  hide(): void {
+    this.unsubscribeRuntimeSetup?.();
+    this.unsubscribeRuntimeSetup = null;
+    super.hide();
+  }
+
+  private renderResearchSettings(): void {
+    this.renderSection("Web Research", "Off, Manual, or Automatic for Reading. Automatic keeps manual research available.");
+    const status = this.plugin.getWebResearchStatus();
+    new Setting(this.containerEl)
+      .setName("Manual research")
+      .setDesc(status.mode === "automatic-reading" ? "Included with Automatic for Reading; selected text and active notes remain available on demand." : status.mode === "manual" ? "Enabled for selected text and bounded active-note excerpts." : "Off. Enable it for on-demand research only.")
+      .addButton((button) => button
+        .setButtonText(status.mode === "automatic-reading" ? "Included" : status.mode === "manual" ? "Disable" : "Enable")
+        .setDisabled(status.mode === "automatic-reading" || ["deriving", "searching", "writing"].includes(status.activity))
+        .onClick(async () => {
+          await this.plugin.toggleWebResearchMode();
+          this.display();
+        }));
+    new Setting(this.containerEl)
+      .setName("Automatic for Reading")
+      .setDesc(status.mode === "automatic-reading"
+        ? `${status.automatic.attempted}/10 today · max 5/sync · ${this.plugin.getReadingHealth().unresearchableCount} unresearchable.${status.automatic.pauseReason === "daily-limit" ? " Daily limit reached; resumes after local midnight." : status.automatic.pauseReason ? ` Paused: ${status.automatic.pauseReason}.` : this.plugin.getReadingHealth().mode === "reading" ? " Active in Reading Mode." : " Waiting for Reading Mode."}`
+        : "Requires Reading Mode and separate consent.")
+      .addButton((button) => button
+        .setButtonText(status.mode === "automatic-reading" ? "Pause" : "Enable")
+        .setDisabled(["deriving", "searching", "writing"].includes(status.activity))
+        .onClick(async () => {
+          await this.plugin.toggleAutomaticReadingResearch();
+          this.display();
+        }));
+    if (status.mode === "automatic-reading" && status.automatic.pauseReason && status.automatic.pauseReason !== "daily-limit") {
+      new Setting(this.containerEl)
+        .setName("Automatic research")
+        .setDesc(status.automatic.lastError ?? status.lastError ?? `Paused: ${status.automatic.pauseReason}.`)
+        .addButton((button) => button.setButtonText("Retry").onClick(async () => {
+          await this.plugin.retryAutomaticResearch();
+          this.display();
+        }));
+    }
+  }
+
   private renderSection(title: string, description: string): void {
-    new Setting(this.containerEl).setName(title).setHeading();
-    this.containerEl.createEl("p", { text: description });
+    new Setting(this.containerEl).setName(title).setHeading().setClass("mindmap-settings-heading");
+    this.containerEl.createEl("p", { cls: "mindmap-settings-section-desc", text: description });
   }
 
   private renderDiagnosticsSettings(): void {
-    this.renderSection("Diagnostics", "Run preflight checks and review runtime status.");
+    this.renderSection("Diagnostics", "Check runtime readiness.");
     new Setting(this.containerEl)
-      .setName("Preflight checks")
-      .setDesc(
-        "Checks the local runtime, dependencies, model service, and required models.",
-      )
+      .setName("Preflight")
+      .setDesc("Python, dependencies, model service, and required models.")
       .addButton((button) =>
         button.setButtonText("Run checks").onClick(() => {
           void this.plugin.runPreflight("manual").then(() => {
@@ -82,10 +119,8 @@ export class MindmapSettingTab extends PluginSettingTab {
 
   private renderScopeSetupSettings(): void {
     const status = this.plugin.getScopeSetupStatus();
-    const options = this.plugin.getVaultFolderOptions();
-    const draft = this.getOnboardingDraft(status);
 
-    this.renderSection("Scope setup", "Choose folders used for current-scope and all-scope runs.");
+    this.renderSection("Scope", "Choose folders for current-note runs and full-vault runs.");
 
     new Setting(this.containerEl)
       .setName("Scope status")
@@ -95,70 +130,151 @@ export class MindmapSettingTab extends PluginSettingTab {
       return;
     }
 
-    new Setting(this.containerEl).setName("Current scope (--current)").setHeading();
-    for (const option of options) {
-      new Setting(this.containerEl)
-        .setName(option.label)
-        .setDesc("Used by run mindmap (current scope).")
-        .addToggle((toggle) => {
-          toggle
-            .setValue(draft.currentPaths.includes(option.value))
-            .onChange((value) => {
-              this.toggleDraftValue("currentPaths", option.value, value);
-            });
-        });
-    }
+    const scopeManager = this.containerEl.createDiv();
+    new ScopeManager(this.plugin, scopeManager).render();
 
-    new Setting(this.containerEl).setName("All scope (--all)").setHeading();
-    for (const option of options) {
+    new Setting(this.containerEl)
+      .setName("Mindmap sidebar")
+      .setDesc("Open the active note graph panel.")
+      .addButton((button) =>
+        button.setButtonText("Open Mindmap").setCta().onClick(() => {
+          void this.plugin.openMindmapView();
+        }),
+      );
+  }
+
+  private renderProviderSettings(): void {
+    this.renderSection("Provider", "Local model service for summaries, tags, concepts, and links.");
+
+    const status = this.plugin.getLlmProviderConfigStatus();
+    if (!status.canManage) {
       new Setting(this.containerEl)
-        .setName(option.label)
-        .setDesc("Used by run mindmap (all scopes).")
-        .addToggle((toggle) => {
-          toggle
-            .setValue(draft.allPaths.includes(option.value))
-            .onChange((value) => {
-              this.toggleDraftValue("allPaths", option.value, value);
-            });
-        });
+        .setName("Provider config")
+        .setDesc(status.guidance);
+      return;
     }
 
     new Setting(this.containerEl)
-      .setName("Save scope setup")
-      .setDesc("Save selected folders to the bundled config file.")
-      .addButton((button) =>
-        button.setButtonText("Save setup").setCta().onClick(async () => {
-          try {
-            this.plugin.saveScopeSetup(this.getOnboardingDraft(status));
-            this.onboardingDraft = null;
-            await this.plugin.runPreflight("manual");
-            new Notice("Scope setup saved.");
+      .setName("Provider")
+      .setDesc(`Config: ${status.configPath ?? "Unavailable"}`)
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("ollama", "Ollama")
+          .addOption("openai_compatible", "OpenAI compatible")
+          .setValue(status.provider)
+          .onChange((value) => {
+            this.saveProviderConfig({
+              provider: value === "openai_compatible" ? "openai_compatible" : "ollama",
+            });
             this.display();
-          } catch (error) {
-            new Notice(error instanceof Error ? error.message : "Failed to save scope setup.", 12000);
-          }
-        }),
-      )
-      .addExtraButton((button) => {
+          });
+      })
+      .addButton((button) => {
         button
-          .setIcon("reset")
-          .setTooltip("Reset unsaved changes")
+          .setButtonText("Use OMLX")
           .onClick(() => {
-            this.onboardingDraft = {
-              currentPaths: [...status.currentPaths],
-              allPaths: [...status.allPaths],
-            };
+            this.saveProviderConfig({
+              provider: "openai_compatible",
+              baseUrl: "http://localhost:8000/v1",
+              model: DEFAULT_METADATA_MODEL,
+              maxTokens: 1024,
+              enableThinking: false,
+            });
+            this.display();
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Base URL")
+      .setDesc(status.provider === "openai_compatible" ? "Include the /v1 suffix." : "Ollama server URL.")
+      .addText((text) => {
+        text
+          .setPlaceholder(status.provider === "openai_compatible" ? "http://localhost:8000/v1" : "http://localhost:11434")
+          .setValue(status.baseUrl)
+          .onChange((value) => {
+            this.saveProviderConfig({ baseUrl: value });
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Model")
+      .setDesc("Model used for metadata extraction.")
+      .addText((text) => {
+        text
+          .setPlaceholder(status.provider === "openai_compatible" ? DEFAULT_METADATA_MODEL : "llama3.1:8b")
+          .setValue(status.model)
+          .onChange((value) => {
+            this.saveProviderConfig({ model: value });
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Local API key")
+      .setDesc("Stored in the local plugin runtime config.")
+      .addText((text) => {
+        text.inputEl.type = "password";
+        text
+          .setPlaceholder("Optional")
+          .setValue(status.apiKey)
+          .onChange((value) => {
+            this.saveProviderConfig({ apiKey: value });
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Max output tokens")
+      .setDesc("Caps only the metadata response, not the note text sent to the model.")
+      .addText((text) => {
+        text
+          .setPlaceholder("1024")
+          .setValue(String(status.maxTokens))
+          .onChange((value) => {
+            const parsed = Number.parseInt(value.trim(), 10);
+            this.saveProviderConfig({ maxTokens: Number.isFinite(parsed) ? parsed : 1024 });
+          });
+      });
+
+    new Setting(this.containerEl)
+      .setName("Model thinking")
+      .setDesc("Disable for Qwen/OMLX JSON extraction.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(status.enableThinking)
+          .onChange((value) => {
+            this.saveProviderConfig({ enableThinking: value });
             this.display();
           });
       });
   }
 
+  private saveProviderConfig(patch: Partial<LlmProviderConfig>): void {
+    const status = this.plugin.getLlmProviderConfigStatus();
+    if (!status.canManage) {
+      new Notice(status.guidance, 8000);
+      return;
+    }
+
+    try {
+      this.plugin.saveLlmProviderConfig({
+        provider: status.provider,
+        baseUrl: status.baseUrl,
+        model: status.model,
+        apiKey: status.apiKey,
+        maxTokens: status.maxTokens,
+        enableThinking: status.enableThinking,
+        ...patch,
+      });
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : "Mindmap provider config could not be saved.", 8000);
+    }
+  }
+
   private renderSchedulerSettings(): void {
-    this.renderSection("Scheduler", "Use manual runs, in-app interval scheduling, or plugin-managed macOS LaunchAgents.");
+    this.renderSection("Scheduler", "Manual, interval, or macOS LaunchAgent runs.");
 
     new Setting(this.containerEl)
       .setName("Mode")
-      .setDesc("Manual runs on demand. Interval runs while Obsidian is open. LaunchAgent runs continue when Obsidian is closed.")
+      .setDesc("LaunchAgent continues when Obsidian is closed.")
       .addDropdown((dropdown) => {
         dropdown
           .addOption("manual", "Manual")
@@ -274,7 +390,23 @@ export class MindmapSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
             this.display();
           });
-      });
+        });
+
+    const catchUp = this.plugin.getLaunchAgentCatchUpStatus();
+    if (catchUp.available) {
+      new Setting(this.containerEl)
+        .setName("Scheduled recovery")
+        .setDesc(catchUp.message)
+        .addButton((button) => {
+          button
+            .setButtonText("Catch up pending notes")
+            .setCta()
+            .onClick(async () => {
+              await this.plugin.runLaunchAgentCatchUp();
+              this.display();
+            });
+        });
+    }
   }
 
   private renderPathSetting(field: RuntimeField): void {
@@ -310,6 +442,55 @@ export class MindmapSettingTab extends PluginSettingTab {
             this.display();
           });
       });
+  }
+
+  private renderRuntimeSetupSettings(): void {
+    const state = this.plugin.getRuntimeSetupState();
+    if (!state || state.phase === "not-applicable") {
+      return;
+    }
+
+    this.renderSection("Managed runtime setup", "Automated Python runtime setup for macOS.");
+    const setting = new Setting(this.containerEl)
+      .setName("Mindmap runtime")
+      .setDesc(state.message)
+      .setClass(state.phase === "ready" ? "mindmap-validation-ok" : state.phase === "failed" || state.phase === "unavailable" ? "mindmap-validation-error" : "");
+
+    if (state.canCancel) {
+      setting.addButton((button) => {
+        button.setButtonText("Cancel").onClick(() => {
+          this.plugin.cancelRuntimeSetup();
+          this.display();
+        });
+      });
+    }
+
+    if (state.canSetup) {
+      setting.addButton((button) => {
+        button
+          .setCta()
+          .setButtonText(state.phase === "failed" || state.phase === "cancelled" ? "Retry setup" : "Set up runtime")
+          .onClick(async () => {
+            await this.plugin.startRuntimeSetup();
+            this.display();
+          });
+      });
+    }
+
+    if (state.phase === "unavailable") {
+      setting.addButton((button) => {
+        button.setButtonText("Open Python download page").onClick(() => {
+          this.plugin.openPythonRuntimeDownloadPage();
+        });
+      });
+    }
+  }
+
+  private renderAdvancedRuntimeSettings(): void {
+    this.renderSection("Advanced", "Runtime overrides. Leave these blank unless you need a custom local setup.");
+    this.renderPathSetting("pythonCommand");
+    this.renderPathSetting("scriptPath");
+    this.renderPathSetting("configPath");
   }
 
   private renderSummary(runtime: ResolvedRuntime): void {
@@ -363,24 +544,4 @@ export class MindmapSettingTab extends PluginSettingTab {
       .setDesc(this.plugin.getDiagnosticsSummary());
   }
 
-  private getOnboardingDraft(status = this.plugin.getScopeSetupStatus()): ScopeSelection {
-    if (!this.onboardingDraft) {
-      this.onboardingDraft = {
-        currentPaths: [...status.currentPaths],
-        allPaths: [...status.allPaths],
-      };
-    }
-    return this.onboardingDraft;
-  }
-
-  private toggleDraftValue(field: keyof ScopeSelection, value: string, enabled: boolean): void {
-    const draft = this.getOnboardingDraft();
-    const nextValues = enabled
-      ? [...draft[field], value]
-      : draft[field].filter((entry) => entry !== value);
-    this.onboardingDraft = {
-      ...draft,
-      [field]: nextValues,
-    };
-  }
 }
