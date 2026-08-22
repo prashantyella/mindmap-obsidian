@@ -1,0 +1,59 @@
+{
+  "provenance": {
+    "fixtureSchemaVersion": 1,
+    "pythonOracleFile": "python/mindmap.py",
+    "pythonOracleSha256": "43fe2377e88f5c327fda26665c404266d4bbb8bee5efb4ec9746817d380c3280",
+    "generator": "tools/parity/generate_fixtures.py"
+  },
+  "cases": [
+    {
+      "name": "normalize_tags lowercases, slugifies, and dedupes",
+      "input": [
+        "Machine Learning",
+        "machine-learning",
+        "  Spaced Tag  ",
+        "Weird!!Chars",
+        ""
+      ],
+      "output": [
+        "machine-learning",
+        "spaced-tag",
+        "weirdchars"
+      ]
+    },
+    {
+      "name": "normalize_concepts bounds length/words and dedupes case-insensitively",
+      "input": [
+        "Neural Networks",
+        "neural networks",
+        "A Very Long Concept Phrase That Exceeds The Word Limit",
+        "Short"
+      ],
+      "limit": 3,
+      "max_words": 4,
+      "case_mode": "title",
+      "output": [
+        "Neural Networks",
+        "Short"
+      ]
+    },
+    {
+      "name": "filter_and_map_tags maps close matches to controlled vocabulary",
+      "input": [
+        "machinelearning",
+        "ml",
+        "unrelatedtag"
+      ],
+      "controlled": [
+        "machine-learning",
+        "artificial-intelligence"
+      ],
+      "allow_free": false,
+      "min_len": 2,
+      "max_words": 3,
+      "output": [
+        "machine-learning"
+      ]
+    }
+  ]
+}

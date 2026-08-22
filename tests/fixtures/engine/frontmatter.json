@@ -1,0 +1,69 @@
+{
+  "provenance": {
+    "fixtureSchemaVersion": 1,
+    "pythonOracleFile": "python/mindmap.py",
+    "pythonOracleSha256": "43fe2377e88f5c327fda26665c404266d4bbb8bee5efb4ec9746817d380c3280",
+    "generator": "tools/parity/generate_fixtures.py"
+  },
+  "cases": [
+    {
+      "name": "update_frontmatter preserves unrelated fields and updates managed keys",
+      "input": "---\ntitle: Example\nsummary: old\ntags:\n  - alpha\nauthor: Jane\n---\nBody.\n",
+      "updates": {
+        "summary": "new summary",
+        "tags": [
+          "beta",
+          "gamma"
+        ],
+        "concepts": [
+          "one"
+        ],
+        "related": [
+          "Notes/Other.md"
+        ]
+      },
+      "preferred_order": [
+        "summary",
+        "tags",
+        "concepts",
+        "related"
+      ],
+      "output": "---\ntitle: Example\nsummary: new summary\ntags:\n  - beta\n  - gamma\nauthor: Jane\nconcepts:\n  - one\nrelated:\n  - Notes/Other.md\n---\nBody.\n"
+    },
+    {
+      "name": "update_frontmatter clears summary/tags for Apple annotation notes",
+      "input": "---\ntitle: Annotation\ntype: apple-books-annotation\nsummary: old\ntags:\n  - alpha\n---\nQuote body.\n",
+      "updates": {
+        "concepts": [
+          "[[One]]"
+        ],
+        "related": [
+          "[[Notes/Other|Other]]"
+        ]
+      },
+      "preferred_order": [
+        "summary",
+        "tags",
+        "concepts",
+        "related"
+      ],
+      "remove_keys": [
+        "summary",
+        "tags"
+      ],
+      "output": "---\ntitle: Annotation\ntype: apple-books-annotation\nconcepts:\n  - '[[One]]'\nrelated:\n  - '[[Notes/Other|Other]]'\n---\nQuote body.\n"
+    },
+    {
+      "name": "parse_frontmatter returns plain dict and body",
+      "input": "---\ntitle: Example\ntags:\n  - a\n  - b\n---\nBody text.\n",
+      "frontmatter": {
+        "title": "Example",
+        "tags": [
+          "a",
+          "b"
+        ]
+      },
+      "body": "Body text.\n"
+    }
+  ]
+}
