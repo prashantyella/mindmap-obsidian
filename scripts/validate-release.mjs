@@ -102,13 +102,31 @@ for (const phrase of ["desktop-only", "Python", "Ollama", "versions.json", "mani
     throw new Error(`README.md must mention ${phrase}`);
   }
 }
-for (const phrase of ["Community plugins", "restore its Python runtime automatically"]) {
+for (const phrase of [
+  "Community plugins",
+  "automatically looks for a compatible Python",
+  "Set up Mindmap runtime",
+  "PyPI",
+  "Application Support/Mindmap AI",
+  "cancelled or retried",
+  "3.11-3.13",
+  "python.org/downloads/macos",
+]) {
   if (!readme.includes(phrase)) {
-    throw new Error(`README.md must mention ${phrase} for one-click onboarding.`);
+    throw new Error(`README.md must mention ${phrase} for zero-terminal onboarding.`);
   }
 }
 if (readme.includes("manual release install")) {
   throw new Error("README.md must not present manual release install as the primary onboarding path.");
+}
+if (readme.includes("restore its Python runtime automatically")) {
+  throw new Error("README.md must not claim the plugin silently restores a Python runtime; describe explicit discovery/one-click setup instead.");
+}
+{
+  const installSection = readme.slice(readme.indexOf("## Install"), readme.indexOf("## First Run"));
+  if (installSection.includes("pip install")) {
+    throw new Error("README.md primary Install section must not present a manual pip install command; keep it under Troubleshooting/Advanced only.");
+  }
 }
 
 const changelog = fs.readFileSync("CHANGELOG.md", "utf8");
@@ -118,8 +136,23 @@ if (!changelog.includes("## Unreleased")) {
 if (!new RegExp(`^## ${manifest.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`, "m").test(changelog)) {
   throw new Error(`CHANGELOG.md must include a section for ${manifest.version}`);
 }
-if (!fs.readFileSync("python/requirements.txt", "utf8").split(/\r?\n/).includes("chromadb==1.4.0")) {
-  throw new Error("python/requirements.txt must pin chromadb==1.4.0 for the embedded client.");
+for (const requirementsPath of ["python/requirements.txt", "dist/python/requirements.txt"]) {
+  const lines = fs.readFileSync(requirementsPath, "utf8").split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (!lines.includes("chromadb==1.4.0")) {
+    throw new Error(`${requirementsPath} must pin chromadb==1.4.0 for the embedded client.`);
+  }
+  if (!lines.includes("ruamel.yaml==0.19.1")) {
+    throw new Error(`${requirementsPath} must pin the tested ruamel.yaml==0.19.1 release.`);
+  }
+  const looseLines = lines.filter((line) => /(>=|<=|~=|!=|>|<)/.test(line));
+  if (looseLines.length > 0) {
+    throw new Error(`${requirementsPath} must pin every direct managed-runtime dependency to an exact version; found non-exact spec(s): ${looseLines.join(", ")}`);
+  }
+}
+
+const distMindmapSource = fs.readFileSync("dist/python/mindmap.py", "utf8");
+if (!distMindmapSource.includes("--runtime-preflight") || !distMindmapSource.includes("run_runtime_preflight")) {
+  throw new Error("dist/python/mindmap.py must ship the isolated --runtime-preflight mode used by the plugin's runtime verifier.");
 }
 
 const workflow = fs.readFileSync(".github/workflows/release.yml", "utf8");

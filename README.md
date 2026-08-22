@@ -10,7 +10,7 @@ Mindmap is a desktop-only Obsidian plugin that runs a local Python workflow to:
 ## Requirements
 
 - Obsidian Desktop `1.5.12+`
-- Python `3.10+`
+- macOS, for the automated Python runtime setup below (Windows/Linux use an advanced manual interpreter path instead — see Advanced Runtime Overrides)
 - Ollama running locally at `http://localhost:11434`
 - oMLX with `Qwen3.5-9B-MLX-4bit` for metadata extraction
 - Ollama models:
@@ -20,14 +20,10 @@ Mindmap is a desktop-only Obsidian plugin that runs a local Python workflow to:
 
 1. In Obsidian: `Settings -> Community plugins`.
 2. Install and enable `Mindmap`.
-   On first enable, the plugin can restore its Python runtime automatically inside the plugin folder.
-3. From your vault root, install Python dependencies:
-
-```bash
-python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt
-```
-
-4. Pull required Ollama embedding model and install the default oMLX metadata model:
+3. On enable, Mindmap automatically looks for a compatible Python 3.11-3.13 already on your Mac (Framework installs, Homebrew, PATH, Xcode). If it finds one with the required packages already installed, it's selected and Mindmap is ready immediately — no terminal, no path to edit.
+4. If Mindmap finds Python but not the required packages, Settings and the status-bar menu show **Runtime setup required** with a **Set up Mindmap runtime** action. Choosing it shows one confirmation before anything happens: Mindmap will create a private Python environment, download pinned packages from PyPI, and store them outside every vault under `~/Library/Application Support/Mindmap AI/runtime/<fingerprint>` (shared and reused across vaults; a change to the pinned package set creates a new versioned folder alongside the old one). This takes a few minutes and needs network access; setup shows live progress and can be cancelled or retried at any point.
+5. If no compatible Python is found at all, Settings link directly to the official [Python macOS installer](https://www.python.org/downloads/macos/) (Python 3.11-3.13). Install it, then reopen Mindmap settings to retry discovery.
+6. Pull required Ollama embedding model and install the default oMLX metadata model:
 
 ```bash
 ollama pull mxbai-embed-large
@@ -37,7 +33,7 @@ Install `Qwen3.5-9B-MLX-4bit` in oMLX, then set the local oMLX API key in Mindma
 
 ## First Run
 
-1. Run `Run Mindmap preflight checks` from Command Palette.
+1. Confirm `Mindmap runtime` shows ready in Settings (see Install above), then run `Run Mindmap preflight checks` from Command Palette.
 2. Open `Mindmap` settings -> `Scope setup`.
 3. Select folders for both:
    - `Current scope (--current)`
@@ -119,9 +115,13 @@ Store the Exa API key in macOS Keychain under service `com.mindmap-ai.web-resear
 
 By default, Mindmap stores runtime data under `.obsidian/plugins/mindmap-ai/` inside your current vault; if you customize runtime paths, keep them vault-relative and inside the same vault.
 
+## Advanced Runtime Overrides
+
+Mindmap's automated setup covers macOS. Windows/Linux, and any macOS setup that needs a specific interpreter, use the **Advanced** section of Mindmap settings: set `pythonCommand` to an absolute interpreter path (with the required packages already installed) or a PATH command name. An explicit `pythonCommand` is validated as-is and is never replaced or offered automated setup; leave it blank or the default `python3` to re-enable automatic discovery.
+
 ## Troubleshooting
 
-- Python/dependency issues:
+- Runtime setup shows `unavailable` or a Set up/Retry action never finishes: check Settings for the current status message, then use the **Retry** action. As a fallback, or on Windows/Linux, install dependencies manually against your own interpreter and set `pythonCommand` under Advanced (see above):
 
 ```bash
 python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt

@@ -69,6 +69,27 @@ function notApplicableState(message: string): CoordinatorState {
 /** Fixed download page for the plugin's "no compatible Python found" guidance. */
 export const PYTHON_MACOS_DOWNLOAD_URL = "https://www.python.org/downloads/macos/";
 
+export interface RuntimeSetupConfirmationCopy {
+  title: string;
+  message: string;
+  confirmText: string;
+  confirmClass: string;
+}
+
+/**
+ * The exact consent copy shown before a managed runtime install: explicit
+ * PyPI network disclosure and the shared, versioned install location.
+ * Extracted as a pure constant (rather than inlined at the modal call site)
+ * so its content is directly unit-testable without instantiating the
+ * Obsidian plugin or asserting against main.ts line text.
+ */
+export const RUNTIME_SETUP_CONFIRMATION_COPY: RuntimeSetupConfirmationCopy = {
+  title: "Set up Mindmap runtime?",
+  message: "Mindmap will create a private Python environment, download pinned packages from PyPI, and store them outside your vault under ~/Library/Application Support/Mindmap AI. This may take several minutes and requires network access.",
+  confirmText: "Set up",
+  confirmClass: "mod-cta",
+};
+
 /**
  * Pure decision for the plugin's one-time "runtime just became usable"
  * kickoff (the old unconditional startup preflight/semantic-start calls,

@@ -10,7 +10,7 @@ import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } f
 import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
 import { createNodeDiscoveryFs, createNodeProcessInvoker, getDefaultAppSupportRoot } from "./runtimeDiscovery";
 import { createNodeSetupFs, createNodeSetupSpawner } from "./runtimeSetup";
-import { PYTHON_MACOS_DOWNLOAD_URL, RuntimeReadinessCoordinator, shouldTriggerRuntimeReadyKickoff, type CoordinatorState } from "./runtimeSetupCoordinator";
+import { PYTHON_MACOS_DOWNLOAD_URL, RUNTIME_SETUP_CONFIRMATION_COPY, RuntimeReadinessCoordinator, shouldTriggerRuntimeReadyKickoff, type CoordinatorState } from "./runtimeSetupCoordinator";
 import { buildRuntimePreflightVerifier } from "./runtimeVerifier";
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { discoverAppleBooksDatabasePaths } from "./appleBooksDiscovery";
@@ -310,12 +310,7 @@ export default class MindmapPlugin extends Plugin {
   }
 
   private async confirmRuntimeSetup(): Promise<boolean> {
-    return await confirmMindmapRun(this.app, {
-      title: "Set up Mindmap runtime?",
-      message: "Mindmap will create a private Python environment, download pinned packages from PyPI, and store them outside your vault under ~/Library/Application Support/Mindmap AI. This may take several minutes and requires network access.",
-      confirmText: "Set up",
-      confirmClass: "mod-cta",
-    });
+    return await confirmMindmapRun(this.app, RUNTIME_SETUP_CONFIRMATION_COPY);
   }
 
   private async startRuntimeCoordinator(): Promise<void> {
