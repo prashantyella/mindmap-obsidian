@@ -5,7 +5,7 @@ import path from "node:path";
 import type { TFile, Vault } from "obsidian";
 
 import type { ResolvedRuntime, RuntimeContext } from "./pathResolver";
-import { isAppleBooksAnnotation, minimumWordsForNote, normalizedWordCount } from "./individualNote";
+import { isAppleBooksAnnotation, isManagedReadingArtifact, minimumWordsForNote, normalizedWordCount } from "./individualNote";
 
 const MAX_PENDING_ITEMS = 5;
 const DEFAULT_DEBOUNCE_MS = 500;
@@ -284,6 +284,10 @@ export class PendingIndex {
 
       metrics.filesScanned += 1;
       const text = await file.read();
+      if (isManagedReadingArtifact(file.relpath, text)) {
+        this.entries.delete(file.relpath);
+        continue;
+      }
       const body = computeBodyHash(text, input.config.heading);
       const minimum = minimumWordsForNote(text, input.config.minWords);
       const noteWordCount = isAppleBooksAnnotation(text) ? body.normalizedWordCount : body.wordCount;

@@ -149,6 +149,93 @@ class IndividualNoteTests(unittest.TestCase):
 
         self.assertEqual(calls, [["Notes"]])
 
+    def test_reading_annotations_excluded_from_ordinary_scan_even_when_books_or_vault_root_configured(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vault = Path(tmpdir) / "vault"
+            reading = vault / "Books" / "Apple Books" / "Author" / "Book" / "Annotations"
+            reading.mkdir(parents=True)
+            (reading / "one.md").write_text(
+                "---\ntype: apple-books-annotation\n---\none two three four five six seven eight",
+                encoding="utf-8",
+            )
+            (vault / "Notes").mkdir(parents=True)
+            (vault / "Notes" / "ordinary.md").write_text("one two three four five", encoding="utf-8")
+
+            via_books_scope = list_notes(vault, ["Books"], 1, "## Mindmap")
+            via_vault_root_scope = list_notes(vault, ["."], 1, "## Mindmap")
+            with_flag = list_notes(vault, ["Books"], 1, "## Mindmap", include_reading_annotations=True)
+
+        self.assertEqual(via_books_scope, [])
+        self.assertEqual({n.relpath for n in via_vault_root_scope}, {"Notes/ordinary.md"})
+        self.assertEqual({n.relpath for n in with_flag}, {"Books/Apple Books/Author/Book/Annotations/one.md"})
+
+    def test_generated_book_index_is_never_included_or_individually_processable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vault = Path(tmpdir) / "vault"
+            book = vault / "Books" / "Apple Books" / "Author" / "Book"
+            book.mkdir(parents=True)
+            (book / "Index.md").write_text(
+                "<!-- mindmap:apple-books-index:start -->\n## Apple Books Annotations\n<!-- mindmap:apple-books-index:end -->\n",
+                encoding="utf-8",
+            )
+            unrelated_index = vault / "Books" / "Apple Books" / "Author" / "Other Book" / "Index.md"
+            unrelated_index.parent.mkdir(parents=True)
+            unrelated_index.write_text("A user-authored index note without managed markers.", encoding="utf-8")
+
+            all_scope = list_notes(vault, ["."], 1, "## Mindmap", include_reading_annotations=True)
+            _target, issue = validate_individual_note_target(
+                vault, "Books/Apple Books/Author/Book/Index.md", ["."],
+            )
+
+        self.assertEqual({n.relpath for n in all_scope}, {"Books/Apple Books/Author/Other Book/Index.md"})
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["code"], "NOTE_TARGET_GENERATED_INDEX")
+
+    def test_note_mode_scans_related_candidates_once_and_only_widens_to_reading_for_an_explicit_annotation_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vault = Path(tmpdir) / "vault"
+            (vault / "Notes").mkdir(parents=True)
+            (vault / "Notes" / "target.md").write_text("target one two three four five", encoding="utf-8")
+            reading = vault / "Books" / "Apple Books" / "Author" / "Book" / "Annotations"
+            reading.mkdir(parents=True)
+            (reading / "one.md").write_text(
+                "---\ntype: apple-books-annotation\n---\none two three four five six seven eight",
+                encoding="utf-8",
+            )
+            config = json.loads((Path(__file__).resolve().parents[1] / "python" / "config.template.json").read_text(encoding="utf-8"))
+            config.update({"vault_root": str(vault.resolve()), "notes_paths_all": ["Notes"], "min_note_words": 1})
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            calls = []
+
+            def counted_list_notes(_root, paths, *_args, include_reading_annotations=False, **_kwargs):
+                calls.append((paths, include_reading_annotations))
+                return []
+
+            # Stop main() right after the note-branch scan (before any real
+            # embedding/ChromaDB work) by making client init fail; the call
+            # we're asserting on has already happened by then.
+            with patch("mindmap.list_notes", side_effect=counted_list_notes), \
+                    patch("chromadb.PersistentClient", side_effect=RuntimeError("stop before indexing")), \
+                    patch.object(sys, "argv", ["mindmap.py", "--config", str(config_path), "--note", "Notes/target.md"]):
+                self.assertEqual(main(), 1)
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0], (["Notes"], False))
+
+            calls.clear()
+            with patch("mindmap.list_notes", side_effect=counted_list_notes), \
+                    patch("chromadb.PersistentClient", side_effect=RuntimeError("stop before indexing")), \
+                    patch.object(sys, "argv", [
+                        "mindmap.py", "--config", str(config_path), "--note",
+                        "Books/Apple Books/Author/Book/Annotations/one.md",
+                    ]):
+                self.assertEqual(main(), 1)
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0], (["Notes"], True))
+
     def test_state_preserves_unrelated_entries_and_removes_failed_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             vault = Path(tmpdir) / "vault"

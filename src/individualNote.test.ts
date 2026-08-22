@@ -6,6 +6,8 @@ import { resolveActiveNoteEligibility } from "./individualNoteActions";
 import {
   APPLE_BOOKS_ANNOTATION_MIN_WORDS,
   assessActiveNote,
+  isGeneratedReadingIndex,
+  isManagedReadingArtifact,
   isSafeIndividualNotePath,
   minimumWordsForNote,
 } from "./individualNote";
@@ -61,4 +63,33 @@ void test("Reading-root Apple annotations are eligible outside all scope while s
   assert.equal(assessActiveNote("Books/Apple Books/Author/Book/Annotations/note.md", "---\ntype: note\n---\none two three four five six seven eight", { allScopeFolders: ["Notes"], minimumWords: 1 }).code, "out-of-scope");
   assert.equal(assessActiveNote("Books/Apple Books Spoof/note.md", annotation, { allScopeFolders: ["Notes"], minimumWords: 1 }).code, "out-of-scope");
   assert.equal(assessActiveNote("Other/note.md", annotation, { allScopeFolders: ["Notes"], minimumWords: 1 }).code, "out-of-scope");
+});
+
+void test("generated book indexes are classified by path and complete marker pair, and are never eligible for individual processing", () => {
+  const indexPath = "Books/Apple Books/Author/Book/Index.md";
+  const markerStart = "<!-- mindmap:apple-books-index:start -->";
+  const markerEnd = "<!-- mindmap:apple-books-index:end -->";
+  const completeIndex = `${markerStart}\n## Apple Books Annotations\n${markerEnd}\n`;
+
+  assert.equal(isGeneratedReadingIndex(indexPath, completeIndex), true);
+  assert.equal(isManagedReadingArtifact(indexPath, completeIndex), true);
+  // Only the start marker present: not a complete managed pair.
+  assert.equal(isGeneratedReadingIndex(indexPath, `${markerStart}\nnotes\n`), false);
+  // An unrelated Index.md at the same location without both markers remains an ordinary note.
+  assert.equal(isGeneratedReadingIndex(indexPath, "# My own index\nSome content."), false);
+  // Same markers but the wrong structural location (not directly under a book folder) do not classify as generated.
+  assert.equal(isGeneratedReadingIndex("Books/Apple Books/Author/Book/Annotations/Index.md", completeIndex), false);
+  assert.equal(isGeneratedReadingIndex("Books/Other/Index.md", completeIndex), false);
+
+  assert.equal(assessActiveNote(indexPath, completeIndex, { allScopeFolders: ["."], minimumWords: 1 }).code, "generated-index");
+  assert.equal(assessActiveNote(indexPath, completeIndex, { allScopeFolders: ["."], minimumWords: 1 }).eligible, false);
+
+  // Reversed order (end before start): not a complete pair; remains ordinary.
+  assert.equal(isGeneratedReadingIndex(indexPath, `${markerEnd}\nnotes\n${markerStart}`), false);
+  // Duplicate start marker: not a complete pair; remains ordinary.
+  assert.equal(isGeneratedReadingIndex(indexPath, `${markerStart}\n${markerStart}\n${markerEnd}`), false);
+  // Duplicate end marker: not a complete pair; remains ordinary.
+  assert.equal(isGeneratedReadingIndex(indexPath, `${markerStart}\n${markerEnd}\n${markerEnd}`), false);
+  // Orphan end marker only: not a complete pair; remains ordinary.
+  assert.equal(isGeneratedReadingIndex(indexPath, `notes\n${markerEnd}`), false);
 });

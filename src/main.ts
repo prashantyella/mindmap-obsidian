@@ -30,7 +30,7 @@ import { MAX_RESEARCH_INPUT_CHARS, WebResearchError } from "./webResearchTypes";
 import { createReadingStateStore, type ReadingStateStore } from "./readingState";
 import { reconcileReadingProcessedFromPythonState, shouldTriggerDailyReconciliation } from "./readingPythonReconciliation";
 import { createObsidianVaultApi } from "./readingVault";
-import { ReadingModeController, type ReadingHealth, type ReadingPreview } from "./readingMode";
+import { ReadingModeController, type ReadingHealth, type ReadingMode, type ReadingPreview } from "./readingMode";
 import { registerMindmapCommands } from "./pluginCommands";
 import {
   getLlmProviderConfigStatus as resolveLlmProviderConfigStatus,
@@ -478,11 +478,17 @@ export default class MindmapPlugin extends Plugin {
     };
   }
 
-  async toggleReadingMode(): Promise<void> {
+  /**
+   * Explicit, idempotent radio selection between Standard and Reading Mode:
+   * selecting the mode that is already active is a no-op (the controller
+   * itself guards both enable() and disable() against this), so callers
+   * never need to branch on the current mode first.
+   */
+  async selectReadingMode(mode: ReadingMode): Promise<void> {
     if (!this.readingModeController) {
       return;
     }
-    if (this.settings.readingMode === "reading") {
+    if (mode === "standard") {
       await this.readingModeController.disable();
       return;
     }

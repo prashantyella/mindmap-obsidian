@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from mindmap import (  # noqa: E402
     Note,
+    READING_INDEX_END,
+    READING_INDEX_START,
     READING_NOTES_ROOT,
     apple_annotation_concept_wikilink,
     apple_annotation_concept_wikilinks,
@@ -19,6 +21,9 @@ from mindmap import (  # noqa: E402
     apply_note_frontmatter_write,
     build_metadata_updates,
     compute_removed_paths,
+    is_generated_reading_index,
+    is_reading_annotation_relpath,
+    is_reading_index_relpath,
     main,
     reading_paths_excluded_from_rebuild_scan,
     rebuild_collections_preserving_reading,
@@ -123,6 +128,26 @@ class IncludeReadingPendingScopeExtensionTests(unittest.TestCase):
 
         self.assertEqual(calls, [["."]])
 
+    def test_flag_controls_whether_list_notes_includes_reading_annotations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = write_config(tmpdir, notes_paths_all=["Notes"])
+            include_flags = []
+
+            def capturing_list_notes(_root, _paths, *_args, include_reading_annotations=False, **_kwargs):
+                include_flags.append(include_reading_annotations)
+                return []
+
+            with patch("mindmap.list_notes", side_effect=capturing_list_notes), \
+                    patch.object(sys, "argv", ["mindmap.py", "--config", str(config_path), "--all", "--apply", "--include-reading-pending"]):
+                self.assertEqual(main(), 0)
+            self.assertEqual(include_flags, [True])
+
+            include_flags.clear()
+            with patch("mindmap.list_notes", side_effect=capturing_list_notes), \
+                    patch.object(sys, "argv", ["mindmap.py", "--config", str(config_path), "--all", "--apply"]):
+                self.assertEqual(main(), 0)
+            self.assertEqual(include_flags, [False])
+
     def test_flag_never_rewrites_config_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = write_config(tmpdir, notes_paths_all=["Notes"])
@@ -137,21 +162,31 @@ class IncludeReadingPendingScopeExtensionTests(unittest.TestCase):
 
 class ComputeRemovedPathsTests(unittest.TestCase):
     def test_runs_without_reading_root_preserve_reading_entries(self):
-        state_paths = ["Notes/a.md", "Books/Apple Books/Book/Annotations/one.md"]
-        removed = compute_removed_paths(state_paths, current_paths=set(), notes_paths=["Notes"])
+        state_paths = ["Notes/a.md", "Books/Apple Books/Author/Book/Annotations/one.md"]
+        removed = compute_removed_paths(state_paths, current_paths=set(), notes_paths=["Notes"], reading_annotations_included=False)
         self.assertEqual(removed, ["Notes/a.md"])
 
-    def test_runs_scanning_reading_root_prune_missing_reading_entries(self):
-        state_paths = ["Notes/a.md", "Books/Apple Books/Book/Annotations/one.md"]
-        removed = compute_removed_paths(state_paths, current_paths=set(), notes_paths=["Notes", READING_NOTES_ROOT])
+    def test_runs_scanning_reading_root_without_including_annotations_still_preserve_reading_entries(self):
+        # Even when the folder is nominally in scope (e.g. `Books` or `.` is a
+        # configured scope folder), an ordinary current/all/manual/weekly run
+        # never actually scans Reading annotations, so it must not treat an
+        # untouched annotation as deleted just because this run excluded it.
+        state_paths = ["Notes/a.md", "Books/Apple Books/Author/Book/Annotations/one.md"]
+        removed = compute_removed_paths(state_paths, current_paths=set(), notes_paths=["Notes", READING_NOTES_ROOT], reading_annotations_included=False)
+        self.assertEqual(removed, ["Notes/a.md"])
+
+    def test_daily_include_reading_pending_runs_prune_missing_reading_entries(self):
+        state_paths = ["Notes/a.md", "Books/Apple Books/Author/Book/Annotations/one.md"]
+        removed = compute_removed_paths(state_paths, current_paths=set(), notes_paths=["Notes", READING_NOTES_ROOT], reading_annotations_included=True)
         self.assertEqual(set(removed), set(state_paths))
 
     def test_reading_entries_still_present_on_disk_are_never_removed(self):
-        state_paths = ["Books/Apple Books/Book/Annotations/one.md"]
+        state_paths = ["Books/Apple Books/Author/Book/Annotations/one.md"]
         removed = compute_removed_paths(
             state_paths,
-            current_paths={"Books/Apple Books/Book/Annotations/one.md"},
+            current_paths={"Books/Apple Books/Author/Book/Annotations/one.md"},
             notes_paths=["Notes", READING_NOTES_ROOT],
+            reading_annotations_included=True,
         )
         self.assertEqual(removed, [])
 
@@ -161,9 +196,67 @@ class ComputeRemovedPathsTests(unittest.TestCase):
         # so compute_removed_paths does not need (and must not apply) a
         # rebuild-specific carve-out: state.json staying untouched for an
         # unscanned Reading entry is honest in both cases.
-        state_paths = ["Notes/a.md", "Books/Apple Books/Book/Annotations/one.md"]
-        removed = compute_removed_paths(state_paths, current_paths=set(), notes_paths=["Notes"])
+        state_paths = ["Notes/a.md", "Books/Apple Books/Author/Book/Annotations/one.md"]
+        removed = compute_removed_paths(state_paths, current_paths=set(), notes_paths=["Notes"], reading_annotations_included=False)
         self.assertEqual(removed, ["Notes/a.md"])
+
+    def test_generated_index_rows_are_always_prunable_even_when_annotations_are_protected(self):
+        state_paths = ["Books/Apple Books/Author/Book/Index.md", "Books/Apple Books/Author/Book/Annotations/one.md"]
+        removed = compute_removed_paths(state_paths, current_paths=set(), notes_paths=["Notes"], reading_annotations_included=False)
+        self.assertEqual(removed, ["Books/Apple Books/Author/Book/Index.md"])
+
+    def test_ordinary_non_annotation_notes_under_reading_root_are_never_protected(self):
+        # A note dropped directly in a book folder (not under Annotations) is
+        # not annotation-shaped, so it is never protected from cleanup just
+        # because it lives under the Reading root.
+        state_paths = ["Books/Apple Books/Author/Book/notes.md", "Books/Apple Books/Author/Book/Annotations/one.md"]
+        removed = compute_removed_paths(state_paths, current_paths=set(), notes_paths=["Notes"], reading_annotations_included=False)
+        self.assertEqual(removed, ["Books/Apple Books/Author/Book/notes.md"])
+
+
+class ReadingArtifactShapeAndMarkerClassificationTests(unittest.TestCase):
+    ANNOTATION_PATH = "Books/Apple Books/Author/Book/Annotations/one.md"
+    INDEX_PATH = "Books/Apple Books/Author/Book/Index.md"
+    COMPLETE_INDEX_TEXT = f"{READING_INDEX_START}\n## Apple Books Annotations\n{READING_INDEX_END}\n"
+
+    def test_is_reading_annotation_relpath_requires_exact_author_book_annotations_shape(self):
+        self.assertTrue(is_reading_annotation_relpath(self.ANNOTATION_PATH))
+        # Missing the author level (only Book/Annotations/file.md).
+        self.assertFalse(is_reading_annotation_relpath("Books/Apple Books/Book/Annotations/one.md"))
+        # Nested one level too deep.
+        self.assertFalse(is_reading_annotation_relpath("Books/Apple Books/Author/Book/Annotations/Sub/one.md"))
+        # An ordinary note directly in the book folder (not under Annotations).
+        self.assertFalse(is_reading_annotation_relpath("Books/Apple Books/Author/Book/notes.md"))
+        # The generated index itself is not annotation-shaped.
+        self.assertFalse(is_reading_annotation_relpath(self.INDEX_PATH))
+        # Outside the Reading root entirely.
+        self.assertFalse(is_reading_annotation_relpath("Notes/Author/Book/Annotations/one.md"))
+
+    def test_is_reading_index_relpath_requires_exact_author_book_index_shape(self):
+        self.assertTrue(is_reading_index_relpath(self.INDEX_PATH))
+        self.assertFalse(is_reading_index_relpath(self.ANNOTATION_PATH))
+        self.assertFalse(is_reading_index_relpath("Books/Apple Books/Author/Index.md"))
+        self.assertFalse(is_reading_index_relpath("Books/Apple Books/Author/Book/Sub/Index.md"))
+
+    def test_generated_index_requires_exactly_one_start_and_one_end_marker_in_order(self):
+        self.assertTrue(is_generated_reading_index(self.INDEX_PATH, self.COMPLETE_INDEX_TEXT))
+        # Reversed order: end before start.
+        reversed_text = f"{READING_INDEX_END}\nnotes\n{READING_INDEX_START}"
+        self.assertFalse(is_generated_reading_index(self.INDEX_PATH, reversed_text))
+        # Duplicate start marker.
+        duplicate_start = f"{READING_INDEX_START}\n{READING_INDEX_START}\n{READING_INDEX_END}"
+        self.assertFalse(is_generated_reading_index(self.INDEX_PATH, duplicate_start))
+        # Duplicate end marker.
+        duplicate_end = f"{READING_INDEX_START}\n{READING_INDEX_END}\n{READING_INDEX_END}"
+        self.assertFalse(is_generated_reading_index(self.INDEX_PATH, duplicate_end))
+        # Orphan start marker only.
+        self.assertFalse(is_generated_reading_index(self.INDEX_PATH, f"{READING_INDEX_START}\nnotes\n"))
+        # Orphan end marker only.
+        self.assertFalse(is_generated_reading_index(self.INDEX_PATH, f"notes\n{READING_INDEX_END}"))
+        # No markers at all: an unrelated user-authored Index.md.
+        self.assertFalse(is_generated_reading_index(self.INDEX_PATH, "# My own index\n"))
+        # Complete pair but wrong structural location.
+        self.assertFalse(is_generated_reading_index(self.ANNOTATION_PATH, self.COMPLETE_INDEX_TEXT))
 
 
 class RebuildPreservesReadingRowsTests(unittest.TestCase):
@@ -232,10 +325,17 @@ class RebuildPreservesReadingRowsTests(unittest.TestCase):
         client.calls.clear()
         return client
 
-    def test_reading_paths_excluded_from_rebuild_scan_only_when_not_covered(self):
+    def test_reading_paths_excluded_from_rebuild_scan_are_always_preserved(self):
+        # --include-reading-pending (the only profile that scans Reading
+        # annotations) is mutually exclusive with --rebuild, so a rebuild
+        # never re-scans annotations itself regardless of configured scope;
+        # every tracked annotation row must always be preserved.
         state_paths = ["Notes/a.md", self.READING_PATH]
-        self.assertEqual(reading_paths_excluded_from_rebuild_scan(state_paths, ["Notes"]), [self.READING_PATH])
-        self.assertEqual(reading_paths_excluded_from_rebuild_scan(state_paths, ["Notes", READING_NOTES_ROOT]), [])
+        self.assertEqual(reading_paths_excluded_from_rebuild_scan(state_paths), [self.READING_PATH])
+        self.assertEqual(
+            reading_paths_excluded_from_rebuild_scan(["Notes/a.md", self.READING_PATH, "Books/Apple Books/Author/Book/Index.md"]),
+            [self.READING_PATH],
+        )
 
     def test_rebuild_preserves_tracked_reading_rows_across_delete_and_recreate(self):
         client = self._seed_client()

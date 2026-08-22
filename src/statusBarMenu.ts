@@ -84,8 +84,10 @@ function addMenuItem(menu: Menu, descriptor: StatusBarMenuItemDescriptor, action
           void actions.openMindmap();
         } else if (action === "openSettings") {
           actions.openSettings();
-        } else if (action === "toggleReadingMode") {
-          void actions.toggleReadingMode();
+        } else if (action === "selectStandardMode") {
+          void actions.selectStandardMode();
+        } else if (action === "selectReadingMode") {
+          void actions.selectReadingMode();
         } else if (action === "syncReadingMode") {
           void actions.syncReadingMode();
         } else if (action === "processReadingBacklog") {

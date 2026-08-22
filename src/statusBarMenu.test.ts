@@ -61,7 +61,8 @@ const ALL_ACTIONS_STUB: StatusBarMenuActions = {
   openNote: () => undefined,
   openMindmap: () => undefined,
   openSettings: () => undefined,
-  toggleReadingMode: () => undefined,
+  selectStandardMode: () => undefined,
+  selectReadingMode: () => undefined,
   syncReadingMode: () => undefined,
   processReadingBacklog: () => undefined,
   toggleWebResearchMode: () => undefined,
@@ -465,4 +466,26 @@ void test("StatusBarMenuActions requires openPythonDownload to be wired (compile
   assert.doesNotThrow(() => {
     void ALL_ACTIONS_STUB.openPythonDownload();
   });
+});
+
+void test("Mode rows are explicit radio choices: current mode is checked and disabled, the other is actionable", () => {
+  const inStandard = buildStatusBarMenuItems(state({ readingMode: "standard" }));
+  const standardRow = inStandard.find((item) => item.title === "Standard Mode");
+  const readingRow = inStandard.find((item) => item.title === "Reading Mode (experimental)");
+  assert.equal(standardRow?.checked, true);
+  assert.equal(standardRow?.disabled, true);
+  assert.equal(standardRow?.action, undefined);
+  assert.equal(readingRow?.checked, false);
+  assert.equal(readingRow?.disabled, false);
+  assert.equal(readingRow?.action, "selectReadingMode");
+
+  const inReading = buildStatusBarMenuItems(state({ readingMode: "reading" }));
+  const standardRow2 = inReading.find((item) => item.title === "Standard Mode");
+  const readingRow2 = inReading.find((item) => item.title === "Reading Mode (experimental)");
+  assert.equal(standardRow2?.checked, false);
+  assert.equal(standardRow2?.disabled, false);
+  assert.equal(standardRow2?.action, "selectStandardMode");
+  assert.equal(readingRow2?.checked, true);
+  assert.equal(readingRow2?.disabled, true);
+  assert.equal(readingRow2?.action, undefined);
 });

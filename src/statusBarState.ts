@@ -169,7 +169,8 @@ export interface StatusBarMenuActions {
   openNote(path: string): void | Promise<void>;
   openMindmap(): void | Promise<void>;
   openSettings(): void;
-  toggleReadingMode(): void | Promise<void>;
+  selectStandardMode(): void | Promise<void>;
+  selectReadingMode(): void | Promise<void>;
   syncReadingMode(): void | Promise<void>;
   processReadingBacklog(): void | Promise<void>;
   toggleWebResearchMode(): void | Promise<void>;
@@ -311,8 +312,20 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
   const items: StatusBarMenuItemDescriptor[] = [
     ...runtimeSetupItems,
     { title: "Mode", label: true },
-    { title: "Standard Mode", icon: "orbit", checked: state.readingMode === "standard", disabled: state.readingMode === "standard" },
-    { title: "Reading Mode (experimental)", icon: "book-open", checked: state.readingMode === "reading", action: "toggleReadingMode" },
+    {
+      title: "Standard Mode",
+      icon: "orbit",
+      checked: state.readingMode === "standard",
+      disabled: state.readingMode === "standard",
+      action: state.readingMode === "standard" ? undefined : "selectStandardMode",
+    },
+    {
+      title: "Reading Mode (experimental)",
+      icon: "book-open",
+      checked: state.readingMode === "reading",
+      disabled: state.readingMode === "reading",
+      action: state.readingMode === "reading" ? undefined : "selectReadingMode",
+    },
     { title: "Queue", label: true },
     {
       title: (state.running

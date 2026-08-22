@@ -160,6 +160,9 @@ export class ReadingModeController {
   }
 
   async disable(): Promise<void> {
+    if (this.mode === "standard") {
+      return;
+    }
     const previousMode = this.mode;
     this.mode = "standard";
     this.stopTimers();

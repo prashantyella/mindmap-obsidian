@@ -63,7 +63,8 @@ export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMe
       appWithSettings.setting?.open();
       appWithSettings.setting?.openTabById?.(plugin.manifest.id);
     },
-    toggleReadingMode: async () => { await plugin.toggleReadingMode(); },
+    selectStandardMode: async () => { await plugin.selectReadingMode("standard"); },
+    selectReadingMode: async () => { await plugin.selectReadingMode("reading"); },
     syncReadingMode: async () => { await plugin.syncReadingMode(); },
     processReadingBacklog: async () => { await plugin.processReadingBacklog(); },
     toggleWebResearchMode: async () => { await plugin.toggleWebResearchMode(); },
