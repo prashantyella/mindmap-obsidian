@@ -41,14 +41,9 @@ import {
   type LlmProviderConfigStatus,
   type ScopeSetupStatus,
 } from "./pluginConfig";
-import {
-  buildDiagnosticsSummary,
-  buildPendingSummary,
-  buildSchedulerSummary,
-  buildScopeSetupSummary,
-  type DiagnosticsSummaryState,
-  type SchedulerSummaryState,
-} from "./pluginSummaries";
+import type { DiagnosticsSummaryState, SchedulerSummaryState } from "./pluginSummaries";
+import { buildOverviewState, type OverviewState } from "./settingsOverview";
+import { buildDiagnosticsOneLine, buildDiagnosticsReport } from "./diagnosticsReport";
 import { assertAllowedPluginArgs } from "./runArguments";
 import { getRunProfile, type RunProfile, type RunScope } from "./runProfiles";
 import { NO_ACTIVE_NOTE, type ActiveNoteEligibility } from "./individualNote";
@@ -62,7 +57,6 @@ import { buildMindmapLocalGraphState, isMindmapLocalGraphLeaf } from "./localGra
 import {
   buildLaunchAgentPlist,
   DAILY_LAUNCH_AGENT_LABEL,
-  formatClockTime,
   normalizeHour,
   normalizeMinute,
   shouldBootstrapLaunchAgent,
@@ -431,19 +425,6 @@ export default class MindmapPlugin extends Plugin {
     };
   }
 
-  getSchedulerSummary(): DocumentFragment {
-    this.refreshLaunchAgentHealth();
-    const config = this.getSchedulerConfig();
-    return buildSchedulerSummary(
-      config,
-      this.schedulerState,
-      this.currentProcess !== null,
-      `LaunchAgent daily: ${formatClockTime({ hour: this.settings.launchAgentDailyHour, minute: this.settings.launchAgentDailyMinute })} Mon-Sat`,
-      this.settings.launchAgentWeeklyEnabled
-        ? `LaunchAgent weekly refresh: ${formatClockTime({ hour: this.settings.launchAgentWeeklyHour, minute: this.settings.launchAgentWeeklyMinute })} Sunday`
-        : "LaunchAgent weekly refresh: disabled",
-    );
-  }
 
   getLaunchAgentCatchUpStatus(): { available: boolean; message: string } {
     return buildLaunchAgentCatchUpStatus(this.settings.schedulerMode, this.schedulerState.launchAgentHealth, this.getPendingSnapshot());
@@ -970,10 +951,6 @@ export default class MindmapPlugin extends Plugin {
     };
   }
 
-  getPendingSummary(): DocumentFragment {
-    return buildPendingSummary(this.getPendingSnapshot());
-  }
-
   getScopeSetupStatus(): ScopeSetupStatus {
     const runtime = this.getResolvedRuntime();
     return resolveScopeSetupStatus(runtime, runtime.valid && this.canManageConfig(runtime));
@@ -1015,12 +992,86 @@ export default class MindmapPlugin extends Plugin {
     this.appendLog(`[setup] Updated LLM provider config in ${configPath}`);
   }
 
-  getScopeSetupSummary(): DocumentFragment {
-    return buildScopeSetupSummary(this.getScopeSetupStatus());
+  /** One compact, path-free readiness summary for the settings Overview row. */
+  getOverviewState(): OverviewState {
+    const runtime = this.getResolvedRuntime();
+    const runtimeSetup = this.getRuntimeSetupState();
+    const scope = this.getScopeSetupStatus();
+    const provider = this.getLlmProviderConfigStatus();
+    return buildOverviewState({
+      runtimeValid: runtime.valid,
+      runtimeSetup: runtimeSetup
+        ? { phase: runtimeSetup.phase, message: runtimeSetup.message, canSetup: runtimeSetup.canSetup, canCancel: runtimeSetup.canCancel }
+        : null,
+      scopeCanManage: scope.canManage,
+      providerCanManage: provider.canManage,
+      preflightOk: this.diagnosticsState.result?.ok ?? null,
+    });
   }
 
-  getDiagnosticsSummary(): DocumentFragment {
-    return buildDiagnosticsSummary(this.diagnosticsState, [...this.recentLog]);
+  /** One-line latest preflight result for the collapsed Troubleshooting disclosure's default view. */
+  getDiagnosticsOneLine(): string {
+    return buildDiagnosticsOneLine({
+      inProgress: this.diagnosticsState.inProgress,
+      lastRunAt: this.diagnosticsState.lastRunAt,
+      result: this.diagnosticsState.result,
+    });
+  }
+
+  /**
+   * Builds a bounded, redacted technical report on demand and copies it to
+   * the clipboard. Never called from a default render path -- only from an
+   * explicit "Copy diagnostics" click.
+   */
+  async copyDiagnostics(): Promise<void> {
+    const runtime = this.getResolvedRuntime();
+    const provider = this.getLlmProviderConfigStatus();
+    const report = buildDiagnosticsReport({
+      generatedAt: new Date().toISOString(),
+      runtime: {
+        command: runtime.command.command,
+        args: runtime.command.args,
+        scriptPath: runtime.scriptPath,
+        configPath: runtime.configPath,
+        valid: runtime.valid,
+        trustLevel: runtime.trust.level,
+        trustInterpreter: runtime.trust.interpreter,
+        trustScript: runtime.trust.script,
+        trustConfig: runtime.trust.config,
+        messages: runtime.messages.map((message) => ({ level: message.level, message: message.message })),
+      },
+      provider: {
+        canManage: provider.canManage,
+        provider: provider.provider,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        hasApiKey: Boolean(provider.apiKey),
+        maxTokens: provider.maxTokens,
+        enableThinking: provider.enableThinking,
+      },
+      preflight: {
+        inProgress: this.diagnosticsState.inProgress,
+        lastRunAt: this.diagnosticsState.lastRunAt,
+        result: this.diagnosticsState.result,
+      },
+      scheduler: {
+        mode: this.settings.schedulerMode,
+        launchAgentHealth: this.schedulerState.launchAgentHealth,
+        nextRunAt: this.schedulerState.nextRunAt,
+        lastMessage: this.schedulerState.lastMessage,
+      },
+      recentLogLines: [...this.recentLog],
+    });
+
+    try {
+      await navigator.clipboard.writeText(report);
+      new Notice("Diagnostics copied to clipboard.", 5000);
+    } catch {
+      // Fixed copy only: a clipboard-permission error's message is
+      // platform/browser text outside this plugin's control and must never
+      // be forwarded verbatim into a user-facing Notice.
+      new Notice("Could not copy diagnostics to the clipboard.", 8000);
+    }
   }
 
   showStatusSummary(): void {

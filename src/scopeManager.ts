@@ -1,7 +1,7 @@
 import { Notice } from "obsidian";
 
 import type MindmapPlugin from "./main";
-import type { ScopeSelection, VaultFolderOption } from "./onboarding";
+import { isScopeSetupComplete, type ScopeSelection, type VaultFolderOption } from "./onboarding";
 
 interface FolderNode {
   value: string;
@@ -128,16 +128,28 @@ export class ScopeManager {
       return;
     }
 
-    this.renderSummary(status.guidance);
+    const draftComplete = isScopeSetupComplete(this.draft);
+    this.renderSummary(draftComplete ? null : status.guidance);
     this.renderToolbar();
     this.renderTree();
   }
 
-  private renderSummary(guidance: string): void {
+  /**
+   * Guidance is only ever an actionable nudge ("select at least one folder
+   * for current and all scopes"). Once the (unsaved-safe) draft selection
+   * is complete there is nothing to act on, so no "Scope folders are
+   * configured." sentence is rendered at all -- the chips themselves
+   * already show what's configured. Using the live draft (rather than the
+   * last-saved status) keeps this reactive while the user is still editing,
+   * before they click Save.
+   */
+  private renderSummary(guidance: string | null): void {
     const summary = this.containerEl.createDiv({ cls: "mindmap-scope-summary-grid" });
     this.renderScopeSummary(summary, "Current", "currentPaths", this.draft.currentPaths);
     this.renderScopeSummary(summary, "All", "allPaths", this.draft.allPaths);
-    this.containerEl.createDiv({ cls: "mindmap-scope-guidance", text: guidance });
+    if (guidance) {
+      this.containerEl.createDiv({ cls: "mindmap-scope-guidance", text: guidance });
+    }
   }
 
   private renderScopeSummary(container: HTMLElement, label: string, field: keyof ScopeSelection, paths: string[]): void {
