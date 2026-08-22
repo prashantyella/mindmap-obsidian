@@ -13,6 +13,7 @@ from mindmap import (  # noqa: E402
     build_optional_apple_books_check,
     build_openai_compatible_chat_payload,
     build_omlx_server_command,
+    build_runtime_checks,
     can_mark_note_complete,
     classify_provider_error,
     dependency_install_guidance,
@@ -25,6 +26,7 @@ from mindmap import (  # noqa: E402
     parse_llm_metadata_json,
     parse_openai_compatible_chat_response,
     run_preflight,
+    run_runtime_preflight,
     start_managed_omlx_server,
 )
 
@@ -414,6 +416,105 @@ class PreflightHelperTests(unittest.TestCase):
         self.assertIn("OMLX_PORT_CONFLICT", checks)
         self.assertIn("will not terminate unrelated processes", checks["OMLX_PORT_CONFLICT"]["guidance"])
         stop.assert_not_called()
+
+
+class RuntimePreflightIsolationTests(unittest.TestCase):
+    """--runtime-preflight / run_runtime_preflight must run ONLY the four
+    runtime-readiness checks (interpreter, ruamel.yaml, chromadb, config
+    existence/JSON-object parse): no Apple Books discovery, provider/model
+    HTTP, oMLX, or Chroma client/vault scan. A provider-reachable config
+    that would normally trigger all of that in full --preflight must never
+    invoke any of it here.
+    """
+
+    def _fully_configured_provider_config(self):
+        return {
+            "vault_root": ".",
+            "embed_provider": "ollama",
+            "embed_base_url": "http://localhost:11434",
+            "embed_model": "embed",
+            "llm_provider": "openai_compatible",
+            "llm_base_url": "http://localhost:8000/v1",
+            "llm_model": "Qwen3.5-9B-MLX-4bit",
+            "omlx_auto_manage": True,
+        }
+
+    def test_runtime_preflight_never_invokes_apple_books_provider_or_omlx_functions(self):
+        def _fail(*_args, **_kwargs):
+            raise AssertionError("runtime-preflight must never call this function")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(json.dumps(self._fully_configured_provider_config()), encoding="utf-8")
+
+            with patch("mindmap.build_optional_apple_books_check", side_effect=_fail), \
+                    patch("mindmap.run_apple_books_preflight", side_effect=_fail), \
+                    patch("mindmap.fetch_ollama_models", side_effect=_fail), \
+                    patch("mindmap.fetch_openai_compatible_models", side_effect=_fail), \
+                    patch("mindmap.start_managed_omlx_server", side_effect=_fail), \
+                    patch("mindmap.stop_managed_omlx_server", side_effect=_fail):
+                result = run_runtime_preflight(config_path)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual({check["code"] for check in result["checks"]}, {
+            "PYTHON_RUNTIME_OK",
+            "DEPENDENCY_RUAMEL_OK",
+            "DEPENDENCY_CHROMADB_OK",
+            "CONFIG_OK",
+        })
+
+    def test_runtime_preflight_produces_exactly_the_four_runtime_groups_when_ready(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(json.dumps({"vault_root": "."}), encoding="utf-8")
+            result = run_runtime_preflight(config_path)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["checks"]), 4)
+        self.assertEqual({check["code"] for check in result["checks"]}, {
+            "PYTHON_RUNTIME_OK",
+            "DEPENDENCY_RUAMEL_OK",
+            "DEPENDENCY_CHROMADB_OK",
+            "CONFIG_OK",
+        })
+        self.assertEqual(result["config_path"], str(config_path))
+        self.assertIn("Runtime preflight passed", result["summary"])
+
+    def test_runtime_preflight_fails_on_missing_dependency_without_dropping_other_groups(self):
+        with patch("mindmap.YAML_IMPORT_ERROR", ImportError("boom")):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config_path = Path(tmpdir) / "config.json"
+                config_path.write_text(json.dumps({"vault_root": "."}), encoding="utf-8")
+                result = run_runtime_preflight(config_path)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(result["checks"]), 4)
+        checks = {check["code"]: check for check in result["checks"]}
+        self.assertIn("DEPENDENCY_RUAMEL_MISSING", checks)
+        self.assertEqual(checks["PYTHON_RUNTIME_OK"]["status"], "ok")
+        self.assertEqual(checks["CONFIG_OK"]["status"], "ok")
+        self.assertIn("Runtime preflight failed", result["summary"])
+
+    def test_runtime_preflight_fails_on_missing_config_without_dropping_other_groups(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "does-not-exist.json"
+            result = run_runtime_preflight(config_path)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(result["checks"]), 4)
+        checks = {check["code"]: check for check in result["checks"]}
+        self.assertIn("CONFIG_MISSING", checks)
+        self.assertEqual(checks["PYTHON_RUNTIME_OK"]["status"], "ok")
+
+    def test_build_runtime_checks_is_the_single_shared_source_for_both_modes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(json.dumps({"vault_root": "."}), encoding="utf-8")
+            config, checks = build_runtime_checks(config_path)
+
+        self.assertIsNotNone(config)
+        self.assertEqual(len(checks), 4)
+        self.assertEqual([check["code"] for check in checks][:1], ["PYTHON_RUNTIME_OK"])
 
 
 if __name__ == "__main__":

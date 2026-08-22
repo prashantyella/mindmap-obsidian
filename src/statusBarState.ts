@@ -11,7 +11,16 @@ export interface StatusBarSchedulerDetail {
   lastSuccessfulRunAt: number | null;
 }
 
+export interface StatusBarRuntimeSetupState {
+  phase: string;
+  message: string;
+  canSetup: boolean;
+  canCancel: boolean;
+  blocking: boolean;
+}
+
 export interface StatusBarMenuState {
+  runtimeSetup?: StatusBarRuntimeSetupState;
   pendingAvailable: boolean;
   currentPending: number;
   allPending: number;
@@ -43,6 +52,7 @@ export interface StatusBarMenuState {
 }
 
 export interface StatusBarStateInput {
+  runtimeSetup?: StatusBarRuntimeSetupState;
   pending: {
     available: boolean;
     current: { total: number; items: string[] };
@@ -115,6 +125,7 @@ export function buildStatusBarMenuState(input: StatusBarStateInput): StatusBarMe
     lastSuccessfulRunAt: details.get(label)?.lastSuccessfulRunAt ?? null,
   });
   return {
+    runtimeSetup: input.runtimeSetup,
     pendingAvailable: input.pending.available,
     currentPending: input.pending.current.total,
     allPending: input.pending.all.total,
@@ -167,6 +178,9 @@ export interface StatusBarMenuActions {
   researchAndReprocessActiveNote(): void | Promise<void>;
   toggleAutomaticReadingResearch(): void | Promise<void>;
   retryAutomaticResearch(): void | Promise<void>;
+  startRuntimeSetup(): void | Promise<void>;
+  cancelRuntimeSetup(): void | Promise<void>;
+  openPythonDownload(): void | Promise<void>;
 }
 
 export interface StatusBarPresentation {
@@ -186,14 +200,19 @@ function healthLabel(health: LaunchAgentHealth): string {
   return health[0].toUpperCase() + health.slice(1);
 }
 
+const RUNTIME_SETUP_ACTIONABLE_PHASES = new Set(["setup-required", "unavailable", "failed"]);
+const RUNTIME_SETUP_BUSY_PHASES = new Set(["discovering", "confirming", "creating", "installing", "verifying"]);
+
 export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBarPresentation {
   const schedulerActionable = state.schedulerHealth !== null && ACTIONABLE_HEALTH.has(state.schedulerHealth);
   const readingActionable = state.readingMode === "reading" && (state.readingActivity === "error" || Boolean(state.readingError));
   const automaticPaused = state.webResearchMode === "automatic-reading" && state.automaticResearchPauseReason !== null;
   const webResearchActionable = state.webResearchActivity === "error" || Boolean(state.webResearchError) || automaticPaused;
   const researchBusy = ["deriving", "searching", "writing"].includes(state.webResearchActivity);
-  const busy = state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy;
-  const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable || webResearchActionable;
+  const runtimeSetupActionable = state.runtimeSetup !== undefined && RUNTIME_SETUP_ACTIONABLE_PHASES.has(state.runtimeSetup.phase);
+  const runtimeSetupBusy = state.runtimeSetup !== undefined && RUNTIME_SETUP_BUSY_PHASES.has(state.runtimeSetup.phase);
+  const busy = state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy || runtimeSetupBusy;
+  const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable || webResearchActionable || runtimeSetupActionable;
   const label = state.readingMode === "reading"
     ? state.readingActivity === "syncing" || state.readingActivity === "processing"
       ? `Reading · ${state.readingActivity}`
@@ -207,7 +226,13 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
       : state.pendingAvailable
         ? `Mindmap · ${state.currentPending}`
         : "Mindmap · —";
-  const attention = state.preflightOk === false
+  const attention = runtimeSetupActionable
+    ? state.runtimeSetup!.phase === "unavailable"
+      ? "Python not found"
+      : state.runtimeSetup!.phase === "failed"
+        ? "runtime setup failed"
+        : "runtime setup required"
+    : state.preflightOk === false
     ? "preflight failed"
     : !state.scopeReady
       ? "scope setup required"
@@ -250,6 +275,8 @@ export interface StatusBarMenuItemDescriptor {
 }
 
 export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMenuItemDescriptor[] {
+  const blocking = state.runtimeSetup?.blocking ?? false;
+  const setupRequiredSuffix = " (runtime setup required)";
   const researchBusy = ["deriving", "searching", "writing"].includes(state.webResearchActivity);
   const automaticActive = state.webResearchMode === "automatic-reading";
   const automaticTransientPause = automaticActive && state.automaticResearchPauseReason !== null && state.automaticResearchPauseReason !== "daily-limit";
@@ -262,31 +289,51 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
         : null;
   const automaticError = state.automaticResearchLastError ?? state.webResearchError;
   const modeLabel = state.webResearchMode === "automatic-reading" ? "Automatic for Reading" : state.webResearchMode === "manual" ? "Manual" : "Off";
+  const runtimeSetup = state.runtimeSetup;
+  const runtimeSetupItems: StatusBarMenuItemDescriptor[] = runtimeSetup && runtimeSetup.phase !== "not-applicable"
+    ? [
+      { title: "Runtime setup", label: true },
+      { title: `Runtime: ${runtimeSetup.message}`, icon: runtimeSetup.phase === "ready" ? "check" as IconName : "triangle-alert" as IconName, disabled: true },
+      ...(runtimeSetup.canCancel ? [{ title: "Cancel runtime setup", icon: "x" as IconName, action: "cancelRuntimeSetup" as const }] : []),
+      ...(runtimeSetup.canSetup ? [{
+        title: runtimeSetup.phase === "failed" || runtimeSetup.phase === "cancelled" ? "Retry Mindmap runtime setup" : "Set up Mindmap runtime",
+        icon: "download" as IconName,
+        action: "startRuntimeSetup" as const,
+      }] : []),
+      ...(runtimeSetup.phase === "unavailable" ? [{
+        title: "Open official Python download page",
+        icon: "external-link" as IconName,
+        action: "openPythonDownload" as const,
+      }] : []),
+    ]
+    : [];
+
   const items: StatusBarMenuItemDescriptor[] = [
+    ...runtimeSetupItems,
     { title: "Mode", label: true },
     { title: "Standard Mode", icon: "orbit", checked: state.readingMode === "standard", disabled: state.readingMode === "standard" },
     { title: "Reading Mode (experimental)", icon: "book-open", checked: state.readingMode === "reading", action: "toggleReadingMode" },
     { title: "Queue", label: true },
     {
-      title: state.running
+      title: (state.running
         ? "Run active note (Mindmap is already running.)"
         : state.activeNote.eligible
         ? "Run Mindmap for active note"
-        : `Run active note (${state.activeNote.reason})`,
+        : `Run active note (${state.activeNote.reason})`) + (blocking ? setupRequiredSuffix : ""),
       icon: "file-play",
-      disabled: state.running || researchBusy || !state.scopeReady || !state.activeNote.eligible,
+      disabled: state.running || researchBusy || !state.scopeReady || !state.activeNote.eligible || blocking,
       action: state.running || !state.activeNote.eligible ? undefined : "runActiveNote",
     },
     {
-      title: state.running ? `Run active${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope",
+      title: (state.running ? `Run active${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope") + (blocking ? setupRequiredSuffix : ""),
       icon: state.running ? "loader-circle" : "play",
-      disabled: state.running || researchBusy || !state.scopeReady,
+      disabled: state.running || researchBusy || !state.scopeReady || blocking,
       action: state.running ? undefined : "runCurrent",
     },
     {
-      title: state.pendingAvailable ? `Process all pending notes (${state.allPending})` : "Process all pending notes (unavailable)",
+      title: (state.pendingAvailable ? `Process all pending notes (${state.allPending})` : "Process all pending notes (unavailable)") + (blocking ? setupRequiredSuffix : ""),
       icon: "list-checks",
-      disabled: state.running || researchBusy || !state.scopeReady || !state.pendingAvailable || state.allPending === 0,
+      disabled: state.running || researchBusy || !state.scopeReady || !state.pendingAvailable || state.allPending === 0 || blocking,
       action: "runAll",
     },
     {
@@ -294,7 +341,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       disabled: true,
     },
     ...state.pendingPaths.flatMap((path) => [
-      { title: `Process ${path}`, icon: "file-play" as IconName, path, disabled: state.running || researchBusy || !state.scopeReady, action: "processPendingNote" as const },
+      { title: `Process ${path}${blocking ? setupRequiredSuffix : ""}`, icon: "file-play" as IconName, path, disabled: state.running || researchBusy || !state.scopeReady || blocking, action: "processPendingNote" as const },
       { title: `Open ${path}`, icon: "file-text" as IconName, path, action: "openNote" as const },
     ]),
     { title: "Reading", label: true },
@@ -304,10 +351,10 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     ...(state.readingMode === "reading" ? [
       { title: "Sync Reading Mode now", icon: "refresh-cw" as IconName, action: "syncReadingMode" as const, disabled: state.readingActivity === "syncing" || state.readingActivity === "processing" },
       {
-        title: `Process Reading backlog (${state.readingPending})`,
+        title: blocking ? "Process Reading backlog (runtime setup required)" : `Process Reading backlog (${state.readingPending})`,
         icon: "list-checks" as IconName,
         action: "processReadingBacklog" as const,
-        disabled: state.readingPending === 0 || state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy,
+        disabled: state.readingPending === 0 || state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy || blocking,
       },
       { title: `Reading pending: ${state.readingPending}`, disabled: true },
       { title: `Reading unresearchable: ${state.readingUnresearchable}`, disabled: true },
@@ -319,26 +366,33 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     automaticActive
       ? { title: "Manual research is included with Automatic for Reading", icon: "check" as IconName, disabled: true }
       : { title: "Use Manual research", icon: "globe-2", checked: state.webResearchMode === "manual", action: "toggleWebResearchMode", disabled: researchBusy },
-    { title: automaticActive ? "Pause Automatic for Reading" : "Enable Automatic for Reading", icon: "sparkles" as IconName, checked: automaticActive, action: "toggleAutomaticReadingResearch", disabled: researchBusy || (!automaticActive && state.readingMode !== "reading") },
+    {
+      title: (automaticActive ? "Pause Automatic for Reading" : "Enable Automatic for Reading") + (!automaticActive && blocking ? setupRequiredSuffix : ""),
+      icon: "sparkles" as IconName,
+      checked: automaticActive,
+      action: "toggleAutomaticReadingResearch",
+      // Pausing (already active -> off) is always allowed; only *starting* automatic work is gated on runtime readiness.
+      disabled: researchBusy || (!automaticActive && (state.readingMode !== "reading" || blocking)),
+    },
     ...(automaticActive ? [
       { title: `Automatic research: ${state.automaticResearchAttempted}/10 today · max 5/sync`, disabled: true },
       ...(automaticPausedCopy ? [{ title: automaticPausedCopy, icon: state.automaticResearchPauseReason ? "triangle-alert" as IconName : "clock-3" as IconName, disabled: true }] : []),
       ...(automaticError ? [{ title: `Automatic research: ${automaticError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
       ...(state.automaticResearchLastErrorAt ? [{ title: `Automatic research last error: ${state.automaticResearchLastErrorAt}`, disabled: true }] : []),
-      ...(automaticTransientPause ? [{ title: "Retry automatic research", icon: "refresh-cw" as IconName, action: "retryAutomaticResearch" as const, disabled: researchBusy || state.readingMode !== "reading" }] : []),
+      ...(automaticTransientPause ? [{ title: `Retry automatic research${blocking ? setupRequiredSuffix : ""}`, icon: "refresh-cw" as IconName, action: "retryAutomaticResearch" as const, disabled: researchBusy || state.readingMode !== "reading" || blocking }] : []),
     ] : []),
     ...(state.webResearchMode !== "off" ? [
       { title: "Research selected text", icon: "search" as IconName, action: "researchSelectedText" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
       { title: "Research active note", icon: "file-search" as IconName, action: "researchActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
-      { title: "Research and reprocess active note", icon: "sparkles" as IconName, action: "researchAndReprocessActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
+      { title: `Research and reprocess active note${blocking ? setupRequiredSuffix : ""}`, icon: "sparkles" as IconName, action: "researchAndReprocessActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) || blocking },
       ...(state.webResearchMode === "manual" && researchBusy ? [{ title: `Research: ${state.webResearchActivity}`, disabled: true }] : []),
       ...(state.webResearchMode === "manual" && state.webResearchError ? [{ title: `Research error: ${state.webResearchError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
     ] : [{ title: state.webResearchError ? `Web Research error: ${state.webResearchError}` : "Web Research is not enabled", icon: state.webResearchError ? "triangle-alert" as IconName : "globe-2" as IconName, disabled: true }]),
     { title: "Health", label: true },
     {
-      title: state.preflightInProgress ? "Preflight is running" : state.preflightOk === false ? "Run preflight (failed)" : "Run preflight checks",
+      title: (state.preflightInProgress ? "Preflight is running" : state.preflightOk === false ? "Run preflight (failed)" : "Run preflight checks") + (blocking ? setupRequiredSuffix : ""),
       icon: state.preflightOk === false ? "triangle-alert" : "shield-check",
-      disabled: state.preflightInProgress,
+      disabled: state.preflightInProgress || blocking,
       action: "runPreflight",
     },
     { title: `Scheduler: ${state.schedulerMode}`, disabled: true },

@@ -14,7 +14,11 @@ export interface StatusBarInternalState {
 }
 
 export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: StatusBarInternalState): StatusBarMenuState {
+  const runtimeSetupState = plugin.getRuntimeSetupState();
   return buildStatusBarMenuState({
+    runtimeSetup: runtimeSetupState
+      ? { phase: runtimeSetupState.phase, message: runtimeSetupState.message, canSetup: runtimeSetupState.canSetup, canCancel: runtimeSetupState.canCancel, blocking: runtimeSetupState.blocking }
+      : undefined,
     pending: plugin.getPendingSnapshot(),
     running: internal.running,
     runStatus: internal.runStatus,
@@ -68,6 +72,9 @@ export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMe
     researchAndReprocessActiveNote: async () => { await plugin.researchActiveNote(true); },
     toggleAutomaticReadingResearch: async () => { await plugin.toggleAutomaticReadingResearch(); },
     retryAutomaticResearch: async () => { await plugin.retryAutomaticResearch(); },
+    startRuntimeSetup: async () => { await plugin.startRuntimeSetup(); },
+    cancelRuntimeSetup: () => { plugin.cancelRuntimeSetup(); },
+    openPythonDownload: () => { plugin.openPythonRuntimeDownloadPage(); },
   };
 }
 

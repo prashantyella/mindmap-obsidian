@@ -1994,7 +1994,15 @@ def find_missing_models(required_models: List[str], available_models: List[str])
     return missing
 
 
-def run_preflight(config_path: Path) -> Dict:
+def build_runtime_checks(config_path: Path) -> Tuple[Optional[Dict], List[Dict]]:
+    """Runs exactly the four runtime-readiness checks shared by full
+    `--preflight` and the isolated `--runtime-preflight` mode: interpreter
+    version, ruamel.yaml import, chromadb import, and config existence/
+    JSON-object parse (`load_config_with_diagnostics`). Never touches Apple
+    Books discovery, provider/model HTTP, oMLX, a Chroma client, or a vault
+    scan, so callers that need an isolated runtime signal can use it
+    directly without risking a hang on unrelated provider state.
+    """
     checks = [
         build_preflight_check(
             "PYTHON_RUNTIME_OK",
@@ -2061,6 +2069,37 @@ def run_preflight(config_path: Path) -> Dict:
 
     config, config_check = load_config_with_diagnostics(config_path)
     checks.append(config_check)
+    return config, checks
+
+
+def run_runtime_preflight(config_path: Path) -> Dict:
+    """Isolated runtime-only preflight used by the plugin's automated
+    discovery/setup verifier (checkpoint 1-3 TS side). Runs ONLY
+    `build_runtime_checks`: interpreter, ruamel.yaml, chromadb, and config
+    existence/JSON-object parse. No Apple Books discovery, provider/model
+    HTTP, oMLX, Chroma client instantiation, or vault scan runs — a
+    dependency-ready interpreter can never be downgraded, and a newly
+    installed runtime can never be blocked, by unrelated provider/network
+    state hanging until the caller's own subprocess timeout.
+    """
+    config, checks = build_runtime_checks(config_path)
+    del config  # not used past this point: only the four runtime checks matter here.
+    ok = not any(check["status"] == "error" for check in checks)
+    if ok:
+        summary = "Runtime preflight passed: Python and dependencies are ready."
+    else:
+        first_error = next(check for check in checks if check["status"] == "error")
+        summary = f"Runtime preflight failed: {first_error['message']}"
+    return {
+        "ok": ok,
+        "summary": summary,
+        "checks": checks,
+        "config_path": str(config_path),
+    }
+
+
+def run_preflight(config_path: Path) -> Dict:
+    config, checks = build_runtime_checks(config_path)
     if config is None:
         ok = not any(check["status"] == "error" for check in checks)
         return {
@@ -2638,6 +2677,11 @@ def main():
     parser = argparse.ArgumentParser(description="Local knowledge maintenance for Obsidian notes")
     parser.add_argument("--config", default=None, help="Config path")
     parser.add_argument("--preflight", action="store_true", help="Validate config, dependencies, Ollama, and model availability")
+    # Internal-only: used by the plugin's automated runtime discovery/setup
+    # verifier to check interpreter/dependencies/config without touching
+    # provider/model HTTP, oMLX, Apple Books, or a Chroma client. Not a
+    # documented manual run profile: kept out of --help.
+    parser.add_argument("--runtime-preflight", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--apple-books-preflight", action="store_true", help="Run the optional Apple Books access/schema check")
     parser.add_argument("--index", action="store_true", help="Build embeddings index")
     parser.add_argument("--tag", action="store_true", help="Generate tags/concepts/summary")
@@ -2689,6 +2733,11 @@ def main():
         result = run_apple_books_preflight(config_path)
         print(json.dumps(result, ensure_ascii=True))
         return 0 if result.get("status") in {"success", "empty", "partial"} else 1
+
+    if args.runtime_preflight:
+        result = run_runtime_preflight(config_path)
+        print(json.dumps(result, ensure_ascii=True))
+        return 0 if result["ok"] else 1
 
     if args.preflight:
         result = run_preflight(config_path)

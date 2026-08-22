@@ -41,6 +41,7 @@ export class MindmapSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    this.renderRuntimeSetupSettings();
     this.renderScopeSetupSettings();
     this.renderProviderSettings();
     this.renderSchedulerSettings();
@@ -430,6 +431,48 @@ export class MindmapSettingTab extends PluginSettingTab {
             this.display();
           });
       });
+  }
+
+  private renderRuntimeSetupSettings(): void {
+    const state = this.plugin.getRuntimeSetupState();
+    if (!state || state.phase === "not-applicable") {
+      return;
+    }
+
+    this.renderSection("Managed runtime setup", "Automated Python runtime setup for macOS.");
+    const setting = new Setting(this.containerEl)
+      .setName("Mindmap runtime")
+      .setDesc(state.message)
+      .setClass(state.phase === "ready" ? "mindmap-validation-ok" : state.phase === "failed" || state.phase === "unavailable" ? "mindmap-validation-error" : "");
+
+    if (state.canCancel) {
+      setting.addButton((button) => {
+        button.setButtonText("Cancel").onClick(() => {
+          this.plugin.cancelRuntimeSetup();
+          this.display();
+        });
+      });
+    }
+
+    if (state.canSetup) {
+      setting.addButton((button) => {
+        button
+          .setCta()
+          .setButtonText(state.phase === "failed" || state.phase === "cancelled" ? "Retry setup" : "Set up runtime")
+          .onClick(async () => {
+            await this.plugin.startRuntimeSetup();
+            this.display();
+          });
+      });
+    }
+
+    if (state.phase === "unavailable") {
+      setting.addButton((button) => {
+        button.setButtonText("Open Python download page").onClick(() => {
+          this.plugin.openPythonRuntimeDownloadPage();
+        });
+      });
+    }
   }
 
   private renderAdvancedRuntimeSettings(): void {

@@ -8,6 +8,10 @@ import { FileSystemAdapter, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from
 import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput, type PreflightResult } from "./diagnostics";
 import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } from "./onboarding";
 import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
+import { createNodeDiscoveryFs, createNodeProcessInvoker, getDefaultAppSupportRoot } from "./runtimeDiscovery";
+import { createNodeSetupFs, createNodeSetupSpawner } from "./runtimeSetup";
+import { PYTHON_MACOS_DOWNLOAD_URL, RuntimeReadinessCoordinator, shouldTriggerRuntimeReadyKickoff, type CoordinatorState } from "./runtimeSetupCoordinator";
+import { buildRuntimePreflightVerifier } from "./runtimeVerifier";
 import { createPendingScanService, type PendingSnapshot } from "./pendingScan";
 import { discoverAppleBooksDatabasePaths } from "./appleBooksDiscovery";
 import { classifyResearchTarget, completeAppleAnnotationResearchForNote, importAppleBooksAnnotations, updateAppleAnnotationResearchStatus, writeAppleAnnotationCompanion } from "./appleBooksImport";
@@ -172,6 +176,8 @@ export default class MindmapPlugin extends Plugin {
     lastRunAt: null,
     result: null,
   };
+  private runtimeCoordinator: RuntimeReadinessCoordinator | null = null;
+  private runtimeReadyKicked = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -218,16 +224,14 @@ export default class MindmapPlugin extends Plugin {
     });
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => { void this.refreshActiveNoteEligibility(); }));
     void this.pendingScanService.warm().then(() => this.updateStatusBar());
-    void this.runPreflight("startup");
-    if (this.settings.liveSemanticLookupEnabled) {
-      void this.startSemanticEnvironment(false);
-    }
+    await this.startRuntimeCoordinator();
     if (this.settings.readingMode === "reading") {
       void this.readingModeController.start();
     }
   }
 
   onunload(): void {
+    this.runtimeCoordinator?.dispose();
     this.activeReaderChild?.kill();
     this.activeReaderChild = null;
     this.pendingScanService?.dispose();
@@ -272,6 +276,110 @@ export default class MindmapPlugin extends Plugin {
     return resolveRuntime(this.settings, this.getRuntimeContext());
   }
 
+  /**
+   * True whenever the runtime is known to require setup, and also before
+   * discovery has even started (the coordinator is constructed only partway
+   * through onload()). The safe default while unknown is "blocked": nothing
+   * gated on this may run ahead of the discovery result it depends on.
+   */
+  private isRuntimeSetupBlocking(): boolean {
+    return this.runtimeCoordinator?.getState().blocking ?? true;
+  }
+
+  getRuntimeSetupState(): CoordinatorState | null {
+    return this.runtimeCoordinator?.getState() ?? null;
+  }
+
+  async startRuntimeSetup(): Promise<void> {
+    const state = this.runtimeCoordinator?.getState();
+    if (!state?.canSetup) return;
+    await this.runtimeCoordinator?.beginSetup();
+  }
+
+  retryRuntimeSetup(): Promise<void> {
+    return this.startRuntimeSetup();
+  }
+
+  cancelRuntimeSetup(): void {
+    this.runtimeCoordinator?.cancel();
+  }
+
+  /** Opens the official Python macOS download page in the user's default browser. */
+  openPythonRuntimeDownloadPage(): void {
+    window.open(PYTHON_MACOS_DOWNLOAD_URL, "_blank");
+  }
+
+  private async confirmRuntimeSetup(): Promise<boolean> {
+    return await confirmMindmapRun(this.app, {
+      title: "Set up Mindmap runtime?",
+      message: "Mindmap will create a private Python environment, download pinned packages from PyPI, and store them outside your vault under ~/Library/Application Support/Mindmap AI. This may take several minutes and requires network access.",
+      confirmText: "Set up",
+      confirmClass: "mod-cta",
+    });
+  }
+
+  private async startRuntimeCoordinator(): Promise<void> {
+    const context = this.getRuntimeContext();
+    const runtimeDir = getPluginRuntimeDir(context);
+    const runtime = this.getResolvedRuntime();
+
+    let requirementsFileContents = "";
+    try {
+      requirementsFileContents = await fs.promises.readFile(path.join(runtimeDir, "requirements.txt"), "utf8");
+    } catch (error) {
+      this.appendLog(`[runtime] Could not read bundled requirements.txt: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+
+    const invoke = createNodeProcessInvoker();
+    const verifyPreflight = buildRuntimePreflightVerifier({
+      scriptPath: runtime.scriptPath,
+      configPath: runtime.configPath,
+      invoke,
+    });
+
+    this.runtimeCoordinator = new RuntimeReadinessCoordinator({
+      platform: process.platform,
+      pythonCommandSetting: this.settings.pythonCommand,
+      homeDir: os.homedir(),
+      pathEnv: process.env.PATH ?? "",
+      arch: os.arch() === "arm64" ? "arm64" : "x64",
+      appSupportRoot: getDefaultAppSupportRoot(os.homedir()),
+      requirementsFileContents,
+      requirementsFilePath: path.join(runtimeDir, "requirements.txt"),
+      scriptPath: runtime.scriptPath,
+      configPath: runtime.configPath,
+      discoveryFs: createNodeDiscoveryFs(),
+      invoke,
+      setupFs: createNodeSetupFs(),
+      spawner: createNodeSetupSpawner(),
+      confirm: () => this.confirmRuntimeSetup(),
+      persist: async (interpreterPath) => {
+        this.settings.pythonCommand = interpreterPath;
+        await this.saveSettings();
+      },
+      verifyPreflight,
+      onStateChange: (state) => {
+        this.updateStatusBar();
+        if (shouldTriggerRuntimeReadyKickoff(state.phase, this.runtimeReadyKicked)) {
+          this.runtimeReadyKicked = true;
+          // The scheduler/LaunchAgent branches syncScheduler() gates on
+          // isRuntimeSetupBlocking() were skipped every time this coordinator
+          // reported blocking:true (including via persist()'s own saveSettings()
+          // call mid-install, which runs before this phase flips to ready) — so
+          // they must be re-evaluated now that blocking has actually cleared.
+          this.syncScheduler();
+          void this.runPreflight("startup");
+          if (this.settings.liveSemanticLookupEnabled) {
+            void this.startSemanticEnvironment(false);
+          }
+        }
+      },
+      log: (line) => this.appendLog(line),
+    });
+
+    await this.runtimeCoordinator.startDiscovery();
+  }
+
   getSemanticStatus(): SemanticEnvironmentStatus {
     return this.semanticEnvironment?.getStatus() ?? {
       state: "off",
@@ -282,6 +390,12 @@ export default class MindmapPlugin extends Plugin {
 
   async startSemanticEnvironment(showNotice: boolean): Promise<void> {
     if (!this.semanticEnvironment) {
+      return;
+    }
+    if (this.isRuntimeSetupBlocking()) {
+      if (showNotice) {
+        new Notice("Mindmap runtime setup is required before the semantic environment can start.", 8000);
+      }
       return;
     }
     const status = await this.semanticEnvironment.start("current");
@@ -376,14 +490,18 @@ export default class MindmapPlugin extends Plugin {
     if (outcome.enabled && outcome.initialImport) {
       const health = this.readingModeController.getHealth();
       if (health.pendingCount > 0) {
-        const shouldProcess = await confirmMindmapRun(this.app, {
-          title: "Process Reading backlog?",
-          message: `${health.pendingCount} annotation${health.pendingCount === 1 ? "" : "s"} ready for processing. Process them now?`,
-          confirmText: "Process now",
-          confirmClass: "mod-cta",
-        });
-        if (shouldProcess) {
-          await this.readingModeController.processBacklog();
+        if (this.isRuntimeSetupBlocking()) {
+          new Notice(`${health.pendingCount} annotation${health.pendingCount === 1 ? "" : "s"} imported. Finish Mindmap runtime setup in Settings to process them.`, 10000);
+        } else {
+          const shouldProcess = await confirmMindmapRun(this.app, {
+            title: "Process Reading backlog?",
+            message: `${health.pendingCount} annotation${health.pendingCount === 1 ? "" : "s"} ready for processing. Process them now?`,
+            confirmText: "Process now",
+            confirmClass: "mod-cta",
+          });
+          if (shouldProcess) {
+            await this.readingModeController.processBacklog();
+          }
         }
       }
     }
@@ -394,6 +512,10 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async processReadingBacklog(): Promise<void> {
+    if (this.isRuntimeSetupBlocking()) {
+      new Notice("Mindmap runtime setup is required before the Reading backlog can be processed. Finish setup in Settings.", 10000);
+      return;
+    }
     await this.readingModeController?.processBacklog();
   }
 
@@ -482,6 +604,10 @@ export default class MindmapPlugin extends Plugin {
       new Notice("Enable Reading Mode before automatic research.", 8000);
       return;
     }
+    if (this.isRuntimeSetupBlocking()) {
+      new Notice("Mindmap runtime setup is required before automatic Reading research can be enabled.", 8000);
+      return;
+    }
     const confirmed = await confirmMindmapRun(this.app, {
       title: "Enable Automatic Reading Research?",
       message: "Apple annotation excerpts stay local to Qwen. Exa receives only one or two derived queries and returns up to five bounded source excerpts and metadata. Automatic work is limited to five notes per sync and ten per day.",
@@ -518,6 +644,10 @@ export default class MindmapPlugin extends Plugin {
   async retryAutomaticResearch(): Promise<void> {
     if (!this.automaticResearchPolicyStore || this.settings.webResearchMode !== "automatic-reading" || this.readingModeController?.getMode() !== "reading") {
       new Notice("Automatic research retry requires active Reading Mode.", 8000);
+      return;
+    }
+    if (this.isRuntimeSetupBlocking()) {
+      new Notice("Mindmap runtime setup is required before automatic Reading research can retry.", 8000);
       return;
     }
     const day = localResearchDay(new Date());
@@ -924,6 +1054,38 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async runPreflight(trigger: "manual" | "startup"): Promise<PreflightResult> {
+    if (this.isRuntimeSetupBlocking()) {
+      // Never spawn the legacy pythonCommand (often a bare "python3" that
+      // discovery already knows is missing/incompatible) while setup is
+      // pending: return one fixed setup-required result instead.
+      const runtimeMessage = this.runtimeCoordinator?.getState().message ?? "Checking for a compatible Mindmap runtime.";
+      const summary = `Mindmap runtime setup is required before preflight can run. ${runtimeMessage}`;
+      const result: PreflightResult = {
+        ok: false,
+        summary,
+        checks: [
+          {
+            code: "RUNTIME_SETUP_REQUIRED",
+            label: "Mindmap runtime",
+            status: "error",
+            message: summary,
+            guidance: "Finish Mindmap runtime setup in Settings, then run preflight again.",
+          },
+        ],
+        rawStdout: "",
+        rawStderr: "",
+        exitCode: 1,
+      };
+      this.diagnosticsState.result = result;
+      this.diagnosticsState.lastRunAt = Date.now();
+      this.appendLog(`[preflight] ${summary}`);
+      if (trigger === "manual") {
+        new Notice(summary, 10000);
+      }
+      this.updateStatusBar();
+      return result;
+    }
+
     const runtime = this.getResolvedRuntime();
     if (!runtime.valid) {
       const error = runtime.messages.find((message) => message.level === "error");
@@ -1030,13 +1192,15 @@ export default class MindmapPlugin extends Plugin {
   }
 
   private syncScheduler(): void {
-    if (isSchedulerEnabled(this.settings.schedulerMode)) {
+    if (isSchedulerEnabled(this.settings.schedulerMode) && !this.isRuntimeSetupBlocking()) {
       this.startScheduler();
+    } else if (isSchedulerEnabled(this.settings.schedulerMode)) {
+      this.stopScheduler("Mindmap runtime setup is required before the interval scheduler can run.");
     } else {
       this.stopScheduler("Manual mode. Interval scheduler disabled.");
     }
 
-    if (isLaunchAgentSchedulerEnabled(this.settings.schedulerMode)) {
+    if (isLaunchAgentSchedulerEnabled(this.settings.schedulerMode) && !this.isRuntimeSetupBlocking()) {
       void this.reconcileLaunchAgents();
     } else if (this.launchAgentManagedThisSession) {
       void this.disableManagedLaunchAgents("LaunchAgent scheduler disabled.");
@@ -1412,6 +1576,7 @@ export default class MindmapPlugin extends Plugin {
       },
       runAutomaticResearch: async (imported) => {
         if (this.settings.webResearchMode !== "automatic-reading" || this.settings.readingMode !== "reading" || !this.automaticResearchPolicyStore) return;
+        if (this.isRuntimeSetupBlocking()) return;
         const now = new Date();
         try {
           await this.refreshAutomaticResearchPolicyStatus(now);
@@ -1421,7 +1586,7 @@ export default class MindmapPlugin extends Plugin {
             store: this.automaticResearchPolicyStore,
             now,
             candidates,
-            shouldContinue: () => this.readingModeController?.getMode() === "reading" && this.settings.webResearchMode === "automatic-reading",
+            shouldContinue: () => this.readingModeController?.getMode() === "reading" && this.settings.webResearchMode === "automatic-reading" && !this.isRuntimeSetupBlocking(),
             attempt: async (item) => {
               const file = this.app.vault.getAbstractFileByPath(item.notePath);
               if (!(file instanceof TFile)) throw new WebResearchError("NOTE_MISSING", "Automatic research note is unavailable.");
@@ -1505,13 +1670,31 @@ export default class MindmapPlugin extends Plugin {
     });
   }
 
+  /**
+   * The Apple Books reader is stdlib-only, so it only needs a real Python
+   * executable — never the full chromadb/ruamel.yaml package set. Prefer
+   * checkpoint-1's discovered interpreter (verified executable, supported
+   * version) over the settings' raw pythonCommand default, since a blank
+   * "python3" may not exist or may resolve to an incompatible interpreter
+   * even while discovery already found a good one. An explicit custom
+   * pythonCommand (coordinator phase "not-applicable") always wins, as does
+   * any state before the coordinator has produced an interpreter at all.
+   */
+  private getAppleBooksInterpreterCommand(): string {
+    const coordinatorState = this.runtimeCoordinator?.getState();
+    if (coordinatorState && coordinatorState.phase !== "not-applicable" && coordinatorState.interpreterPath) {
+      return coordinatorState.interpreterPath;
+    }
+    return this.getResolvedRuntime().command.command;
+  }
+
   private async readAppleBooksPayload(): Promise<unknown> {
     const runtime = this.getResolvedRuntime();
     if (!runtime.valid) {
       throw new Error("Mindmap runtime is not ready for Apple Books reading.");
     }
     const readerPath = path.join(getPluginRuntimeDir(this.getRuntimeContext()), "apple_books_reader.py");
-    return await this.runReaderProcess(runtime.command.command, [readerPath, "--config", runtime.configPath], path.dirname(readerPath));
+    return await this.runReaderProcess(this.getAppleBooksInterpreterCommand(), [readerPath, "--config", runtime.configPath], path.dirname(readerPath));
   }
 
   private async readAppleBooksFingerprint(): Promise<string> {
@@ -1556,6 +1739,17 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async runMindmap(trigger: RunTrigger, scope: RunScope = "current", notePath?: string): Promise<boolean> {
+    if (this.isRuntimeSetupBlocking()) {
+      const runtimeMessage = this.runtimeCoordinator?.getState().message ?? "Checking for a compatible Mindmap runtime.";
+      const message = `Mindmap ${trigger} run skipped: runtime setup is required. ${runtimeMessage}`;
+      this.schedulerState.lastMessage = message;
+      this.appendLog(message);
+      if (trigger === "manual") {
+        new Notice(message, 12000);
+      }
+      this.updateStatusBar();
+      return false;
+    }
     if (["deriving", "searching", "writing"].includes(this.webResearchActivity)) {
       const message = "Web Research is using the local model. Mindmap run skipped.";
       this.appendLog(message);
