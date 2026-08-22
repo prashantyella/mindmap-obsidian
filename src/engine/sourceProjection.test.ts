@@ -475,3 +475,30 @@ void test("projectSource hash changes when the text of a comment adjacent to a m
   ].join("\n");
   assert.notEqual(projectSource(identity, before).sourceHash, projectSource(identity, after).sourceHash);
 });
+
+void test("projectSource keeps a managed key's trailing same-line comment hash-relevant even though the key itself is excluded", () => {
+  const identity = identityFor("Notes/Example.md");
+  const before = ["---", "title: Example", "summary: old  # a genuine user note", "---", "Body.", ""].join("\n");
+  const after = ["---", "title: Example", "summary: old  # an edited user note", "---", "Body.", ""].join("\n");
+  const projectionBefore = projectSource(identity, before);
+  const projectionAfter = projectSource(identity, after);
+  assert.deepEqual(projectionBefore.excludedFrontmatterKeys, ["summary"]);
+  assert.match(projectionBefore.projectedFrontmatterJson, /a genuine user note/);
+  assert.doesNotMatch(projectionBefore.projectedFrontmatterJson, /^old$/m);
+  assert.notEqual(
+    projectionBefore.sourceHash,
+    projectionAfter.sourceHash,
+    "editing only the comment text on a managed key must change sourceHash",
+  );
+});
+
+void test("projectSource hash is stable across a managed key's own value changing when its trailing comment does not", () => {
+  const identity = identityFor("Notes/Example.md");
+  const before = ["---", "title: Example", "summary: old  # unrelated note", "---", "Body.", ""].join("\n");
+  const afterManagedRewrite = ["---", "title: Example", "summary: brand new generated summary  # unrelated note", "---", "Body.", ""].join("\n");
+  assert.equal(
+    projectSource(identity, before).sourceHash,
+    projectSource(identity, afterManagedRewrite).sourceHash,
+    "Mindmap regenerating only the managed summary value (comment untouched) must not change sourceHash",
+  );
+});

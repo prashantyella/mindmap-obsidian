@@ -43,7 +43,7 @@ def write_fixture(name: str, payload) -> None:
     }
     full_payload = {"provenance": provenance, **payload}
     path = FIXTURES_DIR / name
-    path.write_text(json.dumps(full_payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(full_payload, indent=2, sort_keys=False, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"wrote {path.relative_to(REPO_ROOT)}")
 
 
@@ -86,6 +86,37 @@ def frontmatter_fixture():
         "input": "---\ntitle: Example\ntags:\n  - a\n  - b\n---\nBody text.\n",
         "frontmatter": fm,
         "body": body,
+    })
+
+    text_c = "---\n# a comment\ntitle: Example  # trailing comment\nsummary: old\ntags:\n  - alpha\n---\nBody.\n"
+    updates_c = {"summary": "new", "tags": ["x"], "concepts": [], "related": []}
+    order_c = ["summary", "tags", "concepts", "related"]
+    cases.append({
+        "name": "update_frontmatter preserves comments",
+        "input": text_c,
+        "updates": updates_c,
+        "preferred_order": order_c,
+        "output": mindmap.update_frontmatter(text_c, updates_c, preferred_order=order_c),
+    })
+
+    text_d = "---\ntitle: \"Quoted Title\"\nauthor: 'Jane Doe'\ndesc: |\n  line one\n  line two\nsummary: old\n---\nBody.\n"
+    updates_d = {"summary": "new"}
+    cases.append({
+        "name": "update_frontmatter preserves quoted scalars and block literals",
+        "input": text_d,
+        "updates": updates_d,
+        "preferred_order": order_c,
+        "output": mindmap.update_frontmatter(text_d, updates_d, preferred_order=order_c),
+    })
+
+    text_e = "---\ntitle: Café Ünïcödé 日本語\nsummary: old\n---\nBody 内容.\n"
+    updates_e = {"summary": "new résumé"}
+    cases.append({
+        "name": "update_frontmatter preserves unicode",
+        "input": text_e,
+        "updates": updates_e,
+        "preferred_order": order_c,
+        "output": mindmap.update_frontmatter(text_e, updates_e, preferred_order=order_c),
     })
 
     write_fixture("frontmatter.json", {"cases": cases})

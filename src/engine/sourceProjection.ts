@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { NoteIdentityV1, SourceProjectionV1 } from "./contracts";
+import { parseFrontmatterKeyRanges, splitFrontmatter as splitFrontmatterCore } from "./frontmatterCore";
 
 /**
  * Frontmatter keys Mindmap writes as generated output (see
@@ -18,16 +19,13 @@ import type { NoteIdentityV1, SourceProjectionV1 } from "./contracts";
  */
 export const MANAGED_FRONTMATTER_KEYS: readonly string[] = ["summary", "tags", "concepts", "related"];
 
-const DEFAULT_MINDMAP_HEADING = "## Mindmap";
+export const DEFAULT_MINDMAP_HEADING = "## Mindmap";
 const LEGACY_MINDMAP_HEADINGS = new Set(["## related", "## mindmap"]);
 const MANAGED_CALLOUT_PATTERN = /^>\s*\[!.*\]-\s*(mindmap|related)\s*$/i;
 
 export const MANAGED_SECTION_RELATED = "related-section";
 
-interface SplitFrontmatter {
-  frontmatterRaw: string | null;
-  body: string;
-}
+type SplitFrontmatter = ReturnType<typeof splitFrontmatterCore>;
 
 /**
  * Mirrors `split_frontmatter` in python/mindmap.py: the frontmatter block is
@@ -36,136 +34,45 @@ interface SplitFrontmatter {
  * treated as body-only, exactly like the Python oracle.
  */
 function splitFrontmatter(text: string): SplitFrontmatter {
-  if (!text.startsWith("---")) {
-    return { frontmatterRaw: null, body: text };
-  }
-  const lines = text.split(/(?<=\n)/);
-  if (lines.length < 2) {
-    return { frontmatterRaw: null, body: text };
-  }
-  let offset = lines[0].length;
-  for (let index = 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line.trim() === "---") {
-      const frontmatterRaw = text.slice(lines[0].length, offset);
-      const body = text.slice(offset + line.length);
-      return { frontmatterRaw, body };
-    }
-    offset += line.length;
-  }
-  return { frontmatterRaw: null, body: text };
-}
-
-interface FrontmatterBlock {
-  key: string | null;
-  raw: string;
-}
-
-const TOP_LEVEL_KEY_PATTERN = /^([A-Za-z_][A-Za-z0-9_.-]*):(?:\s|$)/;
-/** A YAML continuation line: indented (space/tab), or an unindented block-sequence marker (`- item`) directly under its key. */
-const CONTINUATION_LINE_PATTERN = /^[ \t]|^-(?:\s|$)/;
-
-function stripLineTerminator(line: string): string {
-  return line.replace(/\r?\n$/, "");
-}
-
-function isBlankLine(line: string): boolean {
-  return stripLineTerminator(line) === "";
+  return splitFrontmatterCore(text);
 }
 
 /**
- * Splits a YAML frontmatter block into top-level key blocks (a key line
- * plus every following continuation line) preserving original order and
- * bytes. This is a projection helper only — it is not a general YAML
- * parser and makes no attempt at semantic fidelity beyond "which top-level
- * key does this line belong to," which is all a managed-key exclusion for
- * hashing needs. The full round-trip-preserving YAML engine is Checkpoint
- * 2's `FrontmatterEngine`.
+ * Removes Mindmap's managed frontmatter key blocks using the real YAML
+ * parser's key ranges (`parseFrontmatterKeyRanges`) rather than a line-based
+ * regex heuristic, so quoted keys, flow mappings, and other YAML shapes the
+ * old heuristic could misread are excluded/retained correctly. Byte ranges
+ * between/around managed keys (comments, blank lines, unrelated fields) are
+ * always copied verbatim.
  *
- * Two things are NOT treated as a continuation of the current key, even
- * immediately after it, and always survive as their own free-standing
- * block (`key: null`) so key exclusion can never remove them:
- *
- * - a column-0 comment or other non-blank column-0 line;
- * - a blank line that is not internal to a multi-line indented block —
- *   i.e. one whose next non-blank line is a new top-level key, a
- *   column-0 comment, or end of frontmatter.
- *
- * A blank line IS still absorbed into the current key's block when the
- * next non-blank line is itself an indented continuation (a block
- * scalar/sequence, e.g. `summary: |`, can legitimately contain blank
- * lines inside its own value). Without this lookahead, a blank line
- * inside a managed multi-line value would reset `current`, and the
- * indented text after it would leak into the projection as ordinary user
- * content — silently re-triggering processing every time Mindmap
- * regenerates that value with different line counts/wrapping.
- */
-function splitFrontmatterBlocks(frontmatterRaw: string): FrontmatterBlock[] {
-  const lines = frontmatterRaw.split(/(?<=\n)/);
-  const blocks: FrontmatterBlock[] = [];
-  let current: FrontmatterBlock | null = null;
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index];
-    const keyMatch = TOP_LEVEL_KEY_PATTERN.exec(line);
-    if (keyMatch) {
-      current = { key: keyMatch[1], raw: line };
-      blocks.push(current);
-      index += 1;
-      continue;
-    }
-    if (isBlankLine(line)) {
-      let runEnd = index;
-      while (runEnd < lines.length && isBlankLine(lines[runEnd])) {
-        runEnd += 1;
-      }
-      const nextLine = lines[runEnd];
-      const nextContinuesBlock = nextLine !== undefined && CONTINUATION_LINE_PATTERN.test(nextLine);
-      if (current && nextContinuesBlock) {
-        for (let cursor = index; cursor < runEnd; cursor += 1) {
-          current.raw += lines[cursor];
-        }
-        index = runEnd;
-        continue;
-      }
-      for (let cursor = index; cursor < runEnd; cursor += 1) {
-        blocks.push({ key: null, raw: lines[cursor] });
-      }
-      current = null;
-      index = runEnd;
-      continue;
-    }
-    if (current && CONTINUATION_LINE_PATTERN.test(line)) {
-      current.raw += line;
-      index += 1;
-      continue;
-    }
-    current = null;
-    blocks.push({ key: null, raw: line });
-    index += 1;
-  }
-  return blocks;
-}
-
-/**
- * Removes Mindmap's managed frontmatter key blocks. Returns the remaining
- * blocks (order preserved) and which managed keys were actually present.
+ * When the frontmatter fails to parse as YAML or its root is not a mapping,
+ * this fails safe for a read-only hash computation: nothing is excluded
+ * (the whole frontmatter block stays hash-relevant) rather than throwing —
+ * mutation's fail-closed behavior lives in `FrontmatterEngine`, not here.
  */
 function excludeManagedFrontmatterKeys(frontmatterRaw: string | null): { remainingRaw: string; excludedKeys: string[] } {
   if (frontmatterRaw === null) {
     return { remainingRaw: "", excludedKeys: [] };
   }
-  const blocks = splitFrontmatterBlocks(frontmatterRaw);
-  const excludedKeys: string[] = [];
-  const remaining: string[] = [];
-  for (const block of blocks) {
-    if (block.key !== null && MANAGED_FRONTMATTER_KEYS.includes(block.key)) {
-      excludedKeys.push(block.key);
-      continue;
-    }
-    remaining.push(block.raw);
+  const parsed = parseFrontmatterKeyRanges(frontmatterRaw);
+  if (!parsed.ok) {
+    return { remainingRaw: frontmatterRaw, excludedKeys: [] };
   }
-  return { remainingRaw: remaining.join(""), excludedKeys };
+  const excludedKeys: string[] = [];
+  let remaining = "";
+  let cursor = 0;
+  for (const range of parsed.ranges) {
+    if (!MANAGED_FRONTMATTER_KEYS.includes(range.key)) continue;
+    remaining += frontmatterRaw.slice(cursor, range.start);
+    excludedKeys.push(range.key);
+    // Only the `key: value` content itself is excluded/generated output. A trailing same-line
+    // comment (commentBoundary < end) is user-authored, byte-preserved, and stays hash-relevant --
+    // cursor stops at commentBoundary, not end, so [commentBoundary, end) rejoins `remaining` below
+    // (either via the next iteration's leading slice, or the final flush).
+    cursor = range.commentBoundary;
+  }
+  remaining += frontmatterRaw.slice(cursor);
+  return { remainingRaw: remaining, excludedKeys };
 }
 
 interface LineToken {
@@ -300,7 +207,7 @@ function stripCalloutAndOwnedDivider(tokens: LineToken[]): { tokens: LineToken[]
  * quote/source content is never touched here (see the module-level note on
  * `MANAGED_FRONTMATTER_KEYS`).
  */
-function stripManagedRelatedSection(body: string, heading: string = DEFAULT_MINDMAP_HEADING): { text: string; changed: boolean } {
+export function stripManagedRelatedSection(body: string, heading: string = DEFAULT_MINDMAP_HEADING): { text: string; changed: boolean } {
   const originalTokens = tokenizeLines(body);
   let tokens = originalTokens;
   let changed = false;

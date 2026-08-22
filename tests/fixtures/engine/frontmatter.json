@@ -64,6 +64,53 @@
         ]
       },
       "body": "Body text.\n"
+    },
+    {
+      "name": "update_frontmatter preserves comments",
+      "input": "---\n# a comment\ntitle: Example  # trailing comment\nsummary: old\ntags:\n  - alpha\n---\nBody.\n",
+      "updates": {
+        "summary": "new",
+        "tags": [
+          "x"
+        ],
+        "concepts": [],
+        "related": []
+      },
+      "preferred_order": [
+        "summary",
+        "tags",
+        "concepts",
+        "related"
+      ],
+      "output": "---\n# a comment\ntitle: Example  # trailing comment\nsummary: new\ntags:\n  - x\nconcepts: []\nrelated: []\n---\nBody.\n"
+    },
+    {
+      "name": "update_frontmatter preserves quoted scalars and block literals",
+      "input": "---\ntitle: \"Quoted Title\"\nauthor: 'Jane Doe'\ndesc: |\n  line one\n  line two\nsummary: old\n---\nBody.\n",
+      "updates": {
+        "summary": "new"
+      },
+      "preferred_order": [
+        "summary",
+        "tags",
+        "concepts",
+        "related"
+      ],
+      "output": "---\ntitle: \"Quoted Title\"\nauthor: 'Jane Doe'\ndesc: |\n  line one\n  line two\nsummary: new\n---\nBody.\n"
+    },
+    {
+      "name": "update_frontmatter preserves unicode",
+      "input": "---\ntitle: Café Ünïcödé 日本語\nsummary: old\n---\nBody 内容.\n",
+      "updates": {
+        "summary": "new résumé"
+      },
+      "preferred_order": [
+        "summary",
+        "tags",
+        "concepts",
+        "related"
+      ],
+      "output": "---\ntitle: Café Ünïcödé 日本語\nsummary: new résumé\n---\nBody 内容.\n"
     }
   ]
 }

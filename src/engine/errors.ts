@@ -6,7 +6,14 @@ export type EngineErrorCode =
   | "PATH_ABSOLUTE"
   | "PATH_TRAVERSAL"
   | "PATH_CONTROL_CHARACTER"
-  | "IDENTITY_INVALID";
+  | "IDENTITY_INVALID"
+  | "FRONTMATTER_MALFORMED"
+  | "SOURCE_STALE"
+  | "STORE_PATH_INVALID"
+  | "STORE_READ_FAILED"
+  | "STORE_WRITE_FAILED"
+  | "STORE_SCHEMA_INVALID"
+  | "VAULT_WRITE_FAILED";
 
 export class EngineError extends Error {
   readonly code: EngineErrorCode;
