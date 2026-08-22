@@ -32,6 +32,11 @@ function getPluginRuntimeRelativePath(configDir: string): string {
   return `${configDir}/plugins/${thisPluginId()}/python`;
 }
 
+// Intentionally not implementing getSettingDefinitions() (the declarative
+// settings-search API): adopting it would raise minAppVersion from 1.7.2 to
+// 1.13.0, which is a bigger compatibility trade-off than this release makes.
+// This is the one accepted obsidianmd/settings-tab/prefer-setting-definitions
+// warning in the official lint gate.
 export class MindmapSettingTab extends PluginSettingTab {
   private unsubscribeRuntimeSetup: (() => void) | null = null;
 
@@ -82,7 +87,7 @@ export class MindmapSettingTab extends PluginSettingTab {
 
     if (state.actions.includes("openMindmap")) {
       setting.addButton((button) => button
-        .setButtonText("Open Mindmap")
+        .setButtonText("Open mindmap")
         .setCta()
         .onClick(() => { void this.plugin.openMindmapView(); }));
     }
@@ -112,7 +117,7 @@ export class MindmapSettingTab extends PluginSettingTab {
     }
     if (state.actions.includes("openPythonDownload")) {
       setting.addButton((button) => button
-        .setButtonText("Open Python download page")
+        .setButtonText("Open python download page")
         .onClick(() => {
           this.plugin.openPythonRuntimeDownloadPage();
         }));
@@ -128,7 +133,7 @@ export class MindmapSettingTab extends PluginSettingTab {
 
     const readingMode = this.plugin.settings.readingMode;
     new Setting(this.containerEl)
-      .setName("Reading Mode")
+      .setName("Reading mode")
       .setDesc(readingMode === "reading"
         ? "Importing new Apple Books annotations and processing them automatically."
         : "Off. Turning this on previews what would import, then asks you to confirm before the first sync.")
@@ -156,7 +161,7 @@ export class MindmapSettingTab extends PluginSettingTab {
         }));
 
     new Setting(this.containerEl)
-      .setName("Automatic for Reading")
+      .setName("Automatic for reading")
       .setDesc(status.mode === "automatic-reading"
         ? `${status.automatic.attempted}/10 today · max 5/sync.${status.automatic.pauseReason === "daily-limit" ? " Daily limit reached; resumes after local midnight." : status.automatic.pauseReason ? ` Paused: ${status.automatic.pauseReason}.` : ""}`
         : "Requires Reading Mode and separate consent.")
@@ -209,12 +214,12 @@ export class MindmapSettingTab extends PluginSettingTab {
 
     new Setting(this.containerEl)
       .setName("Mode")
-      .setDesc("LaunchAgent continues when Obsidian is closed.")
+      .setDesc("Launchagent continues when Obsidian is closed.")
       .addDropdown((dropdown) => {
         dropdown
           .addOption("manual", "Manual")
           .addOption("interval", "Interval")
-          .addOption("launchAgent", "LaunchAgent")
+          .addOption("launchAgent", "Launchagent")
           .setValue(mode)
           .onChange(async (value) => {
             this.plugin.settings.schedulerMode = value === "launchAgent"
@@ -244,8 +249,8 @@ export class MindmapSettingTab extends PluginSettingTab {
 
     if (visibility.showDailyTime) {
       new Setting(this.containerEl)
-        .setName("Daily LaunchAgent time")
-        .setDesc("Runs all-scope apply Monday through Saturday.")
+        .setName("Daily launchagent time")
+        .setDesc("Runs all-scope apply monday through saturday.")
         .addText((text) => {
           text.setPlaceholder(String(DEFAULT_SETTINGS.launchAgentDailyHour)).setValue(String(this.plugin.settings.launchAgentDailyHour));
           bindCommitOnBlurOrEnter(text.inputEl, text.getValue(), async (value) => {
@@ -266,8 +271,8 @@ export class MindmapSettingTab extends PluginSettingTab {
 
     if (visibility.showWeeklyToggle) {
       new Setting(this.containerEl)
-        .setName("Weekly refresh LaunchAgent")
-        .setDesc("Runs all-scope refresh and apply on Sunday.")
+        .setName("Weekly refresh launchagent")
+        .setDesc("Runs all-scope refresh and apply on sunday.")
         .addToggle((toggle) => {
           toggle.setValue(this.plugin.settings.launchAgentWeeklyEnabled).onChange(async (value) => {
             this.plugin.settings.launchAgentWeeklyEnabled = value;
@@ -279,7 +284,7 @@ export class MindmapSettingTab extends PluginSettingTab {
 
     if (visibility.showWeeklyTime) {
       new Setting(this.containerEl)
-        .setName("Weekly LaunchAgent time")
+        .setName("Weekly launchagent time")
         .setDesc("Used only while the weekly refresh is enabled.")
         .addText((text) => {
           text.setPlaceholder(String(DEFAULT_SETTINGS.launchAgentWeeklyHour)).setValue(String(this.plugin.settings.launchAgentWeeklyHour));
@@ -348,7 +353,7 @@ export class MindmapSettingTab extends PluginSettingTab {
           });
       })
       .addButton((button) => {
-        button.setButtonText("Use OMLX").onClick(() => {
+        button.setButtonText("Use omlx").onClick(() => {
           this.saveProviderConfig({
             provider: "openai_compatible",
             baseUrl: "http://localhost:8000/v1",
@@ -398,7 +403,7 @@ export class MindmapSettingTab extends PluginSettingTab {
 
     new Setting(this.containerEl)
       .setName("Model thinking")
-      .setDesc("Disable for Qwen/OMLX JSON extraction.")
+      .setDesc("Disable for qwen/omlx JSON extraction.")
       .addToggle((toggle) => {
         toggle.setValue(status.enableThinking).onChange((value) => {
           this.saveProviderConfig({ enableThinking: value });

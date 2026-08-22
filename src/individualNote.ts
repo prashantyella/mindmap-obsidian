@@ -9,6 +9,7 @@ export interface IndividualNoteConfig {
   allScopeFolders: string[];
   minimumWords: number;
   runtimeFolder?: string;
+  configDir?: string;
 }
 
 export interface ActiveNoteEligibility {
@@ -34,14 +35,38 @@ function normalizeFolder(folder: string): string {
   return normalized || ".";
 }
 
-export function isSafeIndividualNotePath(relpath: string): boolean {
+/**
+ * True when `relpath` is exactly `folder` or nested under it. `folder` is
+ * normalized the same way as a scope folder (trimmed slashes, "." meaning
+ * "the whole vault", which never counts as a match here since Mindmap
+ * always has a real configDir/runtimeFolder to compare against).
+ */
+function isWithinFolder(relpath: string, folder: string): boolean {
+  const normalizedFolder = normalizeFolder(folder);
+  return normalizedFolder !== "."
+    && (relpath === normalizedFolder || relpath.startsWith(`${normalizedFolder}/`));
+}
+
+/**
+ * `configDir` is Obsidian's actual, possibly-user-renamed configuration
+ * folder (Vault#configDir) -- not a hardcoded ".obsidian", and not a
+ * blanket "any dot-prefixed folder" guess, since users can legitimately
+ * keep ordinary notes in a hidden-looking folder (e.g. ".journal"). When
+ * no configDir is available (a pure call site with no app/plugin context),
+ * this check is simply skipped rather than approximated.
+ */
+export function isSafeIndividualNotePath(relpath: string, configDir?: string): boolean {
   const normalized = normalizePath(relpath);
   if (!normalized || path.isAbsolute(relpath) || /^[A-Za-z]:[\\/]/.test(relpath) || relpath.startsWith("\\\\")) {
     return false;
   }
-  return !normalized.split("/").includes("..")
-    && !normalized.split("/").includes(".obsidian")
-    && normalized.toLowerCase().endsWith(".md");
+  if (normalized.split("/").includes("..")) {
+    return false;
+  }
+  if (configDir !== undefined && isWithinFolder(normalized, configDir)) {
+    return false;
+  }
+  return normalized.toLowerCase().endsWith(".md");
 }
 
 export function isWithinScope(relpath: string, folders: string[]): boolean {
@@ -144,10 +169,10 @@ export function assessActiveNote(
   if (!normalized.toLowerCase().endsWith(".md")) {
     return { path: normalized, eligible: false, reason: "The active file is not a Markdown note.", code: "not-markdown" };
   }
-  if (isRuntimeInternal(normalized, config.runtimeFolder)) {
+  if (isRuntimeInternal(normalized, config.runtimeFolder, config.configDir)) {
     return { path: normalized, eligible: false, reason: "Plugin/runtime internals cannot be processed as notes.", code: "runtime-internal" };
   }
-  if (!isSafeIndividualNotePath(normalized)) {
+  if (!isSafeIndividualNotePath(normalized, config.configDir)) {
     return { path: normalized, eligible: false, reason: "The active note path is not safe to process.", code: "unsafe-path" };
   }
   if (isGeneratedReadingIndex(normalized, text)) {
@@ -173,8 +198,12 @@ export function assessActiveNote(
   return { path: normalized, eligible: true, reason: "Active note is eligible for individual processing.", code: "eligible" };
 }
 
-function isRuntimeInternal(relpath: string, runtimeFolder = ".obsidian"): boolean {
-  const normalizedRuntimeFolder = normalizeFolder(runtimeFolder);
-  return normalizedRuntimeFolder !== "." && (relpath === normalizedRuntimeFolder || relpath.startsWith(`${normalizedRuntimeFolder}/`))
-    || relpath.split("/").includes(".obsidian");
+function isRuntimeInternal(relpath: string, runtimeFolder?: string, configDir?: string): boolean {
+  if (runtimeFolder !== undefined && isWithinFolder(relpath, runtimeFolder)) {
+    return true;
+  }
+  if (configDir !== undefined && isWithinFolder(relpath, configDir)) {
+    return true;
+  }
+  return false;
 }

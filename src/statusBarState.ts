@@ -334,7 +334,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       { title: "Runtime setup", label: true },
       {
         title: `Runtime: ${runtimeSetup.message}`,
-        icon: RUNTIME_SETUP_BUSY_PHASES.has(runtimeSetup.phase) ? "loader-circle" as IconName : "triangle-alert" as IconName,
+        icon: RUNTIME_SETUP_BUSY_PHASES.has(runtimeSetup.phase) ? "loader-circle" : "triangle-alert",
         disabled: true,
       },
       ...(runtimeSetup.canCancel ? [{ title: "Cancel runtime setup", icon: "x" as IconName, action: "cancelRuntimeSetup" as const }] : []),
@@ -410,7 +410,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     },
     {
       title: "Automatic for Reading" + (!automaticActive && blocking ? setupRequiredSuffix : ""),
-      icon: "sparkles" as IconName,
+      icon: "sparkles",
       checked: automaticActive,
       action: "toggleAutomaticReadingResearch",
       // Pausing (already active -> off) is always allowed; only *starting* automatic work is gated on runtime readiness.

@@ -48,7 +48,7 @@ export interface LiveRelatedResponse {
   hash: string;
   indexed: boolean;
   stale: boolean;
-  index_result: unknown | null;
+  index_result: unknown;
   related: LiveRelatedResult[];
 }
 

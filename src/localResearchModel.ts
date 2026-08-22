@@ -12,7 +12,13 @@ export interface LocalResearchConfig {
   timeoutMs?: number;
 }
 
-export function createConfiguredLocalResearchModel(config: LocalResearchConfig, fetchImpl: typeof fetch = fetch): LocalResearchModel {
+// No default: production callers must pass an explicit implementation
+// (requestUrlFetch from obsidianRequestUrlFetch.ts), since a bare global
+// `fetch` reference here is exactly what the official Obsidian plugin
+// guidelines flag (no-restricted-globals) -- this keeps the seam
+// provider-neutral and testable with a fake, without this module ever
+// needing to import "obsidian" itself.
+export function createConfiguredLocalResearchModel(config: LocalResearchConfig, fetchImpl: typeof fetch): LocalResearchModel {
   validateLocalEndpoint(config.baseUrl);
   if (!config.model) throw new WebResearchError("LOCAL_MODEL_UNAVAILABLE", "Configured local model is unavailable.");
   return {
@@ -50,7 +56,7 @@ async function complete(config: LocalResearchConfig, fetchImpl: typeof fetch, pr
     ? { model: config.model, stream: false, format: jsonMode ? "json" : undefined, options: typeof config.temperature === "number" ? { temperature: config.temperature } : undefined, messages: [{ role: "user", content: prompt }] }
     : { model: config.model, max_tokens: 800, temperature: config.temperature ?? 0.2, response_format: jsonMode ? { type: "json_object" } : undefined, chat_template_kwargs: config.chatTemplateKwargs, messages: [{ role: "user", content: prompt }] };
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.timeoutMs ?? 15_000);
+  const timeout = window.setTimeout(() => controller.abort(), config.timeoutMs ?? 15_000);
   try {
     const response = await fetchImpl(url, { method: "POST", headers: { "content-type": "application/json", ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}) }, body: JSON.stringify(body), signal: controller.signal });
     if (!response.ok) throw new WebResearchError("LOCAL_MODEL_UNAVAILABLE", "Configured local model is unavailable.");
@@ -64,5 +70,5 @@ async function complete(config: LocalResearchConfig, fetchImpl: typeof fetch, pr
     if (error instanceof WebResearchError) throw error;
     if (error instanceof Error && error.name === "AbortError") throw new WebResearchError("LOCAL_MODEL_TIMEOUT", "Configured local model timed out.");
     throw new WebResearchError("LOCAL_MODEL_NETWORK", "Configured local model is unavailable.");
-  } finally { clearTimeout(timeout); }
+  } finally { window.clearTimeout(timeout); }
 }

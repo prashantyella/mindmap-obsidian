@@ -12,13 +12,31 @@ import {
   minimumWordsForNote,
 } from "./individualNote";
 
-void test("individual note path validation rejects absolute, traversal, runtime, and non-markdown paths", () => {
+void test("individual note path validation rejects absolute, traversal, and non-markdown paths, and rejects runtime paths under a given configDir", () => {
   assert.equal(isSafeIndividualNotePath("Notes/valid.md"), true);
   assert.equal(isSafeIndividualNotePath("../outside.md"), false);
   assert.equal(isSafeIndividualNotePath("/vault/valid.md"), false);
   assert.equal(isSafeIndividualNotePath("C:\\vault\\valid.md"), false);
-  assert.equal(isSafeIndividualNotePath(".obsidian/plugins/mindmap-ai/runtime.md"), false);
+  assert.equal(isSafeIndividualNotePath(".obsidian/plugins/mindmap-ai/runtime.md", ".obsidian"), false);
   assert.equal(isSafeIndividualNotePath("Notes/valid.txt"), false);
+});
+
+void test("individual note path safety uses the real vault configDir, not a blanket dot-prefix guess", () => {
+  // Vault#configDir is user-configurable and may not be ".obsidian"; the
+  // exact configured root and its descendants must be rejected.
+  assert.equal(isSafeIndividualNotePath("Config/plugins/mindmap-ai/runtime.md", "Config"), false);
+  assert.equal(assessActiveNote("Config/plugins/mindmap-ai/runtime.md", "one two three four five", { allScopeFolders: ["."], minimumWords: 1, configDir: "Config" }).code, "runtime-internal");
+
+  // Users may legitimately keep ordinary notes in a hidden-looking folder
+  // (e.g. ".journal"); a dot-prefixed folder that is not the configured
+  // configDir must remain allowed.
+  assert.equal(isSafeIndividualNotePath(".journal/Note.md", "Config"), true);
+  assert.equal(assessActiveNote(".journal/Note.md", "one two three four five", { allScopeFolders: ["."], minimumWords: 1, configDir: "Config" }).eligible, true);
+
+  // Without a configDir at all (no app/plugin context), the check is
+  // skipped rather than approximated -- callers with no context available
+  // still get the traversal/absolute/extension checks.
+  assert.equal(isSafeIndividualNotePath(".journal/Note.md"), true);
 });
 
 void test("active non-Markdown files are rejected before cachedRead", async () => {
@@ -51,7 +69,7 @@ void test("active note scope and thresholds are explicit", () => {
   assert.equal(minimumWordsForNote(ordinary, 30), 30);
   assert.equal(minimumWordsForNote(annotation, 30), APPLE_BOOKS_ANNOTATION_MIN_WORDS);
   assert.equal(assessActiveNote("Other/note.md", ordinary, { allScopeFolders: ["Notes"], minimumWords: 1 }).code, "out-of-scope");
-  assert.equal(assessActiveNote(".obsidian/plugins/mindmap-ai/runtime.md", ordinary, { allScopeFolders: ["."], minimumWords: 1 }).code, "runtime-internal");
+  assert.equal(assessActiveNote(".obsidian/plugins/mindmap-ai/runtime.md", ordinary, { allScopeFolders: ["."], minimumWords: 1, configDir: ".obsidian" }).code, "runtime-internal");
   assert.equal(assessActiveNote("Notes/note.md", annotation, { allScopeFolders: ["Notes"], minimumWords: 30 }).code, "too-short");
   assert.equal(assessActiveNote("Notes/empty.md", "", { allScopeFolders: ["Notes"], minimumWords: 1 }).code, "too-short");
   assert.equal(assessActiveNote("Notes/note.md", `${annotation} seven eight`, { allScopeFolders: ["Notes"], minimumWords: 30 }).eligible, true);

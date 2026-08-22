@@ -3,6 +3,19 @@ import fs from "node:fs";
 import { isScopeSetupComplete, readScopeSelection, updateScopeSelection, type ScopeSelection } from "./onboarding";
 import type { ResolvedRuntime } from "./pathResolver";
 
+/**
+ * Safely stringifies a loosely-typed JSON config value. A plain
+ * `String(value)` on an object/array config field silently produces
+ * "[object Object]" instead of surfacing the misconfiguration, which is
+ * exactly what @typescript-eslint/no-base-to-string flags; only actual
+ * primitives are coerced, everything else falls back.
+ */
+export function coerceConfigString(value: unknown, fallback: string): string {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+    ? String(value)
+    : fallback;
+}
+
 export interface ScopeSetupStatus {
   complete: boolean;
   canManage: boolean;
@@ -133,12 +146,12 @@ export function getLlmProviderConfigStatus(runtime: ResolvedRuntime, canManageCo
     const templateKwargs = typeof config.llm_chat_template_kwargs === "object" && config.llm_chat_template_kwargs !== null && !Array.isArray(config.llm_chat_template_kwargs)
       ? config.llm_chat_template_kwargs as Record<string, unknown>
       : {};
-    const maxTokens = Number.parseInt(String(config.llm_max_tokens ?? DEFAULT_PROVIDER_CONFIG.maxTokens), 10);
+    const maxTokens = Number.parseInt(coerceConfigString(config.llm_max_tokens, String(DEFAULT_PROVIDER_CONFIG.maxTokens)), 10);
     return {
       provider,
-      baseUrl: String(config.llm_base_url ?? config.ollama_base_url ?? DEFAULT_PROVIDER_CONFIG.baseUrl),
-      model: String(config.llm_model ?? DEFAULT_PROVIDER_CONFIG.model),
-      apiKey: String(config.llm_api_key ?? ""),
+      baseUrl: coerceConfigString(config.llm_base_url, coerceConfigString(config.ollama_base_url, DEFAULT_PROVIDER_CONFIG.baseUrl)),
+      model: coerceConfigString(config.llm_model, DEFAULT_PROVIDER_CONFIG.model),
+      apiKey: coerceConfigString(config.llm_api_key, ""),
       maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : DEFAULT_PROVIDER_CONFIG.maxTokens,
       enableThinking: templateKwargs.enable_thinking === false ? false : true,
       canManage: true,

@@ -1,8 +1,8 @@
 import { assertSafeNoteArgument } from "./runArguments";
 
-export function isSafeManualResearchPath(notePath: string): boolean {
+export function isSafeManualResearchPath(notePath: string, configDir: string): boolean {
   try {
-    assertSafeNoteArgument(notePath);
+    assertSafeNoteArgument(notePath, configDir);
     return true;
   } catch {
     return false;

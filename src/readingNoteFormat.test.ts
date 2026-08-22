@@ -182,8 +182,14 @@ test("rejects an absolute related target", () => {
   assert.equal(relatedNoteWikilink("/Books/Apple Books/Author/Book/Annotations/Note.md"), undefined);
 });
 
-test("rejects a related target that points inside .obsidian", () => {
-  assert.equal(relatedNoteWikilink("Books/Apple Books/.obsidian/Note.md"), undefined);
+test("does not special-case a hidden-looking folder without a configDir to compare against", () => {
+  // relatedNoteWikilink is a pure helper with no app/plugin context (see
+  // its callers in appleBooksImport.ts), so it cannot know the vault's
+  // real configDir and must not guess based on a dot-prefixed name --
+  // users may legitimately keep notes under a hidden-looking folder.
+  // Traversal, absolute paths, and injection characters remain rejected
+  // regardless (checked elsewhere in this file).
+  assert.notEqual(relatedNoteWikilink("Books/Apple Books/.journal/Note.md"), undefined);
 });
 
 test("rejects a related target containing a control character", () => {

@@ -7,7 +7,6 @@ import type {
   LiveRelatedResponse,
   LookupRelatedResponse,
   SemanticHealth,
-  SemanticWorkerFailure,
   SemanticWorkerMethod,
   SemanticWorkerResponse,
 } from "./semanticTypes";
@@ -15,7 +14,7 @@ import type {
 interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
-  timer: NodeJS.Timeout;
+  timer: unknown;
   method: SemanticWorkerMethod;
 }
 
@@ -146,7 +145,7 @@ export class SemanticWorkerClient {
     const id = String(this.nextRequestId++);
     const payload = JSON.stringify({ id, method, params }) + "\n";
     return new Promise<TResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = window.setTimeout(() => {
         this.pending.delete(id);
         const error = new Error(`Mindmap semantic worker request timed out: ${method}`);
         reject(error);
@@ -154,7 +153,7 @@ export class SemanticWorkerClient {
         this.child?.kill();
       }, this.requestTimeoutMs);
       this.pending.set(id, {
-        resolve: resolve as (value: unknown) => void,
+        resolve,
         reject,
         timer,
         method,
@@ -163,7 +162,7 @@ export class SemanticWorkerClient {
         if (!error) {
           return;
         }
-        clearTimeout(timer);
+        window.clearTimeout(timer);
         this.pending.delete(id);
         reject(error);
       });
@@ -197,18 +196,18 @@ export class SemanticWorkerClient {
     if (!pending) {
       return;
     }
-    clearTimeout(pending.timer);
+    window.clearTimeout(pending.timer as ReturnType<typeof window.setTimeout>);
     this.pending.delete(message.id);
     if (message.ok) {
       pending.resolve(message.result);
       return;
     }
-    pending.reject(new Error((message as SemanticWorkerFailure).error));
+    pending.reject(new Error(message.error));
   }
 
   private rejectAll(error: Error): void {
     for (const [id, pending] of this.pending) {
-      clearTimeout(pending.timer);
+      window.clearTimeout(pending.timer as ReturnType<typeof window.setTimeout>);
       pending.reject(error);
       this.pending.delete(id);
     }

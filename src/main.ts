@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess, type ExecFileException } from "node:child_process";
 
 import { FileSystemAdapter, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 
@@ -18,6 +18,7 @@ import { classifyResearchTarget, completeAppleAnnotationResearchForNote, importA
 import { clearTransientAutomaticPause, createAutomaticResearchPolicy, createAutomaticResearchPolicyStore, loadAutomaticResearchPolicySafely, localResearchDay, type AutomaticResearchPolicyState, type AutomaticResearchPolicyStore } from "./automaticResearchPolicy";
 import { persistAutomaticResearchOutcome, runAutomaticResearch, selectSyncResearchCandidates } from "./automaticResearch";
 import { ExaResearchProvider } from "./exaResearchProvider";
+import { requestUrlFetch } from "./obsidianRequestUrlFetch";
 import { getExaCredential } from "./keychainCredential";
 import { createConfiguredLocalResearchModel } from "./localResearchModel";
 import { resolveLocalModelApiKey } from "./localModelApiKey";
@@ -33,6 +34,7 @@ import { createObsidianVaultApi } from "./readingVault";
 import { ReadingModeController, type ReadingHealth, type ReadingMode, type ReadingPreview } from "./readingMode";
 import { registerMindmapCommands } from "./pluginCommands";
 import {
+  coerceConfigString,
   getLlmProviderConfigStatus as resolveLlmProviderConfigStatus,
   getScopeSetupStatus as resolveScopeSetupStatus,
   saveLlmProviderConfig as writeLlmProviderConfig,
@@ -50,7 +52,7 @@ import { NO_ACTIVE_NOTE, type ActiveNoteEligibility } from "./individualNote";
 import { resolveActiveNoteEligibility } from "./individualNoteActions";
 import { confirmMindmapRun } from "./runConfirmModal";
 import { migrateLegacyPluginVaultRoot } from "./runtimeConfigMigration";
-import { ensureBundledRuntimeAssets } from "./runtimeAssets";
+import { ensureBundledRuntimeAssets, type BundledRuntimeAssets } from "./runtimeAssets";
 import { MindmapSemanticEnvironment, type SemanticEnvironmentStatus } from "./semanticEnvironment";
 import type { LiveRelatedResponse, LookupRelatedResponse } from "./semanticTypes";
 import { buildMindmapLocalGraphState, isMindmapLocalGraphLeaf } from "./localGraph";
@@ -84,7 +86,15 @@ import {
 import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./settings";
 import { MindmapSettingTab } from "./settingsTab";
 import { MindmapWorkspaceView, MINDMAP_VIEW_TYPE } from "./workspaceView";
-import { BUNDLED_RUNTIME_ASSETS } from "virtual:runtime-assets";
+import { BUNDLED_RUNTIME_ASSETS as UNTYPED_BUNDLED_RUNTIME_ASSETS } from "virtual:runtime-assets";
+
+// The "virtual:runtime-assets" specifier only resolves at bundle time (see
+// esbuild.config.mjs); its ambient declaration in runtime-assets.d.ts types
+// it correctly for plain tsc, but typescript-eslint's typed-linting program
+// cannot resolve a no-substitution ambient module the same way and reports
+// its export as an error type. Re-asserting through the declared type here
+// (not a rule suppression) restores the real, already-verified shape.
+const BUNDLED_RUNTIME_ASSETS = UNTYPED_BUNDLED_RUNTIME_ASSETS as unknown as BundledRuntimeAssets;
 import {
   configureStatusBarElement,
   renderStatusBarElement,
@@ -127,7 +137,7 @@ export default class MindmapPlugin extends Plugin {
   settings: MindmapSettings = DEFAULT_SETTINGS;
 
   private currentProcess: ChildProcess | null = null;
-  private schedulerTimer: ReturnType<typeof setTimeout> | null = null;
+  private schedulerTimer: unknown = null;
   private launchAgentManagedThisSession = false;
   private launchAgentSyncId = 0;
   private launchAgentHealthRefreshInFlight: Promise<void> | null = null;
@@ -194,7 +204,7 @@ export default class MindmapPlugin extends Plugin {
       display: "Mindmap AI",
       defaultMod: false,
     });
-    this.addRibbonIcon("orbit", "Open Mindmap", () => {
+    this.addRibbonIcon("orbit", "Open mindmap", () => {
       void this.openMindmapView();
     });
     this.addSettingTab(new MindmapSettingTab(this.app, this));
@@ -241,7 +251,8 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const savedData = (await this.loadData()) as Partial<MindmapSettings> | null | undefined;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, savedData ?? {});
     this.settings.readingMode = this.settings.readingMode === "reading" ? "reading" : "standard";
     this.settings.webResearchMode = this.settings.webResearchMode === "manual" || this.settings.webResearchMode === "automatic-reading" ? this.settings.webResearchMode : "off";
     this.webResearchActivity = this.settings.webResearchMode === "off" ? "off" : "ready";
@@ -431,7 +442,7 @@ export default class MindmapPlugin extends Plugin {
   }
 
   private openStatusMenu(event?: MouseEvent | KeyboardEvent): void {
-    openMindmapStatusMenu(this, event);
+    void openMindmapStatusMenu(this, event);
   }
 
   getStatusBarInternalState(): StatusBarInternalState {
@@ -500,7 +511,7 @@ export default class MindmapPlugin extends Plugin {
 
   async processReadingBacklog(): Promise<void> {
     if (this.isRuntimeSetupBlocking()) {
-      new Notice("Mindmap runtime setup is required before the Reading backlog can be processed. Finish setup in Settings.", 10000);
+      new Notice("Mindmap runtime setup is required before the reading backlog can be processed. Finish setup in settings.", 10000);
       return;
     }
     await this.readingModeController?.processBacklog();
@@ -512,7 +523,7 @@ export default class MindmapPlugin extends Plugin {
 
   async toggleWebResearchMode(): Promise<void> {
     if (this.webResearchPromise) {
-      new Notice("Web Research is already running; mode cannot change yet.", 8000);
+      new Notice("Web research is already running; mode cannot change yet.", 8000);
       return;
     }
     if (this.settings.webResearchMode === "manual") {
@@ -529,7 +540,7 @@ export default class MindmapPlugin extends Plugin {
         return;
       }
       this.updateStatusBar();
-      new Notice("Manual Web Research disabled.", 5000);
+      new Notice("Manual web research disabled.", 5000);
       return;
     }
     const confirmed = await confirmMindmapRun(this.app, {
@@ -561,12 +572,12 @@ export default class MindmapPlugin extends Plugin {
       return;
     }
     this.updateStatusBar();
-    new Notice("Manual Web Research enabled.", 5000);
+    new Notice("Manual web research enabled.", 5000);
   }
 
   async toggleAutomaticReadingResearch(): Promise<void> {
     if (this.webResearchPromise) {
-      new Notice("Web Research is already running; automatic mode cannot change yet.", 8000);
+      new Notice("Web research is already running; automatic mode cannot change yet.", 8000);
       return;
     }
     if (this.settings.webResearchMode === "automatic-reading") {
@@ -583,16 +594,16 @@ export default class MindmapPlugin extends Plugin {
         this.updateStatusBar();
         return;
       }
-      new Notice("Automatic Reading research paused; manual research remains available.", 5000);
+      new Notice("Automatic reading research paused; manual research remains available.", 5000);
       this.updateStatusBar();
       return;
     }
     if (this.settings.readingMode !== "reading") {
-      new Notice("Enable Reading Mode before automatic research.", 8000);
+      new Notice("Enable reading mode before automatic research.", 8000);
       return;
     }
     if (this.isRuntimeSetupBlocking()) {
-      new Notice("Mindmap runtime setup is required before automatic Reading research can be enabled.", 8000);
+      new Notice("Mindmap runtime setup is required before automatic reading research can be enabled.", 8000);
       return;
     }
     const confirmed = await confirmMindmapRun(this.app, {
@@ -625,16 +636,16 @@ export default class MindmapPlugin extends Plugin {
     }
     await this.refreshAutomaticResearchPolicyStatus();
     await this.syncReadingMode();
-    new Notice("Automatic Reading research enabled.", 5000);
+    new Notice("Automatic reading research enabled.", 5000);
   }
 
   async retryAutomaticResearch(): Promise<void> {
     if (!this.automaticResearchPolicyStore || this.settings.webResearchMode !== "automatic-reading" || this.readingModeController?.getMode() !== "reading") {
-      new Notice("Automatic research retry requires active Reading Mode.", 8000);
+      new Notice("Automatic research retry requires active reading mode.", 8000);
       return;
     }
     if (this.isRuntimeSetupBlocking()) {
-      new Notice("Mindmap runtime setup is required before automatic Reading research can retry.", 8000);
+      new Notice("Mindmap runtime setup is required before automatic reading research can retry.", 8000);
       return;
     }
     const day = localResearchDay(new Date());
@@ -687,11 +698,11 @@ export default class MindmapPlugin extends Plugin {
     }
     const file = this.app.workspace.getActiveFile();
     if (!file || file.extension.toLowerCase() !== "md") {
-      new Notice("Web Research requires a Markdown note.", 8000);
+      new Notice("Web research requires a Markdown note.", 8000);
       return;
     }
-    if (!isSafeManualResearchPath(file.path)) {
-      new Notice("Web Research cannot write to this note path.", 8000);
+    if (!isSafeManualResearchPath(file.path, this.app.vault.configDir)) {
+      new Notice("Web research cannot write to this note path.", 8000);
       return;
     }
     await this.researchFile(file, selected, false, "manual");
@@ -703,8 +714,8 @@ export default class MindmapPlugin extends Plugin {
       new Notice("Open an eligible Markdown note to research.", 8000);
       return;
     }
-    if (!isSafeManualResearchPath(file.path)) {
-      new Notice("Web Research cannot write to this note path.", 8000);
+    if (!isSafeManualResearchPath(file.path, this.app.vault.configDir)) {
+      new Notice("Web research cannot write to this note path.", 8000);
       return;
     }
     const text = prepareActiveNoteResearchInput(await this.app.vault.cachedRead(file), MAX_RESEARCH_INPUT_CHARS);
@@ -718,15 +729,15 @@ export default class MindmapPlugin extends Plugin {
   private async researchFile(file: TFile, text: string, reprocess: boolean, origin: "manual" | "automatic"): Promise<ResearchFileResult> {
     const readingActivity = this.readingModeController?.getHealth().activity;
     if (origin === "manual" && (readingActivity === "syncing" || readingActivity === "processing")) {
-      new Notice("Reading Mode is updating notes; try Web Research again when the sync finishes.", 8000);
+      new Notice("Reading mode is updating notes; try web research again when the sync finishes.", 8000);
       return { ok: false, code: "READING_BUSY", message: "Reading Mode is updating notes." };
     }
     if (this.currentProcess) {
-      if (origin === "manual") new Notice("Mindmap is already running. Web Research will not start.", 8000);
+      if (origin === "manual") new Notice("Mindmap is already running. Web research will not start.", 8000);
       return { ok: false, code: "MINDMAP_BUSY", message: "Mindmap is already running." };
     }
     if (this.webResearchPromise) {
-      if (origin === "manual") new Notice("Web Research is already running.", 8000);
+      if (origin === "manual") new Notice("Web research is already running.", 8000);
       return { ok: false, code: "RESEARCH_BUSY", message: "Web Research is already running." };
     }
     const work = this.runResearchFile(file, text, reprocess, origin);
@@ -736,7 +747,7 @@ export default class MindmapPlugin extends Plugin {
 
   private async runResearchFile(file: TFile, text: string, reprocess: boolean, origin: "manual" | "automatic"): Promise<ResearchFileResult> {
     if (this.settings.webResearchMode === "off") {
-      new Notice("Enable Manual Web Research before starting a request.", 8000);
+      new Notice("Enable manual web research before starting a request.", 8000);
       return { ok: false, code: "RESEARCH_DISABLED", message: "Web Research is disabled." };
     }
     this.webResearchActivity = "deriving";
@@ -772,7 +783,7 @@ export default class MindmapPlugin extends Plugin {
       this.updateStatusBar();
 
       if (classification === "companion" && trackedAnnotationId && this.readingStateStore) {
-        const result = await collectResearch({ provider: new ExaResearchProvider(credential), model }, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
+        const result = await collectResearch({ provider: new ExaResearchProvider(credential, requestUrlFetch), model }, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
         if (!result) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
         const companionContent = renderCompanionResearchContent(result);
         if (!companionContent) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
@@ -788,7 +799,7 @@ export default class MindmapPlugin extends Plugin {
       } else {
         this.webResearchActivity = "writing";
         this.updateStatusBar();
-        const result = await researchNote({ provider: new ExaResearchProvider(credential), model, vault }, note, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
+        const result = await researchNote({ provider: new ExaResearchProvider(credential, requestUrlFetch), model, vault }, note, { text, title: file.basename, maxChars: MAX_RESEARCH_INPUT_CHARS });
         if (!result) throw new WebResearchError("NO_USABLE_SOURCES", "Web Research returned no usable sources.");
       }
 
@@ -801,7 +812,7 @@ export default class MindmapPlugin extends Plugin {
         this.webResearchLastError = "Research was saved; Mindmap processing is retryable.";
         new Notice(this.webResearchLastError, 8000);
       } else {
-        if (origin === "manual") new Notice("Web Research saved.", 5000);
+        if (origin === "manual") new Notice("Web research saved.", 5000);
       }
       return { ok: true };
     } catch (error) {
@@ -824,12 +835,12 @@ export default class MindmapPlugin extends Plugin {
       : undefined;
     const model = createConfiguredLocalResearchModel({
       provider,
-      baseUrl: String(config.llm_base_url ?? config.ollama_base_url ?? ""),
-      model: String(config.llm_model ?? ""),
+      baseUrl: coerceConfigString(config.llm_base_url, coerceConfigString(config.ollama_base_url, "")),
+      model: coerceConfigString(config.llm_model, ""),
       ...(resolveLocalModelApiKey(config, process.env) ? { apiKey: resolveLocalModelApiKey(config, process.env) } : {}),
       ...(chatTemplateKwargs ? { chatTemplateKwargs } : {}),
       temperature: 0.2,
-    });
+    }, requestUrlFetch);
     return { credential, model };
   }
 
@@ -854,7 +865,7 @@ export default class MindmapPlugin extends Plugin {
       type: MINDMAP_VIEW_TYPE,
       active: true,
     });
-    this.app.workspace.revealLeaf(leaf);
+    await this.app.workspace.revealLeaf(leaf);
   }
 
   async openMindmapLookup(): Promise<void> {
@@ -1090,7 +1101,7 @@ export default class MindmapPlugin extends Plugin {
   }
 
   buildRuntimeCommand(extraArgs: string[] = []): { command: string; args: string[]; cwd: string } {
-    assertAllowedPluginArgs(extraArgs);
+    assertAllowedPluginArgs(extraArgs, this.app.vault.configDir);
     const runtime = this.getResolvedRuntime();
     return {
       command: runtime.command.command,
@@ -1214,12 +1225,12 @@ export default class MindmapPlugin extends Plugin {
         stdio: ["ignore", "pipe", "pipe"],
       });
 
-      child.stdout.on("data", (chunk) => {
-        stdout += chunk.toString();
+      child.stdout.on("data", (chunk: unknown) => {
+        stdout += String(chunk);
       });
 
-      child.stderr.on("data", (chunk) => {
-        const text = chunk.toString();
+      child.stderr.on("data", (chunk: unknown) => {
+        const text = String(chunk);
         stderr += text;
         for (const line of splitLogLines(text)) {
           this.appendLog(`[preflight][stderr] ${line}`);
@@ -1342,7 +1353,7 @@ export default class MindmapPlugin extends Plugin {
           : "## Mindmap";
       const statePathValue = typeof config.state_path === "string"
         ? config.state_path
-        : ".obsidian/plugins/mindmap-ai/data/state.json";
+        : `${this.app.vault.configDir}/plugins/${this.manifest.id}/data/state.json`;
       const pythonStatePath = path.isAbsolute(statePathValue)
         ? statePathValue
         : path.resolve(this.getRuntimeContext().vaultRoot, statePathValue);
@@ -1416,7 +1427,7 @@ export default class MindmapPlugin extends Plugin {
       this.schedulerState.lastMessage = "LaunchAgent mode enabled. Scheduled runs use the plugin runtime.";
       this.appendLog(this.schedulerState.launchAgentMessage);
       this.updateStatusBar();
-      this.refreshLaunchAgentHealth();
+      void this.refreshLaunchAgentHealth();
     } catch (error) {
       if (syncId !== this.launchAgentSyncId) {
         return;
@@ -1497,9 +1508,9 @@ export default class MindmapPlugin extends Plugin {
 
   private async execLaunchctl(args: string[], ignoreFailure: boolean): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      execFile("/bin/launchctl", args, (error) => {
+      execFile("/bin/launchctl", args, (error: ExecFileException | null) => {
         if (error && !ignoreFailure) {
-          reject(error);
+          reject(new Error(error.message));
           return;
         }
         resolve();
@@ -1522,7 +1533,7 @@ export default class MindmapPlugin extends Plugin {
 
   private clearSchedulerTimer(): void {
     if (this.schedulerTimer) {
-      clearTimeout(this.schedulerTimer);
+      window.clearTimeout(this.schedulerTimer as ReturnType<typeof window.setTimeout>);
       this.schedulerTimer = null;
     }
   }
@@ -1536,7 +1547,7 @@ export default class MindmapPlugin extends Plugin {
     }
 
     const delayMs = Math.max(0, nextRunAt - fromMs);
-    this.schedulerTimer = setTimeout(() => {
+    this.schedulerTimer = window.setTimeout(() => {
       void this.handleScheduledTick();
     }, delayMs);
   }
@@ -1907,16 +1918,16 @@ export default class MindmapPlugin extends Plugin {
       const stdoutLines: string[] = [];
       const stderrLines: string[] = [];
 
-      child.stdout.on("data", (chunk) => {
-        for (const line of splitLogLines(chunk.toString())) {
+      child.stdout.on("data", (chunk: unknown) => {
+        for (const line of splitLogLines(String(chunk))) {
           stdoutLines.push(line);
           this.appendLog(`[stdout] ${line}`);
           this.updateRunStatusFromLine(line);
         }
       });
 
-      child.stderr.on("data", (chunk) => {
-        for (const line of splitLogLines(chunk.toString())) {
+      child.stderr.on("data", (chunk: unknown) => {
+        for (const line of splitLogLines(String(chunk))) {
           stderrLines.push(line);
           this.appendLog(`[stderr] ${line}`);
           this.updateRunStatusFromLine(line);

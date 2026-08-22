@@ -198,8 +198,8 @@ export function extractLegacyInlineResearch(text: string): LegacyExtractionResul
   if (startPositions.length !== 1 || endPositions.length !== 1) {
     throw new Error("Managed research markers are incomplete or duplicated.");
   }
-  const startIdx = startPositions[0]!;
-  const endIdx = endPositions[0]!;
+  const startIdx = startPositions[0];
+  const endIdx = endPositions[0];
   if (endIdx < startIdx + RESEARCH_START.length) {
     throw new Error("Managed research markers are in the wrong order.");
   }
@@ -219,7 +219,7 @@ export function extractLegacyInlineResearch(text: string): LegacyExtractionResul
   let convertedSources = false;
   const cleaned: string[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i]!.trim();
+    const trimmed = lines[i].trim();
     if (hasStructuralHeading && !strippedResearch && i === firstNonblank && trimmed === "## Research") {
       strippedResearch = true;
       continue;
@@ -229,7 +229,7 @@ export function extractLegacyInlineResearch(text: string): LegacyExtractionResul
       cleaned.push("## Sources");
       continue;
     }
-    cleaned.push(lines[i]!);
+    cleaned.push(lines[i]);
   }
 
   let start = 0;

@@ -1,10 +1,10 @@
 {
   "id": "mindmap-ai",
   "name": "Mindmap AI",
-  "version": "0.2.0",
-  "minAppVersion": "1.5.12",
-  "description": "Desktop-first plugin that orchestrates the Mindmap Python engine.",
+  "version": "0.2.1",
+  "minAppVersion": "1.7.2",
+  "description": "Summarize notes, suggest tags and links, and research Apple Books highlights with a local, private AI workflow.",
   "author": "yella",
-  "authorUrl": "",
+  "authorUrl": "https://github.com/prashantyella",
   "isDesktopOnly": true
 }

@@ -28,8 +28,8 @@ export function startAppleBooksReaderProcess(options: {
   // shorthand does not preserve. Node has no such requirement, so this only
   // surfaces at runtime inside Obsidian.
   const timer = options.timer ?? {
-    setTimeout: (callback: () => void, delayMs: number) => setTimeout(callback, delayMs),
-    clearTimeout: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    setTimeout: (callback: () => void, delayMs: number) => window.setTimeout(callback, delayMs),
+    clearTimeout: (handle: unknown) => window.clearTimeout(handle as ReturnType<typeof window.setTimeout>),
   };
   const timeoutMs = options.timeoutMs ?? APPLE_BOOKS_READER_TIMEOUT_MS;
   const child = options.spawn();
@@ -38,30 +38,39 @@ export function startAppleBooksReaderProcess(options: {
   let settled = false;
   let timeout: unknown = null;
   const promise = new Promise<unknown>((resolve, reject) => {
-    const settle = (outcome: "resolve" | "reject", value: unknown): void => {
+    // Split resolve/reject rather than one `settle(outcome, value: unknown)`
+    // helper so the reject path is statically typed to accept only an
+    // Error, satisfying @typescript-eslint/prefer-promise-reject-errors.
+    const settleResolve = (value: unknown): void => {
       if (settled) return;
       settled = true;
       if (timeout !== null) timer.clearTimeout(timeout);
-      if (outcome === "resolve") resolve(value); else reject(value);
+      resolve(value);
+    };
+    const settleReject = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout !== null) timer.clearTimeout(timeout);
+      reject(error);
     };
     child.stdout.on("data", (chunk) => { stdout += String(chunk); });
     child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-    child.on("error", (error) => settle("reject", error instanceof Error ? error : new Error("Apple Books reader failed.")));
+    child.on("error", (error) => settleReject(error instanceof Error ? error : new Error("Apple Books reader failed.")));
     child.on("close", (code) => {
       if (code !== 0) {
-        settle("reject", new Error(stderr.trim() || `Apple Books reader exited with status ${String(code)}.`));
+        settleReject(new Error(stderr.trim() || `Apple Books reader exited with status ${String(code)}.`));
         return;
       }
       const line = stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean).pop();
       if (!line) {
-        settle("reject", new Error(stderr.trim() || "Apple Books reader did not produce structured output."));
+        settleReject(new Error(stderr.trim() || "Apple Books reader did not produce structured output."));
         return;
       }
-      try { settle("resolve", JSON.parse(line) as unknown); } catch { settle("reject", new Error("Apple Books reader output was not valid JSON.")); }
+      try { settleResolve(JSON.parse(line) as unknown); } catch { settleReject(new Error("Apple Books reader output was not valid JSON.")); }
     });
     timeout = timer.setTimeout(() => {
       child.kill();
-      settle("reject", new Error(APPLE_BOOKS_READER_TIMEOUT_MESSAGE));
+      settleReject(new Error(APPLE_BOOKS_READER_TIMEOUT_MESSAGE));
     }, timeoutMs);
   });
   return { child, promise };

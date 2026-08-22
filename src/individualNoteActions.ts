@@ -38,11 +38,13 @@ export async function resolveActiveNoteEligibility(plugin: MindmapPlugin): Promi
           ? [rawConfig.notes_path]
           : [];
     const text = await plugin.app.vault.cachedRead(activeFile);
-    const runtimeFolder = path.join(plugin.app.vault.configDir, "plugins", plugin.manifest.id);
+    const configDir = plugin.app.vault.configDir;
+    const runtimeFolder = path.join(configDir, "plugins", plugin.manifest.id);
     return assessActiveNote(activeFile.path, text, {
       allScopeFolders,
       minimumWords: Number(rawConfig.min_note_words ?? 30) || 0,
       runtimeFolder,
+      configDir,
     });
   } catch (error) {
     return {

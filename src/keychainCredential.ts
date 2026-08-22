@@ -30,7 +30,7 @@ function runSecurityCommand(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("/usr/bin/security", args, { stdio: ["ignore", "pipe", "ignore"] });
     let stdout = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stdout.on("data", (chunk: unknown) => { stdout += String(chunk); });
     child.on("error", reject);
     child.on("close", (code) => code === 0 ? resolve(stdout) : reject(new Error("security failed")));
   });

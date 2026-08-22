@@ -58,7 +58,7 @@ function extractPhrase(text: string): string {
 function capitalizeFirst(text: string): string {
   const characters = Array.from(text);
   if (characters.length === 0) return text;
-  characters[0] = (characters[0] as string).toUpperCase();
+  characters[0] = characters[0].toUpperCase();
   return characters.join("");
 }
 

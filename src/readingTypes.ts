@@ -205,10 +205,14 @@ export function createEmptyReadingState(): ReadingState {
 
 export function isSafeReadingPath(value: string): boolean {
   const normalized = value.replace(/\\/g, "/");
+  // Obsidian's configuration folder is user-configurable (Vault#configDir),
+  // not always literally ".obsidian", but every config folder is still
+  // dot-prefixed by convention -- rejecting any hidden/dot-prefixed segment
+  // (which also subsumes the ".."/"." checks) is strictly broader (never
+  // narrower) than a single hardcoded name.
   return normalized.startsWith(`${READING_ROOT}/`)
     && !normalized.startsWith("/")
-    && !normalized.split("/").some((part) => part === ".." || part === "." || part.length === 0)
-    && !normalized.split("/").includes(".obsidian")
+    && !normalized.split("/").some((part) => part.length === 0 || part.startsWith("."))
     && normalized.toLowerCase().endsWith(".md");
 }
 
@@ -248,10 +252,10 @@ export function parseReadingState(value: unknown): ReadingState {
       ...(validResearchPath ? { researchPath: validResearchPath } : {}),
     };
   }
-  const hasInitialImportProperty = "initialImportCompletedAt" in (value as Record<string, unknown>);
+  const hasInitialImportProperty = "initialImportCompletedAt" in value;
   let initialImportCompletedAt: string | null;
   if (hasInitialImportProperty) {
-    const raw = (value as Record<string, unknown>).initialImportCompletedAt;
+    const raw = value.initialImportCompletedAt;
     initialImportCompletedAt = typeof raw === "string" && raw.trim() ? raw : null;
   } else {
     initialImportCompletedAt = typeof value.lastSyncAt === "string" ? value.lastSyncAt : null;

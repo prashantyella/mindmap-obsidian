@@ -144,8 +144,11 @@ const changelog = fs.readFileSync("CHANGELOG.md", "utf8");
 if (!changelog.includes("## Unreleased")) {
   throw new Error("CHANGELOG.md must include an Unreleased section");
 }
-if (!new RegExp(`^## ${manifest.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`, "m").test(changelog)) {
-  throw new Error(`CHANGELOG.md must include a section for ${manifest.version}`);
+{
+  const versionHeadingPattern = new RegExp(`^## ${manifest.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`, "m");
+  if (!versionHeadingPattern.test(changelog)) {
+    throw new Error(`CHANGELOG.md must include a section for ${manifest.version}.`);
+  }
 }
 for (const requirementsPath of ["python/requirements.txt", "dist/python/requirements.txt"]) {
   const lines = fs.readFileSync(requirementsPath, "utf8").split(/\r?\n/).filter((line) => line.trim().length > 0);
@@ -167,10 +170,59 @@ if (!distMindmapSource.includes("--runtime-preflight") || !distMindmapSource.inc
 }
 
 const workflow = fs.readFileSync(".github/workflows/release.yml", "utf8");
-for (const asset of ["release/main.js", "release/manifest.json", "release/styles.css", "release/mindmap-python.zip"]) {
-  if (!workflow.includes(asset)) {
-    throw new Error(`Release workflow must publish ${asset}`);
+const RELEASE_ASSETS = ["release/main.js", "release/manifest.json", "release/styles.css"];
+
+if (!/persist-credentials:\s*false/.test(workflow)) {
+  throw new Error("Release workflow checkout must keep persist-credentials: false.");
+}
+
+if (!/id-token:\s*write/.test(workflow) || !/attestations:\s*write/.test(workflow)) {
+  throw new Error("Release workflow must grant id-token: write and attestations: write permissions for build attestation.");
+}
+
+{
+  const attestIndex = workflow.indexOf("actions/attest@v4");
+  if (attestIndex === -1) {
+    throw new Error("Release workflow must attest release assets with actions/attest@v4.");
   }
+  const prepareIndex = workflow.indexOf("npm run release:prepare");
+  const publishIndex = workflow.indexOf("softprops/action-gh-release");
+  if (prepareIndex === -1 || attestIndex <= prepareIndex) {
+    throw new Error("Release workflow must attest assets after preparing them (npm run release:prepare).");
+  }
+  if (publishIndex === -1 || attestIndex >= publishIndex) {
+    throw new Error("Release workflow must attest assets before publishing the GitHub release.");
+  }
+  const attestStepEnd = workflow.indexOf("\n\n", attestIndex);
+  const attestStep = workflow.slice(attestIndex, attestStepEnd === -1 ? publishIndex : attestStepEnd);
+  for (const asset of RELEASE_ASSETS) {
+    if (!attestStep.includes(asset)) {
+      throw new Error(`Release workflow's attest step must cover ${asset} as a subject-path.`);
+    }
+  }
+}
+
+{
+  const publishIndex = workflow.indexOf("softprops/action-gh-release");
+  if (publishIndex === -1) {
+    throw new Error("Release workflow must publish the GitHub release via softprops/action-gh-release.");
+  }
+  const publishStep = workflow.slice(publishIndex);
+  for (const asset of RELEASE_ASSETS) {
+    if (!publishStep.includes(asset)) {
+      throw new Error(`Release workflow must publish ${asset}`);
+    }
+  }
+  if (publishStep.includes("release/mindmap-python.zip")) {
+    throw new Error("Official release must publish only main.js, manifest.json, and styles.css -- mindmap-python.zip must not be a published release asset.");
+  }
+  if (!/generate_release_notes:\s*true/.test(publishStep) && !publishStep.includes("body_path")) {
+    throw new Error("Release workflow must make the release non-empty via generate_release_notes: true (preferred) or an explicit body_path.");
+  }
+}
+
+if (!workflow.includes("npm run lint:obsidian")) {
+  throw new Error("Release workflow must run the official Obsidian plugin guidelines lint gate (npm run lint:obsidian).");
 }
 
 if (!fs.existsSync(".github/workflows/ci.yml")) {
@@ -180,13 +232,27 @@ const ciWorkflow = fs.readFileSync(".github/workflows/ci.yml", "utf8");
 if (!/on:[\s\S]*pull_request/.test(ciWorkflow)) {
   throw new Error("CI workflow must trigger on pull_request.");
 }
-for (const step of ["npm ci", "npm run lint", "npm run typecheck", "npm test", "npm run build", "npm run validate"]) {
+for (const step of ["npm ci", "npm run lint", "npm run lint:obsidian", "npm run typecheck", "npm test", "npm run build", "npm run validate"]) {
   if (!ciWorkflow.includes(step)) {
     throw new Error(`CI workflow must run: ${step}`);
   }
 }
 if (!/discover -s tests/.test(ciWorkflow)) {
   throw new Error("CI workflow must run the Python test suite.");
+}
+
+if (!manifest.authorUrl || manifest.authorUrl.trim().length === 0) {
+  throw new Error("manifest.json must set a non-empty authorUrl.");
+}
+
+{
+  const readmeTitleMatch = readme.match(/^#\s+(.+)$/m);
+  if (!readmeTitleMatch) {
+    throw new Error("README.md must start with an H1 title.");
+  }
+  if (readmeTitleMatch[1].trim() !== manifest.name) {
+    throw new Error(`README.md H1 (${readmeTitleMatch[1].trim()}) must exactly match manifest.json name (${manifest.name}).`);
+  }
 }
 
 console.log("Release validation passed.");

@@ -83,8 +83,8 @@ interface PendingServiceDeps {
   statMtime(targetPath: string): Promise<number | null>;
   log(message: string): void;
   now(): number;
-  setTimer(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
-  clearTimer(handle: ReturnType<typeof setTimeout>): void;
+  setTimer(callback: () => void, delayMs: number): unknown;
+  clearTimer(handle: unknown): void;
   onUpdated?(): void;
 }
 
@@ -352,7 +352,7 @@ export class PendingIndex {
 }
 
 export class DebouncedRefreshController {
-  private handle: ReturnType<typeof setTimeout> | null = null;
+  private handle: unknown = null;
 
   constructor(
     private readonly setTimer: PendingServiceDeps["setTimer"],
@@ -528,7 +528,7 @@ export class PendingScanService {
       return { config: this.configCache.config, reloaded: false };
     }
 
-    const rawConfig = JSON.parse(await this.deps.readTextFile(configPath));
+    const rawConfig: unknown = JSON.parse(await this.deps.readTextFile(configPath));
     const config = parsePendingConfig(rawConfig, configPath, this.context);
     this.configCache = { mtimeMs, config };
     return { config, reloaded: true };
@@ -572,8 +572,8 @@ export function createPendingScanService(
     statMtime: defaultFsDeps.statMtime,
     log,
     now: () => Date.now(),
-    setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
-    clearTimer: (handle) => clearTimeout(handle),
+    setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+    clearTimer: (handle) => window.clearTimeout(handle as ReturnType<typeof window.setTimeout>),
     onUpdated,
   });
 }

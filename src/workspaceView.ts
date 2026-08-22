@@ -367,7 +367,7 @@ export class MindmapWorkspaceView extends ItemView {
       attr: {
         type: "search",
         placeholder: "Ask across notes",
-        "aria-label": "Search Mindmap connections",
+        "aria-label": "Search connections",
         value: this.lookupState.query,
       },
     });
@@ -575,12 +575,10 @@ export class MindmapWorkspaceView extends ItemView {
 
   private renderHeatmap(container: HTMLElement, candidates: RelatedCandidate[]): void {
     const heatmap = container.createDiv({ cls: "mindmap-heatmap" });
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("class", "mindmap-heatmap-chart");
-    svg.setAttribute("viewBox", "0 0 320 300");
-    svg.setAttribute("role", "img");
-    svg.setAttribute("aria-label", "Mindmap relevance signals for related notes");
-    heatmap.appendChild(svg);
+    const svg = heatmap.createSvg("svg", {
+      cls: "mindmap-heatmap-chart",
+      attr: { viewBox: "0 0 320 300", role: "img", "aria-label": "Mindmap relevance signals for related notes" },
+    });
     const tooltip = heatmap.createDiv({ cls: "mindmap-heatmap-tooltip" });
 
     const chart = {
@@ -632,26 +630,31 @@ export class MindmapWorkspaceView extends ItemView {
     };
 
     for (let level = 0; level <= chart.maxLevel; level += 1) {
-      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-      line.setAttribute("class", "mindmap-heatmap-grid");
-      line.setAttribute("x1", String(chart.left));
-      line.setAttribute("x2", String(chart.width - chart.right));
-      line.setAttribute("y1", String(yFor(level)));
-      line.setAttribute("y2", String(yFor(level)));
-      svg.appendChild(line);
+      svg.createSvg("line", {
+        cls: "mindmap-heatmap-grid",
+        attr: {
+          x1: String(chart.left),
+          x2: String(chart.width - chart.right),
+          y1: String(yFor(level)),
+          y2: String(yFor(level)),
+        },
+      });
     }
 
     for (const [index, candidate] of candidates.entries()) {
       const x = xFor(index);
-      const marker = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-      marker.setAttribute("class", `mindmap-heatmap-hit${candidate.path === this.expandedPath ? " is-selected" : ""}`);
-      marker.setAttribute("x", String(x - plotWidth / Math.max(candidates.length - 1, 1) / 2));
-      marker.setAttribute("y", String(chart.top));
-      marker.setAttribute("width", String(plotWidth / Math.max(candidates.length - 1, 1)));
-      marker.setAttribute("height", String(plotHeight));
-      marker.setAttribute("tabindex", "0");
-      marker.setAttribute("role", "button");
-      marker.setAttribute("aria-label", `Select ${candidate.title}`);
+      const marker = svg.createSvg("rect", {
+        cls: `mindmap-heatmap-hit${candidate.path === this.expandedPath ? " is-selected" : ""}`,
+        attr: {
+          x: String(x - plotWidth / Math.max(candidates.length - 1, 1) / 2),
+          y: String(chart.top),
+          width: String(plotWidth / Math.max(candidates.length - 1, 1)),
+          height: String(plotHeight),
+          tabindex: "0",
+          role: "button",
+          "aria-label": `Select ${candidate.title}`,
+        },
+      });
       marker.addEventListener("click", () => {
         this.expandedPath = candidate.path;
         this.render();
@@ -664,7 +667,6 @@ export class MindmapWorkspaceView extends ItemView {
         }
       });
       bindTooltip(marker, candidate);
-      svg.appendChild(marker);
     }
 
     const metrics = candidates[0]?.heatmap ?? [];
@@ -673,26 +675,28 @@ export class MindmapWorkspaceView extends ItemView {
         const cell = candidate.heatmap.find((candidateMetric) => candidateMetric.key === metric.key);
         return `${xFor(index)},${yFor(cell?.level ?? 0)}`;
       });
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-      path.setAttribute("class", `mindmap-heatmap-line is-${metric.key}`);
-      path.setAttribute("points", points.join(" "));
-      svg.appendChild(path);
+      svg.createSvg("polyline", {
+        cls: `mindmap-heatmap-line is-${metric.key}`,
+        attr: { points: points.join(" ") },
+      });
     }
 
     for (const [index, candidate] of candidates.entries()) {
       const x = xFor(index);
       for (const metric of candidate.heatmap) {
-        const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        point.setAttribute("class", `mindmap-heatmap-point is-${metric.key}${candidate.path === this.expandedPath ? " is-selected" : ""}`);
-        point.setAttribute("cx", String(x));
-        point.setAttribute("cy", String(yFor(metric.level)));
-        point.setAttribute("r", candidate.path === this.expandedPath ? "2.6" : "2");
+        const point = svg.createSvg("circle", {
+          cls: `mindmap-heatmap-point is-${metric.key}${candidate.path === this.expandedPath ? " is-selected" : ""}`,
+          attr: {
+            cx: String(x),
+            cy: String(yFor(metric.level)),
+            r: candidate.path === this.expandedPath ? "2.6" : "2",
+          },
+        });
         point.addEventListener("click", () => {
           this.expandedPath = candidate.path;
           this.render();
         });
         bindTooltip(point, candidate);
-        svg.appendChild(point);
       }
     }
   }
@@ -854,7 +858,7 @@ export class MindmapWorkspaceView extends ItemView {
     const rows = Array.from(container.querySelectorAll(".mindmap-sidebar-card"));
     if (rows.length > 0) {
       rows.forEach((row, index) => {
-        if (!(row instanceof HTMLElement)) {
+        if (!row.instanceOf(HTMLElement)) {
           return;
         }
         const path = row.dataset.path;
@@ -876,7 +880,7 @@ export class MindmapWorkspaceView extends ItemView {
     }
 
     if (expansionChanged && nextExpandedPath !== null && nextExpandedPath !== undefined) {
-      const expandedRow = rows.find((row): row is HTMLElement => row instanceof HTMLElement && row.dataset.path === nextExpandedPath);
+      const expandedRow = rows.find((row): row is HTMLElement => row.instanceOf(HTMLElement) && row.dataset.path === nextExpandedPath);
       const detail = expandedRow?.querySelector(".mindmap-sidebar-detail");
       if (detail instanceof HTMLElement) {
         animate(detail, { opacity: [0, 1], y: [-4, 0] }, { duration: 0.16, ease: "easeOut" });
@@ -916,13 +920,13 @@ export class MindmapWorkspaceView extends ItemView {
 
   private findCandidateRow(container: HTMLElement, path: string): HTMLElement | null {
     return Array.from(container.querySelectorAll(".mindmap-sidebar-card"))
-      .find((row): row is HTMLElement => row instanceof HTMLElement && row.dataset.path === path) ?? null;
+      .find((row): row is HTMLElement => row.instanceOf(HTMLElement) && row.dataset.path === path) ?? null;
   }
 
   private captureCardPositions(container: HTMLElement): Map<string, DOMRect> {
     const positions = new Map<string, DOMRect>();
     for (const row of Array.from(container.querySelectorAll(".mindmap-sidebar-card"))) {
-      if (!(row instanceof HTMLElement) || !row.dataset.path) {
+      if (!row.instanceOf(HTMLElement) || !row.dataset.path) {
         continue;
       }
       positions.set(row.dataset.path, row.getBoundingClientRect());
@@ -1099,7 +1103,7 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   private getFrontmatter(file: TFile): Frontmatter {
-    return this.app.metadataCache.getFileCache(file)?.frontmatter as Frontmatter | undefined ?? {};
+    return this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
   }
 
   private resolveRelatedFile(path: string, sourcePath: string): TFile | null {

@@ -154,7 +154,7 @@ export class ScopeManager {
 
   private renderScopeSummary(container: HTMLElement, label: string, field: keyof ScopeSelection, paths: string[]): void {
     const section = container.createDiv({ cls: "mindmap-scope-summary" });
-    section.createEl("div", { cls: "mindmap-scope-summary-label", text: label });
+    section.createDiv({ cls: "mindmap-scope-summary-label", text: label });
     const chips = section.createDiv({ cls: "mindmap-scope-chip-row" });
     if (paths.length === 0) {
       chips.createSpan({ cls: "mindmap-muted", text: "None" });

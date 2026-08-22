@@ -9,6 +9,26 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.2.1
+
+### Changed
+- Standard/Reading mode selection is now explicit and idempotent: switching to Standard stops in-flight Reading watcher/debounce/queued work and prevents any later processing of it, switching to the already-active mode is a no-op, and a failed mode save rolls back cleanly instead of leaving the plugin in a partial state.
+- The status-bar menu is distilled into compact Mode / Run / Reading (when active) / Research / Navigation groups with a single top recovery row, replacing the previous denser menu.
+- Settings is reorganized into a linear flow — Overview, Reading and Research, Scope, Schedule, Local AI, Troubleshooting — with a single Overview readiness indicator, bounded and secret-redacted diagnostics export, and steadier save-on-blur behavior for scope/provider fields.
+- Raised `minAppVersion` to `1.7.2` (matching the `Workspace.ensureSideLeaf`/`Workspace.revealLeaf` API requirement flagged by `obsidianmd/no-unsupported-api`) and added the corresponding `versions.json` entry.
+- README `H1` now matches the manifest `name` (`Mindmap AI`) exactly, and its Requirements section reflects the new minimum Obsidian version.
+- `manifest.json` description rewritten as concise, user-facing product copy, and `authorUrl` now points at the repository owner's GitHub profile.
+- The official Community Plugins release now publishes only `main.js`, `manifest.json`, and `styles.css`; `mindmap-python.zip` is no longer attached to the GitHub release.
+- Release workflow now attests `release/main.js`, `release/manifest.json`, and `release/styles.css` with `actions/attest` (build provenance) before publishing, and generates its release notes automatically instead of shipping an empty release body.
+- Production network access for Web Research now goes through Obsidian's `requestUrl` instead of the global `fetch`, and hardcoded `.obsidian`-style path checks were generalized to any hidden/dot-prefixed path segment, ahead of the official Community Plugins review guidelines.
+
+### Added
+- Reading annotation notes and their generated book indexes are now excluded from ordinary pending/current/all scans (TypeScript and Python) so a Reading vault doesn't inflate day-to-day scope; explicit annotation targets and the daily maintenance run still include them where appropriate.
+- Pinned `eslint-plugin-obsidianmd` as a dev dependency and a separate `npm run lint:obsidian` gate (scoped to shipped `src`, excluding tests), run in both CI and the release workflow alongside the project's own lint gate.
+
+### Fixed
+- Official Community Plugins lint findings across the shipped source (unsafe timers, promise/error handling, DOM/SVG creation, `instanceof` usage, unnecessary type assertions, and UI copy casing) were remediated with behavior-preserving changes; the one remaining accepted warning (`settings-tab/prefer-setting-definitions`) is documented in `src/settingsTab.ts`.
+
 ## 0.2.0
 
 ### Added

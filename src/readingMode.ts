@@ -1,6 +1,5 @@
 import {
   annotationIsTooShort,
-  type AppleBooksReaderPayload,
   validateAppleBooksReaderPayload,
 } from "./readingTypes";
 
@@ -75,10 +74,10 @@ export interface ReadingModeDependencies {
 
 const defaultClock: ReadingModeClock = {
   now: () => Date.now(),
-  setInterval: (callback, delayMs) => setInterval(callback, delayMs),
-  clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
-  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  setInterval: (callback, delayMs) => window.setInterval(callback, delayMs),
+  clearInterval: (handle) => window.clearInterval(handle as ReturnType<typeof window.setInterval>),
+  setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => window.clearTimeout(handle as ReturnType<typeof window.setTimeout>),
 };
 
 export class ReadingModeController {
@@ -243,7 +242,7 @@ export class ReadingModeController {
       await this.deps.waitForManualResearch?.();
       if (this.mode !== "reading") return;
       const rawPayload = await this.deps.readPayload();
-      const payload = validateAppleBooksReaderPayload(rawPayload) as AppleBooksReaderPayload;
+      const payload = validateAppleBooksReaderPayload(rawPayload);
       const tooShortCount = payload.annotations.filter(annotationIsTooShort).length;
       const result = await this.deps.importPayload(payload);
       if (this.mode !== "reading") {
