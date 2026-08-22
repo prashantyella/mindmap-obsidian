@@ -1,0 +1,185 @@
+{
+  "provenance": {
+    "fixtureSchemaVersion": 1,
+    "pythonOracleFile": "python/apple_books_reader.py",
+    "pythonOracleSha256": "17d4e8dc1ddec272f8907ad8cd49042ba9cd0d025063af678204ca63f1a8b84d",
+    "generator": "tools/parity/generate_apple_books_fixtures.py"
+  },
+  "cases": [
+    {
+      "name": "joined schema, no options",
+      "shape": "joined",
+      "options": {},
+      "result": {
+        "version": 1,
+        "status": "success",
+        "annotations": [
+          {
+            "annotation_id": "aeannotation:uuid-1",
+            "quote": "A useful highlighted passage.",
+            "user_note": "A personal note.",
+            "book_title": "The Quiet Book",
+            "author": "A. Reader",
+            "chapter": "Chapter One",
+            "location": "42",
+            "created_at": "2004-03-03T09:46:40Z",
+            "modified_at": "2004-03-03T09:48:20Z"
+          }
+        ],
+        "diagnostics": [],
+        "count": 1,
+        "sources": [
+          {
+            "role": "annotations",
+            "filename": "AEAnnotation.sqlite",
+            "schema": "ZAEANNOTATION",
+            "snapshot": "sqlite-backup-memory",
+            "wal_present": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "joined schema, malformed",
+      "shape": "joined",
+      "options": {
+        "malformed": true
+      },
+      "result": {
+        "version": 1,
+        "status": "malformed_rows",
+        "annotations": [],
+        "diagnostics": [
+          {
+            "severity": "warning",
+            "code": "APPLE_BOOKS_MALFORMED_ROWS",
+            "message": "Skipped 1 malformed Apple Books annotation row(s).",
+            "guidance": "Valid annotations remain usable. Retry after Apple Books finishes updating; if the issue persists, report an unsupported schema."
+          }
+        ],
+        "count": 0,
+        "skipped_rows": 1,
+        "sources": [
+          {
+            "role": "annotations",
+            "filename": "AEAnnotation.sqlite",
+            "schema": "ZAEANNOTATION",
+            "snapshot": "sqlite-backup-memory",
+            "wal_present": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "joined schema, partial",
+      "shape": "joined",
+      "options": {
+        "partial": true
+      },
+      "result": {
+        "version": 1,
+        "status": "partial",
+        "annotations": [
+          {
+            "annotation_id": "aeannotation:uuid-1",
+            "quote": "A useful highlighted passage.",
+            "user_note": "A personal note.",
+            "book_title": "The Quiet Book",
+            "author": "A. Reader",
+            "chapter": "Chapter One",
+            "location": "42",
+            "created_at": "2004-03-03T09:46:40Z",
+            "modified_at": "2004-03-03T09:48:20Z"
+          }
+        ],
+        "diagnostics": [
+          {
+            "severity": "warning",
+            "code": "APPLE_BOOKS_MALFORMED_ROWS",
+            "message": "Skipped 1 malformed Apple Books annotation row(s).",
+            "guidance": "Valid annotations remain usable. Retry after Apple Books finishes updating; if the issue persists, report an unsupported schema."
+          }
+        ],
+        "count": 1,
+        "skipped_rows": 1,
+        "sources": [
+          {
+            "role": "annotations",
+            "filename": "AEAnnotation.sqlite",
+            "schema": "ZAEANNOTATION",
+            "snapshot": "sqlite-backup-memory",
+            "wal_present": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "asset-enriched schema with library enrichment",
+      "shape": "asset-enriched",
+      "options": {},
+      "result": {
+        "version": 1,
+        "status": "success",
+        "annotations": [
+          {
+            "annotation_id": "aeannotation:10",
+            "quote": "A second schema passage.",
+            "user_note": null,
+            "book_title": "The Other Book",
+            "author": "B. Writer",
+            "chapter": "Part II",
+            "location": "88",
+            "created_at": "2007-05-04T19:33:20Z",
+            "modified_at": "2007-05-04T19:33:30Z"
+          }
+        ],
+        "diagnostics": [],
+        "count": 1,
+        "sources": [
+          {
+            "role": "annotations",
+            "filename": "AEAnnotation.sqlite",
+            "schema": "ZANNOTATION",
+            "snapshot": "sqlite-backup-memory",
+            "wal_present": false
+          },
+          {
+            "role": "library",
+            "filename": "BKLibrary.sqlite",
+            "schema": "ZBKLIBRARYASSET",
+            "snapshot": "sqlite-backup-memory",
+            "wal_present": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "unsupported schema",
+      "shape": "unsupported",
+      "options": {},
+      "result": {
+        "version": 1,
+        "status": "unsupported_schema",
+        "annotations": [],
+        "diagnostics": [
+          {
+            "severity": "error",
+            "code": "APPLE_BOOKS_SCHEMA_UNSUPPORTED",
+            "message": "Apple Books annotation schema is not recognized.",
+            "guidance": "Configure a supported AEAnnotation database and retry."
+          }
+        ],
+        "count": 0,
+        "sources": [
+          {
+            "role": "annotations",
+            "filename": "AEAnnotation.sqlite",
+            "schema": "unknown",
+            "snapshot": "sqlite-backup-memory",
+            "wal_present": false
+          }
+        ]
+      }
+    }
+  ]
+}
