@@ -7,6 +7,7 @@ import { MAX_MANIFEST_SHARD_ROW_COUNT } from "./indexManifest";
 import { encodeOverlayContainer } from "./overlayCodec";
 import {
   deleteOverlay,
+  deleteOverlayIfSnapshotMatches,
   isOwnedOverlayFileName,
   listOverlayPrefixes,
   overlayFileName,
@@ -267,4 +268,121 @@ void test("writeUpsertOverlay enforces the OVERLAY_METADATA_JSON_MAX_BYTES cap o
   const fs = new FakeIndexFs();
   const hugePath = `${"A/".repeat(400)}Note.md`; // pushes the identity's canonicalPath, and thus metadata JSON, well past the cap
   await assert.rejects(() => writeUpsertOverlay(fs, "/root", upsertInput(hugePath)), OverlayStoreError);
+});
+
+void test("(final-closure requirement 1) deleteOverlayIfSnapshotMatches: a stale {version, fingerprint} snapshot never deletes a REPLACEMENT overlay that reused the same version number after a delete reset it back to 1", async () => {
+  const fs = new FakeIndexFs();
+  const identity = stableNoteIdentity(canonicalizePath("A.md"));
+  const fileName = overlayFileName(identity);
+
+  const first = await writeUpsertOverlay(fs, "/root", upsertInput("A.md", { sourceHash: "a".repeat(64) }));
+  assert.equal(first.version, 1);
+  const staleSnapshot = { version: first.version, fingerprint: first.fingerprint };
+
+  // The overlay is incorporated into a generation and deleted (as compaction would do) -- version
+  // resets back to 1 for a brand-new overlay at the same identity.
+  await deleteOverlay(fs, "/root", identity);
+  const second = await writeUpsertOverlay(fs, "/root", upsertInput("A.md", { sourceHash: "b".repeat(64) }));
+  assert.equal(second.version, 1, "version legitimately resets to 1 for the new overlay");
+  assert.notEqual(second.fingerprint, staleSnapshot.fingerprint, "different content must produce a different fingerprint even at the same version");
+
+  // A caller still holding the STALE snapshot (version 1, old fingerprint) must never delete this
+  // new, unrelated overlay that happens to share the same version number.
+  const deleted = await deleteOverlayIfSnapshotMatches(fs, "/root", fileName, staleSnapshot.version, staleSnapshot.fingerprint);
+  assert.equal(deleted, false, "a version-only match must not be enough -- the fingerprint must also match");
+  const survivor = await readOverlayPrefix(fs, "/root", identity);
+  assert.ok(survivor, "the new overlay must survive untouched");
+  assert.equal(survivor?.sourceHash, "b".repeat(64));
+
+  // The CORRECT current snapshot does delete it.
+  const deletedCorrectly = await deleteOverlayIfSnapshotMatches(fs, "/root", fileName, second.version, second.fingerprint);
+  assert.equal(deletedCorrectly, true);
+  assert.equal(await readOverlayPrefix(fs, "/root", identity), null);
+});
+
+void test("(final-closure requirement 1) deleteOverlayIfSnapshotMatches returns false (never throws) for an already-deleted overlay, and is safely re-callable", async () => {
+  const fs = new FakeIndexFs();
+  const identity = stableNoteIdentity(canonicalizePath("A.md"));
+  const fileName = overlayFileName(identity);
+  const written = await writeUpsertOverlay(fs, "/root", upsertInput("A.md"));
+  await deleteOverlay(fs, "/root", identity);
+  const result = await deleteOverlayIfSnapshotMatches(fs, "/root", fileName, written.version, written.fingerprint);
+  assert.equal(result, false);
+});
+
+void test("OverlayPrefixRecord.fingerprint is stable across independent reads of the same unchanged overlay, and changes when the note vector content changes at the SAME version", async () => {
+  const fs = new FakeIndexFs();
+  const identity = stableNoteIdentity(canonicalizePath("A.md"));
+  await writeUpsertOverlay(fs, "/root", upsertInput("A.md", { noteVector: Float32Array.from([1, 2, 3]) }));
+  const readA = await readOverlayPrefix(fs, "/root", identity);
+  const readB = await readOverlayPrefix(fs, "/root", identity);
+  assert.equal(readA?.fingerprint, readB?.fingerprint, "reading the same unchanged overlay twice must produce the identical fingerprint");
+  assert.ok(readA?.fingerprint && /^[0-9a-f]{64}$/.test(readA.fingerprint));
+});
+
+void test("(acceptance guard 2) two upserts for the same identity with identical source/model/note-vector/version but DIFFERENT chunk vectors produce DISTINCT fingerprints -- the fingerprint alone can never mistake one for a stale replacement of the other", async () => {
+  const fs = new FakeIndexFs();
+  const identity = stableNoteIdentity(canonicalizePath("A.md"));
+
+  const first = await writeUpsertOverlay(fs, "/root", upsertInput("A.md", { chunkVectors: [Float32Array.from([1, 0, 0])] }));
+  assert.equal(first.version, 1);
+
+  // Reset the version back to 1 (deleteOverlay's documented version-reset-on-delete design),
+  // then write an upsert with the SAME source/model/note vector/version, but different chunks.
+  await deleteOverlay(fs, "/root", identity);
+  const second = await writeUpsertOverlay(fs, "/root", upsertInput("A.md", { chunkVectors: [Float32Array.from([0, 0, 1]), Float32Array.from([0, 1, 0])] }));
+  assert.equal(second.version, 1, "precondition: both writes must share the exact same version number");
+
+  assert.notEqual(first.fingerprint, second.fingerprint, "distinct chunk-vector content must always be reflected in a distinct fingerprint, even at identical version/source/model/note-vector");
+
+  // And the two writes' own mutationIds must differ (the actual source of the distinction).
+  assert.notEqual(first.mutationId, second.mutationId);
+});
+
+void test("(last-contract guard 3) writeUpsertOverlay rejects an invalid test-injected mutationId override BEFORE encoding/writing -- zero write, prior overlay (if any) untouched", async () => {
+  const fs = new FakeIndexFs();
+  const identity = stableNoteIdentity(canonicalizePath("A.md"));
+  const first = await writeUpsertOverlay(fs, "/root", upsertInput("A.md"));
+  const fileName = `/root/${overlayFileName(identity)}`;
+  const containerBefore = fs.binaryFiles.get(fileName);
+  assert.ok(containerBefore);
+
+  for (const badMutationId of ["", "has a space", "unicode-☃", "x".repeat(129)]) {
+    await assert.rejects(() => writeUpsertOverlay(fs, "/root", upsertInput("A.md", { mutationId: badMutationId })), OverlayStoreError);
+  }
+
+  // Zero write: the prior overlay's container bytes and version are completely untouched.
+  const containerAfter = fs.binaryFiles.get(fileName);
+  assert.deepEqual(containerAfter, containerBefore);
+  const survivingRead = await readOverlayPrefix(fs, "/root", identity);
+  assert.equal(survivingRead?.version, first.version);
+  assert.equal(survivingRead?.mutationId, first.mutationId);
+});
+
+void test("(last-contract guard 3) writeTombstoneOverlay rejects an invalid test-injected mutationId override BEFORE encoding/writing -- zero write", async () => {
+  const fs = new FakeIndexFs();
+  const identity = stableNoteIdentity(canonicalizePath("A.md"));
+  await writeUpsertOverlay(fs, "/root", upsertInput("A.md"));
+  const fileName = `/root/${overlayFileName(identity)}`;
+  const containerBefore = fs.binaryFiles.get(fileName);
+
+  await assert.rejects(() => writeTombstoneOverlay(fs, "/root", { identity, mutationId: "has a space" }), OverlayStoreError);
+
+  const containerAfter = fs.binaryFiles.get(fileName);
+  assert.deepEqual(containerAfter, containerBefore, "an invalid override must never reach the tombstone write either");
+  const survivingRead = await readOverlayPrefix(fs, "/root", identity);
+  assert.equal(survivingRead?.operation, "upsert", "the prior upsert must still be in place -- no tombstone was written");
+});
+
+void test("(last-contract guard 3) a VALID test-injected mutationId override on both upsert and tombstone round-trips through the exact same parser rule", async () => {
+  const fs = new FakeIndexFs();
+  const identity = stableNoteIdentity(canonicalizePath("A.md"));
+  const written = await writeUpsertOverlay(fs, "/root", upsertInput("A.md", { mutationId: "deterministic-test-id-1" }));
+  assert.equal(written.mutationId, "deterministic-test-id-1");
+  const read = await readOverlayPrefix(fs, "/root", identity);
+  assert.equal(read?.mutationId, "deterministic-test-id-1");
+
+  await deleteOverlay(fs, "/root", identity);
+  const tombstoned = await writeTombstoneOverlay(fs, "/root", { identity, mutationId: "deterministic-test-id-2" });
+  assert.equal(tombstoned.mutationId, "deterministic-test-id-2");
 });

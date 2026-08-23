@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { CanonicalPath, NoteIdentityV1 } from "../engine/contracts";
 import { compareScored, CosineIndexError, dotProduct, MAX_RANKING_LIMIT, normalizeVector } from "./cosineIndex";
 import { identityKey, type NoteRowMetadataV1 } from "./generationMetadata";
@@ -14,14 +16,16 @@ import {
 } from "./generationStore";
 import type { IndexFs } from "./indexFs";
 import {
-  deleteOverlay,
+  deleteOverlayIfSnapshotMatches,
   listOverlayPrefixes,
+  overlayFileName,
   OverlayStoreError,
   readOverlayFull,
   writeTombstoneOverlay,
   writeUpsertOverlay,
   type OverlayPrefixRecord,
 } from "./overlayStore";
+import type { VectorIndexManifestV1 } from "./vectorTypes";
 import {
   BUDGET_DISK_BYTES,
   BUDGET_STEADY_STATE_MEMORY_BYTES,
@@ -260,6 +264,9 @@ export interface UpsertNoteInput {
  * against a lightweight in-process queue: at most one runs at a time,
  * each waiting for the previous to settle (succeed OR fail) before
  * starting. `queryRelated` deliberately does not go through this queue.
+ * See `sharedMutationQueueFor` -- every `IndexStore` over the same
+ * (fs, root) pair shares exactly ONE instance of this class, never one
+ * per `IndexStore` instance.
  */
 export class IndexMutationQueue {
   private tail: Promise<void> = Promise.resolve();
@@ -474,13 +481,363 @@ function assertResourceBudget(
   }
 }
 
+/**
+ * Everything `compact()` needs to build a new generation from the current
+ * committed view, WITHOUT yet touching `current.json` or deleting any
+ * overlay -- the read-only planning half of compaction. Exported (alongside
+ * `finalizeCompaction`) so a durable, phase-checkpointed caller (the
+ * Checkpoint 7 job engine's rebuild job) can persist a phase transition
+ * between "generation built" and "pointer switched" without re-implementing
+ * this exact base+overlay merge/streaming logic a second time.
+ */
+export interface CompactionPlan {
+  dimension: number;
+  embeddingModel: string;
+  notes: GenerationInputNote[];
+  /** The overlay snapshot this plan was built from; passed back to `finalizeCompaction` so it deletes exactly these overlays and no overlay written after planning. */
+  overlaysSnapshot: OverlayPrefixRecord[];
+  /** The current-pointer generation id this plan was built against, or `null` for an initial build with no base generation yet -- captured so a durable caller (the rebuild job) can later detect "the pointer has since moved on to something newer than what I planned against" (Checkpoint 7 final-closure requirement 3). */
+  baseGenerationId: number | null;
+  /** A bounded fingerprint of the base generation's own manifest (`null` iff `baseGenerationId` is `null`) -- see `manifestArtifactFingerprint`. */
+  baseFingerprint: string | null;
+}
+
+export async function planCompaction(fs: IndexFs, root: string): Promise<CompactionPlan> {
+  const generationId = await loadCurrentGenerationId(fs, root);
+  const generation = generationId === null ? null : await loadGeneration(fs, root, generationId);
+  const overlaysSnapshot = await loadOverlayPrefixesOrThrow(fs, root);
+  const baseGenerationId = generationId;
+  const baseFingerprint = generation ? manifestArtifactFingerprint(generation.manifest) : null;
+
+  let dimension: number | undefined = generation?.manifest.dimension;
+  let embeddingModel: string | undefined = generation?.manifest.embeddingModel;
+  if (dimension === undefined || embeddingModel === undefined) {
+    const anyUpsert = overlaysSnapshot.find((o) => o.operation === "upsert" && o.dimension !== undefined);
+    if (!anyUpsert) {
+      throw new IndexStoreError(
+        "cannot compact: no base generation exists and no pending upsert overlay provides a dimension/model. Create an initial generation explicitly via buildGeneration + switchCurrentGeneration with an explicit dimension/embeddingModel first.",
+      );
+    }
+    if (anyUpsert.dimension === undefined || anyUpsert.embeddingModel === undefined) {
+      throw new IndexStoreError("cannot compact: matching upsert overlay is missing its dimension/embeddingModel (unreachable for a valid upsert record).");
+    }
+    dimension = anyUpsert.dimension;
+    embeddingModel = anyUpsert.embeddingModel;
+  }
+
+  const shadow = buildShadowInfo(overlaysSnapshot);
+  const notes: GenerationInputNote[] = [];
+
+  // Streaming source, base side: at most ONE base shard's decoded chunk matrix is ever
+  // cached/resident at a time. `buildGeneration` calls each note's `loadChunkVectors()` in
+  // its own OUTPUT-shard-plan order (which can interleave notes from different INPUT/base
+  // shards) -- this single-slot cache means consecutive notes sharing the same base shard
+  // reuse the one already-loaded matrix, and switching to a note from a different base shard
+  // simply replaces the cached slot (never holds two base shards at once).
+  const baseShardCache: { shardId: string | null; shard: { matrix: VectorMatrix; offsets: ChunkShardNoteOffset[] } | null } = { shardId: null, shard: null };
+  async function loadBaseNoteChunkVectors(row: NoteRowMetadataV1): Promise<Float32Array[]> {
+    if (!row.shardId) return [];
+    if (baseShardCache.shardId !== row.shardId) {
+      baseShardCache.shard = await (generation as NonNullable<typeof generation>).loadShard(row.shardId);
+      baseShardCache.shardId = row.shardId;
+    }
+    const shard = baseShardCache.shard as NonNullable<typeof baseShardCache.shard>;
+    const offset = shard.offsets.find((o) => identityKey(o.identity) === identityKey(row.identity));
+    if (!offset) return [];
+    // subarray, not slice: buildGeneration normalizes and copies each row into the new
+    // generation's shard/note matrix synchronously, right after this resolves and before the
+    // next note's loadChunkVectors() call could ever evict/replace baseShardCache -- so a view
+    // into the already-resident cached shard is safe, and never duplicates its bytes.
+    return Array.from({ length: offset.length }, (_, i) =>
+      shard.matrix.data.subarray((offset.start + i) * shard.matrix.dimension, (offset.start + i + 1) * shard.matrix.dimension),
+    );
+  }
+
+  if (generation) {
+    for (const row of generation.noteMetadata) {
+      const key = identityKey(row.identity);
+      if (shadow.byKey.has(key)) continue; // shadowed by an upsert (added below) or removed by a tombstone
+      notes.push({
+        identity: row.identity,
+        sourceHash: row.sourceHash,
+        // subarray, not slice: the base note matrix stays resident for the whole compact()
+        // call regardless, so a view into it costs nothing extra -- a slice here would
+        // instead eagerly duplicate the ENTIRE unshadowed base note matrix up front, well
+        // before buildGeneration ever starts consuming it.
+        vector: generation.noteMatrix.data.subarray(row.rowIndex * generation.noteMatrix.dimension, (row.rowIndex + 1) * generation.noteMatrix.dimension),
+        chunkCount: row.chunkCount,
+        loadChunkVectors: () => loadBaseNoteChunkVectors(row),
+      });
+    }
+  }
+
+  // Streaming source, overlay side: each overlay's full container (including its chunk
+  // payload) is read only when `buildGeneration` actually calls this note's
+  // `loadChunkVectors()` -- never eagerly, never more than one at a time.
+  for (const overlay of overlaysSnapshot) {
+    if (overlay.operation !== "upsert" || !overlay.noteVector) continue;
+    const overlayIdentity = overlay.identity;
+    const overlayChunkCount = overlay.chunkCount ?? 0;
+    notes.push({
+      identity: overlayIdentity,
+      sourceHash: overlay.sourceHash as string,
+      vector: overlay.noteVector,
+      chunkCount: overlayChunkCount,
+      loadChunkVectors: async () => {
+        let full;
+        try {
+          full = await readOverlayFull(fs, root, overlayIdentity);
+        } catch (error) {
+          throw wrapOverlayError(error, `compact failed: overlay for "${identityKey(overlayIdentity)}" failed to read in full`);
+        }
+        if (!full?.chunkMatrix) return [];
+        // subarray, not slice: this decoded chunkMatrix is freshly read for this one overlay
+        // and consumed synchronously (normalized+copied into the new shard) before this
+        // function is ever called again -- a view costs nothing extra here either.
+        return Array.from({ length: full.chunkMatrix.count }, (_, row) =>
+          (full.chunkMatrix as VectorMatrix).data.subarray(row * (full.chunkMatrix as VectorMatrix).dimension, (row + 1) * (full.chunkMatrix as VectorMatrix).dimension),
+        );
+      },
+    });
+  }
+
+  return { dimension, embeddingModel, notes, overlaysSnapshot, baseGenerationId, baseFingerprint };
+}
+
+/**
+ * Switches `current.json` onto `newGenerationId` (must already exist on
+ * disk, built+verified by `buildGeneration` from `plan`) and only then
+ * deletes exactly the overlays `plan` was snapshotted from -- but each
+ * deletion is version+fingerprint-checked (`deleteOverlayIfSnapshotMatches`),
+ * not a blind identity-keyed delete: if an unrelated concurrent mutation (a
+ * different `IndexStore`/`upsertNote` call, or another compaction) has
+ * REPLACED an identity's overlay since `plan` was captured, that
+ * replacement no longer matches the stale snapshot (by version, or by
+ * fingerprint if it happens to land back on the same version number -- see
+ * `overlayStore.ts`'s own doc comment on version reset) and is left
+ * completely untouched. This is what makes calling `planCompaction` and
+ * `finalizeCompaction` safe even when they are not the only code mutating
+ * overlays for the whole duration in between -- see Checkpoint 7
+ * requirement 13 and final-closure requirement 1. A failure here after
+ * `buildGeneration` succeeded leaves the new generation on disk but
+ * unreferenced -- never partially activated.
+ */
+export async function finalizeCompaction(fs: IndexFs, root: string, newGenerationId: number, plan: CompactionPlan): Promise<void> {
+  await switchCurrentGeneration(fs, root, newGenerationId);
+  for (const overlay of plan.overlaysSnapshot) {
+    await deleteOverlayIfSnapshotMatches(fs, root, overlayFileName(overlay.identity), overlay.version, overlay.fingerprint);
+  }
+}
+
+/** One overlay's bounded, content-free identity in a persisted `CompactionSnapshotDescriptorV1` -- its deterministic filename (never the identity object itself, which could carry an arbitrarily long path), the version it was at when the snapshot was taken, and its content fingerprint (see `OverlayPrefixRecord.fingerprint`) -- version alone is not durable identity across a compaction cycle, since an identity's version counter resets to 1 once its prior overlay is deleted. */
+export interface CompactionSnapshotOverlayEntry {
+  fileName: string;
+  version: number;
+  fingerprint: string;
+}
+
+/**
+ * A bounded, content-free descriptor of exactly what a `CompactionPlan`
+ * would build, safe to persist verbatim in a durable job receipt
+ * (Checkpoint 7 requirement 10): every pending overlay's filename/version/
+ * fingerprint at planning time, the established dimension/model, the
+ * BASE generation this plan was built against (`baseGenerationId`/
+ * `baseFingerprint`, `null` for an initial build -- final-closure
+ * requirement 3), and a single `fingerprint` hash summarizing the
+ * (identity, sourceHash, chunkCount) SET the resulting generation's notes
+ * would contain.
+ *
+ * This `fingerprint` is a SEMANTIC fingerprint, not a byte-exact artifact
+ * checksum: it never reads or hashes any actual vector bytes (final-
+ * closure requirement 5), only identity/sourceHash/chunkCount -- two
+ * builds that embed the same source text differently (a non-deterministic
+ * provider, or a bug) would still match on this fingerprint. It exists to
+ * detect "this generation was built from a materially different overlay
+ * SET than planned" (a real correctness hazard: stale/skipped/extra
+ * notes), not "the embedding provider returned bit-identical floats."
+ * Byte-exact artifact verification, where it matters (Checkpoint 7 final-
+ * closure requirement 4/5), instead compares `manifestArtifactFingerprint`
+ * of the actual generation manifest, which DOES cover every checksum
+ * (`noteMatrixChecksum`/`noteMetadataChecksum`/per-shard checksums) already
+ * computed over real vector bytes elsewhere in this codebase.
+ */
+export interface CompactionSnapshotDescriptorV1 {
+  baseGenerationId: number | null;
+  baseFingerprint: string | null;
+  dimension: number;
+  embeddingModel: string;
+  overlays: CompactionSnapshotOverlayEntry[];
+  fingerprint: string;
+}
+
+function compactionFingerprint(entries: readonly { key: string; sourceHash: string; chunkCount: number }[], dimension: number, embeddingModel: string): string {
+  const sorted = [...entries].sort((a, b) => a.key.localeCompare(b.key));
+  return createHash("sha256").update(JSON.stringify({ dimension, embeddingModel, entries: sorted })).digest("hex");
+}
+
+/**
+ * A bounded fingerprint of a generation's ACTUAL persisted artifacts --
+ * every checksum its manifest already carries over real vector/metadata
+ * bytes (`noteMatrixChecksum`, `noteMetadataChecksum`, and each chunk
+ * shard's `checksum`/`offsetChecksum`, in deterministic shard-id order),
+ * plus its shape (dimension/model/counts). Unlike `compactionFingerprint`
+ * (semantic: identity/sourceHash/chunkCount only), two generations only
+ * match this fingerprint if their vector bytes are ACTUALLY identical --
+ * this is the byte-exact half of Checkpoint 7 final-closure requirement 5.
+ */
+export function manifestArtifactFingerprint(manifest: VectorIndexManifestV1): string {
+  const shardChecksums = [...manifest.chunkShards]
+    .map((shard) => ({ shardId: shard.shardId, count: shard.count, checksum: shard.checksum, offsetChecksum: shard.offsetChecksum }))
+    .sort((a, b) => a.shardId.localeCompare(b.shardId));
+  const payload = {
+    dimension: manifest.dimension,
+    embeddingModel: manifest.embeddingModel,
+    noteCount: manifest.noteCount,
+    chunkCount: manifest.chunkCount,
+    noteMatrixChecksum: manifest.noteMatrixChecksum,
+    noteMetadataChecksum: manifest.noteMetadataChecksum,
+    chunkShards: shardChecksums,
+  };
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+/** Builds the bounded, content-free snapshot descriptor for `plan` -- see `CompactionSnapshotDescriptorV1`. */
+export function describeCompactionSnapshot(plan: CompactionPlan): CompactionSnapshotDescriptorV1 {
+  const entries = plan.notes.map((note) => ({ key: identityKey(note.identity), sourceHash: note.sourceHash, chunkCount: note.chunkCount }));
+  const overlays = [...plan.overlaysSnapshot]
+    .map((overlay) => ({ fileName: overlayFileName(overlay.identity), version: overlay.version, fingerprint: overlay.fingerprint }))
+    .sort((a, b) => a.fileName.localeCompare(b.fileName));
+  return {
+    baseGenerationId: plan.baseGenerationId,
+    baseFingerprint: plan.baseFingerprint,
+    dimension: plan.dimension,
+    embeddingModel: plan.embeddingModel,
+    overlays,
+    fingerprint: compactionFingerprint(entries, plan.dimension, plan.embeddingModel),
+  };
+}
+
+/**
+ * `true` iff a generation actually loaded from disk (`manifest` +
+ * `noteMetadata`, from `verifyGenerationFully`/`loadGeneration`) contains
+ * the SAME (identity, sourceHash, chunkCount) SET `descriptor` was built
+ * from, at the same dimension/model -- a SEMANTIC match, never a claim
+ * that the actual vector bytes are identical (see
+ * `CompactionSnapshotDescriptorV1`'s own doc comment, final-closure
+ * requirement 5). Used to decide whether an already-existing
+ * `generations/gen-<id>` directory found at `build-generation` time may
+ * be safely, SEMANTICALLY adopted (it is very likely this job's own
+ * prior, crash-interrupted-before-receipt-persisted attempt) rather than
+ * treated as a foreign/stale collision -- see Checkpoint 7 requirement 11.
+ * A caller that also needs byte-exact assurance (verify/activate phases
+ * reloading a generation THIS job itself already built and fingerprinted)
+ * should additionally compare `manifestArtifactFingerprint`.
+ */
+export function compactionSnapshotMatchesGeneration(descriptor: CompactionSnapshotDescriptorV1, manifest: VectorIndexManifestV1, noteMetadata: readonly NoteRowMetadataV1[]): boolean {
+  if (manifest.dimension !== descriptor.dimension || manifest.embeddingModel !== descriptor.embeddingModel) return false;
+  const entries = noteMetadata.map((row) => ({ key: identityKey(row.identity), sourceHash: row.sourceHash, chunkCount: row.chunkCount }));
+  return compactionFingerprint(entries, manifest.dimension, manifest.embeddingModel) === descriptor.fingerprint;
+}
+
+/**
+ * The snapshot-based sibling of `finalizeCompaction`, for a caller that can
+ * only durably carry a bounded `CompactionSnapshotDescriptorV1` (persisted
+ * in a job receipt) across a phase boundary/restart, rather than a live,
+ * vector-bearing `CompactionPlan` recomputed fresh (which, per Checkpoint 7
+ * requirement 10, is exactly the unsafe thing to do at activation time --
+ * overlays can change across phase boundaries/restart). Switches the
+ * pointer, then deletes exactly the overlays named in `overlays`, each
+ * version+fingerprint-checked (`deleteOverlayIfSnapshotMatches`) against
+ * the snapshot -- never a replacement written after planning.
+ */
+export async function finalizeCompactionFromSnapshot(fs: IndexFs, root: string, newGenerationId: number, overlays: readonly CompactionSnapshotOverlayEntry[]): Promise<void> {
+  await switchCurrentGeneration(fs, root, newGenerationId);
+  for (const overlay of overlays) {
+    await deleteOverlayIfSnapshotMatches(fs, root, overlay.fileName, overlay.version, overlay.fingerprint);
+  }
+}
+
+/**
+ * Every `IndexStore` constructed over the SAME `fs`+`root` pair shares
+ * exactly one `IndexMutationQueue` (Checkpoint 7 final-closure requirement
+ * 2), keyed first by `fs` object identity (a `WeakMap`, so distinct fake
+ * filesystems in unrelated tests never collide and this never leaks
+ * process-wide) and then by `root` string. This is what makes a
+ * conditional overlay delete (`deleteOverlayIfSnapshotMatches`'s
+ * prefix-check-then-unlink) ATOMIC relative to every OTHER
+ * plugin-owned mutation against the same store, even one issued through a
+ * completely independent `IndexStore` instance -- e.g. one held by the
+ * Checkpoint 7 rebuild job and another by ordinary note-processing --
+ * closing the TOCTOU window a per-instance queue would otherwise leave
+ * open between them.
+ *
+ * This is a PROCESS-LEVEL guarantee only. It coordinates every mutation
+ * this Node process itself issues against `fs`+`root`; it cannot, and
+ * does not claim to, coordinate a genuinely EXTERNAL process or tool
+ * writing directly to the same files on disk -- true cross-process mutual
+ * exclusion would require OS-level file locking, which this module does
+ * not implement. Against that kind of external interference, the
+ * fail-closed guarantees already in place elsewhere (checksum
+ * verification, filename/identity cross-checks, atomic write/rename/fsync
+ * discipline in `AtomicStore`/`AtomicBinaryStore`) are what actually
+ * apply: a foreign/corrupt write is detected and rejected (or, for
+ * `deleteOverlayIfSnapshotMatches`, simply fails to match and is left
+ * alone) on a BEST-EFFORT basis, never guaranteed atomic against it.
+ */
+const SHARED_MUTATION_QUEUES = new WeakMap<IndexFs, Map<string, IndexMutationQueue>>();
+
+function sharedMutationQueueFor(fs: IndexFs, root: string): IndexMutationQueue {
+  let byRoot = SHARED_MUTATION_QUEUES.get(fs);
+  if (!byRoot) {
+    byRoot = new Map();
+    SHARED_MUTATION_QUEUES.set(fs, byRoot);
+  }
+  let queue = byRoot.get(root);
+  if (!queue) {
+    queue = new IndexMutationQueue();
+    byRoot.set(root, queue);
+  }
+  return queue;
+}
+
+/**
+ * Runs `fn` under the SAME shared per-(fs,root) mutation lock every
+ * `IndexStore` instance's `upsertNote`/`deleteNote`/`compact` already goes
+ * through -- exported so a caller OUTSIDE `IndexStore` itself (the
+ * Checkpoint 7 rebuild job's activation transaction, which reads the
+ * current pointer, verifies artifacts, switches it, and conditionally
+ * deletes overlays) can run its entire multi-step transaction with the
+ * exact same mutual-exclusion guarantee against every `IndexStore`
+ * mutation, closing the check/switch and check/unlink TOCTOU windows a
+ * caller acting outside this lock would otherwise leave open
+ * (final-closure requirement 3).
+ *
+ * NEVER call this (directly or indirectly) from within a callback already
+ * running under this same lock for the same `(fs, root)` pair -- e.g.
+ * from inside an `IndexStore.compact()`/`upsertNote()`/`deleteNote()`
+ * call, or from inside another `runWithIndexMutationLock` call for the
+ * same pair. `IndexMutationQueue.run` chains onto a tail promise that is
+ * only reassigned to depend on the CURRENT call's own result the moment
+ * it starts running; a nested call from within an already-running task
+ * would therefore wait forever on a tail that cannot advance until that
+ * same nested call itself resolves -- a guaranteed deadlock, not merely a
+ * slow path. This module's own `upsertNote`/`deleteNote`/`compact`
+ * methods never do this, and this function must not be composed in a way
+ * that would either.
+ */
+export function runWithIndexMutationLock<T>(fs: IndexFs, root: string, fn: () => Promise<T>): Promise<T> {
+  return sharedMutationQueueFor(fs, root).run(fn);
+}
+
 export class IndexStore {
-  private readonly queue = new IndexMutationQueue();
+  private readonly queue: IndexMutationQueue;
 
   constructor(
     private readonly fs: IndexFs,
     private readonly root: string,
-  ) {}
+  ) {
+    this.queue = sharedMutationQueueFor(fs, root);
+  }
 
   queryRelated(options: QueryRelatedOptions): Promise<ScoredNote[]> {
     return queryRelated(this.fs, this.root, options);
@@ -549,105 +906,8 @@ export class IndexStore {
    */
   compact(newGenerationId: number, options: { signal?: AbortSignal } = {}): Promise<void> {
     return this.queue.run(async () => {
-      const generationId = await loadCurrentGenerationId(this.fs, this.root);
-      const generation = generationId === null ? null : await loadGeneration(this.fs, this.root, generationId);
-      const overlaysSnapshot = await loadOverlayPrefixesOrThrow(this.fs, this.root);
-
-      let dimension: number | undefined = generation?.manifest.dimension;
-      let embeddingModel: string | undefined = generation?.manifest.embeddingModel;
-      if (dimension === undefined || embeddingModel === undefined) {
-        const anyUpsert = overlaysSnapshot.find((o) => o.operation === "upsert" && o.dimension !== undefined);
-        if (!anyUpsert) {
-          throw new IndexStoreError(
-            "cannot compact: no base generation exists and no pending upsert overlay provides a dimension/model. Create an initial generation explicitly via buildGeneration + switchCurrentGeneration with an explicit dimension/embeddingModel first.",
-          );
-        }
-        if (anyUpsert.dimension === undefined || anyUpsert.embeddingModel === undefined) {
-          throw new IndexStoreError("cannot compact: matching upsert overlay is missing its dimension/embeddingModel (unreachable for a valid upsert record).");
-        }
-        dimension = anyUpsert.dimension;
-        embeddingModel = anyUpsert.embeddingModel;
-      }
-
-      const shadow = buildShadowInfo(overlaysSnapshot);
-      const notes: GenerationInputNote[] = [];
-
-      // Streaming source, base side: at most ONE base shard's decoded chunk matrix is ever
-      // cached/resident at a time. `buildGeneration` calls each note's `loadChunkVectors()` in
-      // its own OUTPUT-shard-plan order (which can interleave notes from different INPUT/base
-      // shards) -- this single-slot cache means consecutive notes sharing the same base shard
-      // reuse the one already-loaded matrix, and switching to a note from a different base shard
-      // simply replaces the cached slot (never holds two base shards at once).
-      const baseShardCache: { shardId: string | null; shard: { matrix: VectorMatrix; offsets: ChunkShardNoteOffset[] } | null } = { shardId: null, shard: null };
-      async function loadBaseNoteChunkVectors(row: NoteRowMetadataV1): Promise<Float32Array[]> {
-        if (!row.shardId) return [];
-        if (baseShardCache.shardId !== row.shardId) {
-          baseShardCache.shard = await (generation as NonNullable<typeof generation>).loadShard(row.shardId);
-          baseShardCache.shardId = row.shardId;
-        }
-        const shard = baseShardCache.shard as NonNullable<typeof baseShardCache.shard>;
-        const offset = shard.offsets.find((o) => identityKey(o.identity) === identityKey(row.identity));
-        if (!offset) return [];
-        // subarray, not slice: buildGeneration normalizes and copies each row into the new
-        // generation's shard/note matrix synchronously, right after this resolves and before the
-        // next note's loadChunkVectors() call could ever evict/replace baseShardCache -- so a view
-        // into the already-resident cached shard is safe, and never duplicates its bytes.
-        return Array.from({ length: offset.length }, (_, i) =>
-          shard.matrix.data.subarray((offset.start + i) * shard.matrix.dimension, (offset.start + i + 1) * shard.matrix.dimension),
-        );
-      }
-
-      if (generation) {
-        for (const row of generation.noteMetadata) {
-          const key = identityKey(row.identity);
-          if (shadow.byKey.has(key)) continue; // shadowed by an upsert (added below) or removed by a tombstone
-          notes.push({
-            identity: row.identity,
-            sourceHash: row.sourceHash,
-            // subarray, not slice: the base note matrix stays resident for the whole compact()
-            // call regardless, so a view into it costs nothing extra -- a slice here would
-            // instead eagerly duplicate the ENTIRE unshadowed base note matrix up front, well
-            // before buildGeneration ever starts consuming it.
-            vector: generation.noteMatrix.data.subarray(row.rowIndex * generation.noteMatrix.dimension, (row.rowIndex + 1) * generation.noteMatrix.dimension),
-            chunkCount: row.chunkCount,
-            loadChunkVectors: () => loadBaseNoteChunkVectors(row),
-          });
-        }
-      }
-
-      // Streaming source, overlay side: each overlay's full container (including its chunk
-      // payload) is read only when `buildGeneration` actually calls this note's
-      // `loadChunkVectors()` -- never eagerly, never more than one at a time.
-      for (const overlay of overlaysSnapshot) {
-        if (overlay.operation !== "upsert" || !overlay.noteVector) continue;
-        const overlayIdentity = overlay.identity;
-        const overlayChunkCount = overlay.chunkCount ?? 0;
-        notes.push({
-          identity: overlayIdentity,
-          sourceHash: overlay.sourceHash as string,
-          vector: overlay.noteVector,
-          chunkCount: overlayChunkCount,
-          loadChunkVectors: async () => {
-            let full;
-            try {
-              full = await readOverlayFull(this.fs, this.root, overlayIdentity);
-            } catch (error) {
-              throw wrapOverlayError(error, `compact failed: overlay for "${identityKey(overlayIdentity)}" failed to read in full`);
-            }
-            if (!full?.chunkMatrix) return [];
-            // subarray, not slice: this decoded chunkMatrix is freshly read for this one overlay
-            // and consumed synchronously (normalized+copied into the new shard) before this
-            // function is ever called again -- a view costs nothing extra here either.
-            return Array.from({ length: full.chunkMatrix.count }, (_, row) =>
-              (full.chunkMatrix as VectorMatrix).data.subarray(row * (full.chunkMatrix as VectorMatrix).dimension, (row + 1) * (full.chunkMatrix as VectorMatrix).dimension),
-            );
-          },
-        });
-      }
-
-      const resolvedDimension: number = dimension;
-      const resolvedEmbeddingModel: string = embeddingModel;
-      const buildInput: BuildGenerationInput = { generationId: newGenerationId, embeddingModel: resolvedEmbeddingModel, dimension: resolvedDimension, notes };
+      const plan = await planCompaction(this.fs, this.root);
+      const buildInput: BuildGenerationInput = { generationId: newGenerationId, embeddingModel: plan.embeddingModel, dimension: plan.dimension, notes: plan.notes };
       await buildGeneration(this.fs, this.root, buildInput, { signal: options.signal });
 
       // Cancellation checkpoint: buildGeneration has already fully built, verified, and renamed
@@ -659,10 +919,7 @@ export class IndexStore {
         throw new GenerationBuildCancelledError();
       }
 
-      await switchCurrentGeneration(this.fs, this.root, newGenerationId);
-      for (const overlay of overlaysSnapshot) {
-        await deleteOverlay(this.fs, this.root, overlay.identity);
-      }
+      await finalizeCompaction(this.fs, this.root, newGenerationId, plan);
     });
   }
 

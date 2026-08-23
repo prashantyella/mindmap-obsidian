@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { joinRelative } from "../engine/atomicStore";
 import { AtomicBinaryStore } from "./atomicBinaryStore";
@@ -18,7 +18,7 @@ import {
   OverlayCodecError,
   type OverlayContainerOperation,
 } from "./overlayCodec";
-import { MAX_MATRIX_TOTAL_BYTES, decodeVectorMatrix, encodeVectorMatrix, type VectorMatrix } from "./vectorCodec";
+import { checksumHex, MAX_MATRIX_TOTAL_BYTES, decodeVectorMatrix, encodeVectorMatrix, type VectorMatrix } from "./vectorCodec";
 import type { NoteIdentityV1 } from "../engine/contracts";
 import { parseNoteIdentityV1 } from "../engine/contracts";
 
@@ -77,11 +77,42 @@ export function isOwnedOverlayFileName(basename: string): boolean {
   return OWNED_OVERLAY_FILENAME_PATTERN.test(basename);
 }
 
+/** Bounded, control-character-free opaque token format for `OverlayMetadataV1.mutationId`. */
+const MUTATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * Validates a test-injected `mutationId` override against EXACTLY the same
+ * rule `parseOverlayMetadataJson` enforces on read (Checkpoint 7
+ * last-contract guard 3) -- called at the very top of both write paths,
+ * before any vector normalization/encoding/`.save()` call, so an invalid
+ * override throws with ZERO write ever attempted. Without this, a
+ * malformed override would be silently written to disk and only ever
+ * surface as a failure the NEXT time that overlay is read, not at the
+ * write that actually produced it.
+ */
+function assertValidMutationIdOverride(mutationId: string | undefined): void {
+  if (mutationId !== undefined && !MUTATION_ID_PATTERN.test(mutationId)) {
+    throw new OverlayStoreError("overlay mutationId override must be a bounded, control-character-free token.");
+  }
+}
+
 interface OverlayMetadataV1 {
   identity: NoteIdentityV1;
   operation: OverlayOperation;
   version: number;
   recordedAt: string;
+  /**
+   * A fresh, internally-generated opaque token assigned on EVERY write
+   * (upsert or tombstone), independent of vector/version/content. Exists
+   * solely so `computeOverlayFingerprint` can distinguish two distinct
+   * writes that would otherwise be byte-identical at the fingerprint's
+   * other inputs -- e.g. two upserts with the same source/model/note
+   * vector/version but DIFFERENT chunk vectors, which the note-vector-only
+   * checksum alone cannot tell apart (Checkpoint 7 acceptance guard 2).
+   * Test-injectable via `UpsertOverlayInput.mutationId`/
+   * `TombstoneOverlayInput.mutationId`; defaults to `randomUUID()`.
+   */
+  mutationId: string;
   sourceHash?: string;
   embeddingModel?: string;
   dimension?: number;
@@ -134,6 +165,9 @@ function parseOverlayMetadataJson(bytes: Uint8Array, expectedFileName: string): 
   if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString() !== record.recordedAt) {
     throw new OverlayStoreError("overlay metadata recordedAt must be a canonical UTC ISO-8601 timestamp.");
   }
+  if (typeof record.mutationId !== "string" || !MUTATION_ID_PATTERN.test(record.mutationId)) {
+    throw new OverlayStoreError("overlay metadata mutationId must be a bounded, control-character-free token.");
+  }
 
   if (record.operation === "tombstone") {
     for (const field of ["sourceHash", "embeddingModel", "dimension", "chunkCount"] as const) {
@@ -141,7 +175,7 @@ function parseOverlayMetadataJson(bytes: Uint8Array, expectedFileName: string): 
         throw new OverlayStoreError(`overlay metadata field "${field}" must be absent for a tombstone.`);
       }
     }
-    return { identity, operation: "tombstone", version: record.version, recordedAt: record.recordedAt };
+    return { identity, operation: "tombstone", version: record.version, recordedAt: record.recordedAt, mutationId: record.mutationId };
   }
 
   if (typeof record.sourceHash !== "string" || !/^[0-9a-f]{64}$/.test(record.sourceHash)) {
@@ -167,6 +201,7 @@ function parseOverlayMetadataJson(bytes: Uint8Array, expectedFileName: string): 
     operation: "upsert",
     version: record.version,
     recordedAt: record.recordedAt,
+    mutationId: record.mutationId,
     sourceHash: record.sourceHash,
     embeddingModel: record.embeddingModel,
     dimension: record.dimension,
@@ -180,6 +215,7 @@ export interface OverlayPrefixRecord {
   operation: OverlayOperation;
   version: number;
   recordedAt: string;
+  mutationId: string;
   sourceHash?: string;
   embeddingModel?: string;
   dimension?: number;
@@ -188,6 +224,33 @@ export interface OverlayPrefixRecord {
   noteVector?: Float32Array;
   /** This overlay container's exact total on-disk byte length (header + both checksums + metadata JSON + note-vector bytes + chunk-vector bytes) -- known from the header alone (`overlayContainerTotalLength`), never requiring a full read. Used for actual (not worst-case-reserved) disk-budget accounting -- see `indexStore.ts`'s per-mutation resource-budget check. */
   containerLength: number;
+  /**
+   * Lowercase hex64, derived from this overlay's VALIDATED prefix metadata
+   * (operation/sourceHash/embeddingModel/dimension/chunkCount) plus a
+   * checksum of its actual note-vector bytes -- never from `version` or
+   * `recordedAt` alone. `version` is deliberately reset to 1 once an
+   * identity's overlay is deleted (see this module's own doc comment), so
+   * filename+version alone cannot distinguish a stale snapshot's entry
+   * from an entirely NEW, later overlay for the same identity that
+   * happens to reuse version 1 -- `fingerprint` is what makes that
+   * distinction durable (Checkpoint 7 final-closure requirement 1).
+   */
+  fingerprint: string;
+}
+
+/** Computes `OverlayPrefixRecord.fingerprint` -- shared by every read/write path so a fingerprint computed at write time and one recomputed later from a fresh read of the same bytes always agree exactly. */
+function computeOverlayFingerprint(metadata: OverlayMetadataV1, noteVectorBytes: Uint8Array): string {
+  const noteVectorChecksum = checksumHex(noteVectorBytes);
+  const payload = {
+    operation: metadata.operation,
+    sourceHash: metadata.sourceHash ?? null,
+    embeddingModel: metadata.embeddingModel ?? null,
+    dimension: metadata.dimension ?? null,
+    chunkCount: metadata.chunkCount ?? null,
+    noteVectorChecksum,
+    mutationId: metadata.mutationId,
+  };
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
 
 /** Everything in a full overlay, including its (possibly large) decoded chunk-vector matrix. */
@@ -253,7 +316,8 @@ async function readOverlayPrefixByFileName(fs: IndexFs, root: string, fileName: 
     noteVector = noteMatrix.data;
   }
 
-  return { ...metadata, noteVector, containerLength: overlayContainerTotalLength(header) };
+  const fingerprint = computeOverlayFingerprint(metadata, prefix.noteVectorBytes);
+  return { ...metadata, noteVector, containerLength: overlayContainerTotalLength(header), fingerprint };
 }
 
 async function readHeaderOrNull(fs: IndexFs, root: string, fileName: string): Promise<Uint8Array | null> {
@@ -295,7 +359,8 @@ export async function readOverlayFull(fs: IndexFs, root: string, identity: NoteI
       throw new OverlayStoreError(`overlay "${fileName}" declares chunkCount ${metadata.chunkCount} but its chunk matrix has ${chunkMatrix.count} rows.`);
     }
   }
-  return { ...metadata, noteVector, chunkMatrix, containerLength: bytes.length };
+  const fingerprint = computeOverlayFingerprint(metadata, decoded.noteVectorBytes);
+  return { ...metadata, noteVector, chunkMatrix, containerLength: bytes.length, fingerprint };
 }
 
 export interface UpsertOverlayInput {
@@ -308,6 +373,8 @@ export interface UpsertOverlayInput {
   /** Raw chunk embeddings, in chunk order; normalized here. */
   chunkVectors: Float32Array[];
   now?: () => Date;
+  /** Test-injectable override for the generated `mutationId`; defaults to `randomUUID()`. */
+  mutationId?: string;
 }
 
 async function nextVersion(fs: IndexFs, root: string, identity: NoteIdentityV1): Promise<number> {
@@ -324,6 +391,7 @@ async function nextVersion(fs: IndexFs, root: string, identity: NoteIdentityV1):
  * concurrent calls for the same identity.
  */
 export async function writeUpsertOverlay(fs: IndexFs, root: string, input: UpsertOverlayInput): Promise<OverlayPrefixRecord> {
+  assertValidMutationIdOverride(input.mutationId);
   const noteVector = normalizeVector(input.noteVector);
   if (noteVector.length !== input.dimension) {
     throw new OverlayStoreError(`overlay note vector has dimension ${noteVector.length}, expected ${input.dimension}.`);
@@ -347,6 +415,7 @@ export async function writeUpsertOverlay(fs: IndexFs, root: string, input: Upser
     operation: "upsert",
     version,
     recordedAt,
+    mutationId: input.mutationId ?? randomUUID(),
     sourceHash: input.sourceHash,
     embeddingModel: input.embeddingModel,
     dimension: input.dimension,
@@ -367,19 +436,22 @@ export async function writeUpsertOverlay(fs: IndexFs, root: string, input: Upser
 
   const fileName = overlayFileName(input.identity);
   await binaryStoreFor(fs, root, fileName).save(container);
-  return { ...metadata, noteVector, containerLength: container.length };
+  return { ...metadata, noteVector, containerLength: container.length, fingerprint: computeOverlayFingerprint(metadata, noteMatrixEncoded) };
 }
 
 export interface TombstoneOverlayInput {
   identity: NoteIdentityV1;
   now?: () => Date;
+  /** Test-injectable override for the generated `mutationId`; defaults to `randomUUID()`. */
+  mutationId?: string;
 }
 
 /** Writes (or replaces) the `"tombstone"` overlay for one note identity, atomically. Assigns the next version itself. */
 export async function writeTombstoneOverlay(fs: IndexFs, root: string, input: TombstoneOverlayInput): Promise<OverlayPrefixRecord> {
+  assertValidMutationIdOverride(input.mutationId);
   const version = await nextVersion(fs, root, input.identity);
   const recordedAt = (input.now ?? (() => new Date()))().toISOString();
-  const metadata: OverlayMetadataV1 = { identity: input.identity, operation: "tombstone", version, recordedAt };
+  const metadata: OverlayMetadataV1 = { identity: input.identity, operation: "tombstone", version, recordedAt, mutationId: input.mutationId ?? randomUUID() };
   const container = encodeOverlayContainer({
     operation: "tombstone",
     metadataJsonBytes: encodeMetadataJsonOrThrow(metadata),
@@ -388,7 +460,7 @@ export async function writeTombstoneOverlay(fs: IndexFs, root: string, input: To
   });
   const fileName = overlayFileName(input.identity);
   await binaryStoreFor(fs, root, fileName).save(container);
-  return { ...metadata, containerLength: container.length };
+  return { ...metadata, containerLength: container.length, fingerprint: computeOverlayFingerprint(metadata, new Uint8Array(0)) };
 }
 
 /**
@@ -407,6 +479,40 @@ export async function deleteOverlay(fs: IndexFs, root: string, identity: NoteIde
   const absolutePath = joinRelative(root, fileName);
   if (!(await fs.exists(absolutePath))) return;
   await deleteOverlayFile(fs, root, fileName);
+}
+
+/**
+ * Deletes exactly one overlay file by its ALREADY-KNOWN
+ * basename+version+fingerprint -- but ONLY if the file's CURRENT on-disk
+ * version AND fingerprint both still match; otherwise it is left
+ * completely untouched and this returns `false`. This is the
+ * "delete-if-matches" primitive Checkpoint 7 requirement 10 (hardened by
+ * final-closure requirement 1) asks for: a caller holding a bounded,
+ * content-free `{fileName, version, fingerprint}` snapshot recorded at
+ * PLANNING time (rather than a live `OverlayPrefixRecord` read moments
+ * before deleting) can safely finalize against that OLD snapshot even
+ * after an unrelated concurrent mutation has since REPLACED the same
+ * identity's overlay -- including the case where the replacement happens
+ * to land back on the SAME version number (overlay versions reset to 1
+ * once an identity's prior overlay is deleted, so filename+version alone
+ * can collide between two genuinely different overlay instances for the
+ * same identity; `fingerprint`, derived from the overlay's actual
+ * validated content, does not). Returns `false` (not an error) if the
+ * file is already gone -- an already-deleted overlay is exactly as
+ * "nothing left to delete here" as one that was replaced, and this must
+ * stay safely retryable either way.
+ */
+export async function deleteOverlayIfSnapshotMatches(fs: IndexFs, root: string, fileName: string, expectedVersion: number, expectedFingerprint: string): Promise<boolean> {
+  let record: OverlayPrefixRecord | null;
+  try {
+    record = await readOverlayPrefixByFileName(fs, root, fileName);
+  } catch (error) {
+    throw new OverlayStoreError(`cannot safely delete-if-matches overlay "${fileName}": it failed validation: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!record) return false;
+  if (record.version !== expectedVersion || record.fingerprint !== expectedFingerprint) return false;
+  await deleteOverlayFile(fs, root, fileName);
+  return true;
 }
 
 async function deleteOverlayFile(fs: IndexFs, root: string, fileName: string): Promise<void> {

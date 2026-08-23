@@ -85,6 +85,55 @@ export function generationDirPath(generationId: number): string {
   return `generations/gen-${generationId}`;
 }
 
+const GENERATION_DIR_NAME_PATTERN = /^gen-(\d+)$/;
+
+/**
+ * Every generation id currently present under `generations/` on disk,
+ * whether or not it is the one `current.json` references -- an
+ * "unreferenced" (orphaned) generation directory from a build that
+ * completed its rename but was never activated (crashed before the
+ * pointer switch, or a cancelled `compact()`/rebuild) is just as much a
+ * potential id COLLISION for a future build as the currently-referenced
+ * one is. Never trusts a listed name past this pattern (`isSafeDirEntryName`-
+ * style discipline): unrecognized entries under `generations/` are
+ * ignored, not parsed.
+ */
+export async function listGenerationIds(fs: IndexFs, root: string): Promise<number[]> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(joinRelative(root, "generations"));
+  } catch {
+    return [];
+  }
+  const ids: number[] = [];
+  for (const entry of entries) {
+    const match = GENERATION_DIR_NAME_PATTERN.exec(entry);
+    if (!match) continue;
+    const id = Number(match[1]);
+    if (Number.isInteger(id) && id >= 0) ids.push(id);
+  }
+  return ids;
+}
+
+/** `true` iff `generations/gen-<generationId>/manifest.json` exists -- the cheapest possible "does this id already have SOMETHING on disk" check, without reading or validating its contents. */
+export async function generationManifestExists(fs: IndexFs, root: string, generationId: number): Promise<boolean> {
+  return fs.exists(joinRelative(root, manifestFileName(generationDirPath(generationId))));
+}
+
+/**
+ * The next SAFE-TO-USE generation id: strictly greater than both the
+ * current pointer's id (if any) AND every id already present under
+ * `generations/`, referenced or not. Considering unreferenced directories
+ * too (not just `current.json`) is what prevents a fresh rebuild from
+ * picking an id that collides with an orphaned generation left behind by
+ * an earlier crashed/cancelled build -- see Checkpoint 7 requirement 11.
+ */
+export async function discoverUnusedGenerationId(fs: IndexFs, root: string): Promise<number> {
+  const [currentId, existingIds] = await Promise.all([loadCurrentGenerationId(fs, root), listGenerationIds(fs, root)]);
+  const highest = existingIds.reduce((max, id) => Math.max(max, id), currentId ?? 0);
+  return highest + 1;
+}
+
 function manifestFileName(dirPath: string): string {
   return `${dirPath}/manifest.json`;
 }
@@ -534,7 +583,12 @@ export async function buildGeneration(fs: IndexFs, root: string, input: BuildGen
  * never happens to touch) fails closed in both places, not just the one
  * where the corpus was originally built.
  */
-async function verifyGenerationIntegrity(fs: IndexFs, root: string, dirPath: string, expectedGenerationId?: number): Promise<void> {
+async function verifyGenerationIntegrity(
+  fs: IndexFs,
+  root: string,
+  dirPath: string,
+  expectedGenerationId?: number,
+): Promise<{ manifest: VectorIndexManifestV1; noteMetadata: NoteRowMetadataV1[] }> {
   const loadedManifest = await loadOrThrow(manifestStore(fs, root, dirPath), "manifest.json");
   if (expectedGenerationId !== undefined && loadedManifest.generationId !== expectedGenerationId) {
     throw new GenerationStoreError(`generation ${expectedGenerationId}'s manifest declares a different generationId (${loadedManifest.generationId}).`);
@@ -671,6 +725,24 @@ async function verifyGenerationIntegrity(fs: IndexFs, root: string, dirPath: str
   if (totalCoveredChunkRows !== loadedManifest.chunkCount) {
     throw new GenerationStoreError(`total chunk rows covered by shard offsets (${totalCoveredChunkRows}) does not match manifest.chunkCount (${loadedManifest.chunkCount}).`);
   }
+  return { manifest: loadedManifest, noteMetadata };
+}
+
+/**
+ * Production, read-only entry point for a FULL streaming integrity pass
+ * over an already-activated (or about to be activated) generation --
+ * exactly the same exhaustive per-shard verification `buildGeneration`
+ * and `switchCurrentGeneration` already run, exported so a durable,
+ * phase-checkpointed caller (the Checkpoint 7 rebuild job's
+ * `verify-generation` phase) can run it as its own independent,
+ * resumable checkpoint WITHOUT going through a pointer switch. Unlike
+ * `loadGeneration` (which never touches a shard's bytes until a query
+ * actually asks for it), this decodes and checksum-verifies EVERY chunk
+ * shard -- a corruption in a shard no query has happened to touch yet is
+ * caught here, not silently left resident until some future query hits it.
+ */
+export async function verifyGenerationFully(fs: IndexFs, root: string, generationId: number): Promise<{ manifest: VectorIndexManifestV1; noteMetadata: NoteRowMetadataV1[] }> {
+  return verifyGenerationIntegrity(fs, root, generationDirPath(generationId), generationId);
 }
 
 /** A fully loaded, resident generation: manifest + note matrix + note metadata are all small enough to keep resident; chunk shards are loaded lazily and on demand (see `loadShard`), never all at once. */

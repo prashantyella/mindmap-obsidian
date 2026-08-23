@@ -14,7 +14,8 @@ import { EngineError } from "./errors";
  */
 export const UNIT_NORM_TOLERANCE = 1e-6;
 
-export function squaredNorm(values: readonly number[]): number {
+/** Accepts any iterable of numbers -- notably including `Float32Array` directly, so callers never need an `Array.from()` copy just to check a vector's norm. */
+export function squaredNorm(values: Iterable<number>): number {
   let sum = 0;
   for (const value of values) {
     sum += value * value;
@@ -22,8 +23,8 @@ export function squaredNorm(values: readonly number[]): number {
   return sum;
 }
 
-/** Recomputes the Euclidean norm from scratch (never reuses a caller-supplied magnitude) and checks it is within `tolerance` of 1. */
-export function isUnitNorm(values: readonly number[], tolerance: number = UNIT_NORM_TOLERANCE): boolean {
+/** Recomputes the Euclidean norm from scratch (never reuses a caller-supplied magnitude) and checks it is within `tolerance` of 1. Accepts any iterable of numbers (e.g. `Float32Array` or `number[]`) directly -- never requires a copy. */
+export function isUnitNorm(values: Iterable<number>, tolerance: number = UNIT_NORM_TOLERANCE): boolean {
   const normSquared = squaredNorm(values);
   if (!Number.isFinite(normSquared)) {
     return false;

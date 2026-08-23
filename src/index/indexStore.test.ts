@@ -3,9 +3,19 @@ import assert from "node:assert/strict";
 
 import { canonicalizePath, stableNoteIdentity } from "../engine/contracts";
 import { FakeIndexFs } from "./fakeIndexFs.test-support";
-import { buildGeneration, generationDirPath, loadCurrentGenerationId, loadGeneration, switchCurrentGeneration, type GenerationInputNote } from "./generationStore";
-import { overlayFileName, readOverlayPrefix } from "./overlayStore";
-import { computeProjectedOverlayResourceUsage, GenerationBuildCancelledError, IndexStore, IndexStoreError } from "./indexStore";
+import { buildGeneration, generationDirPath, loadCurrentGenerationId, loadGeneration, switchCurrentGeneration, verifyGenerationFully, type GenerationInputNote } from "./generationStore";
+import { overlayFileName, readOverlayPrefix, writeUpsertOverlay } from "./overlayStore";
+import {
+  compactionSnapshotMatchesGeneration,
+  computeProjectedOverlayResourceUsage,
+  describeCompactionSnapshot,
+  finalizeCompactionFromSnapshot,
+  GenerationBuildCancelledError,
+  IndexStore,
+  IndexStoreError,
+  manifestArtifactFingerprint,
+  planCompaction,
+} from "./indexStore";
 import { MAX_MANIFEST_NOTE_COUNT, MAX_MANIFEST_SHARD_ROW_COUNT } from "./indexManifest";
 import { MAX_PENDING_OVERLAY_COUNT } from "./budgets";
 import type { OverlayPrefixRecord } from "./overlayStore";
@@ -50,8 +60,10 @@ function fakeOverlayRecord(path: string, overrides: Partial<OverlayPrefixRecord>
     operation: "upsert",
     version: 1,
     recordedAt: new Date(0).toISOString(),
+    mutationId: "fake-mutation-id",
     dimension: DIM,
     chunkCount: 0,
+    fingerprint: "f".repeat(64),
     containerLength: 1000,
     ...overrides,
   };
@@ -380,6 +392,66 @@ void test("compact() checks abort AFTER buildGeneration has fully completed (new
   assert.notEqual(await readOverlayPrefix(fs, "/root", stableNoteIdentity(canonicalizePath("B.md"))), null);
 });
 
+void test("(requirement 13) compact() never deletes a REPLACEMENT overlay written by an independent concurrent mutator after planning -- version-checked delete-if-matches, not a blind identity-keyed delete", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(31);
+  await seedBaseGeneration(fs, [makeNote("A.md", 0, random)], 1);
+  const store = new IndexStore(fs, "/root");
+  const bIdentity = stableNoteIdentity(canonicalizePath("B.md"));
+  const originalBVector = vector(random);
+  await store.upsertNote({ identity: bIdentity, sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, noteVector: originalBVector, chunkVectors: [] });
+
+  let released: () => void = () => {};
+  fs.pauseSignal = new Promise((resolve) => {
+    released = resolve;
+  });
+  // Pause exactly at the pointer-switch commit -- by this point buildGeneration/verify have
+  // already fully captured the snapshot's content; the delete-if-matches loop over B's overlay
+  // has not run yet.
+  fs.pauseMatcher = (point, path) => point === "rename" && path.includes("current.json");
+  const replacedBVector = vector(random);
+  fs.onPaused = () => {
+    // An INDEPENDENT concurrent mutator (a separate IndexStore instance, or another job) replaces
+    // B's overlay with new content -- bumping its version -- entirely outside this compact()'s own
+    // mutation queue, exactly the race requirement 13 must survive.
+    void writeUpsertOverlay(fs, "/root", { identity: bIdentity, sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, noteVector: replacedBVector, chunkVectors: [] }).then(() => released());
+  };
+
+  await store.compact(2);
+
+  // The replacement must still be there, untouched, at its bumped version.
+  const survivingB = await readOverlayPrefix(fs, "/root", bIdentity);
+  assert.ok(survivingB, "the replacement overlay written after planning must never be deleted");
+  assert.equal(survivingB?.version, 2);
+
+  // The merged committed view must still serve B (via its surviving overlay), not silently drop it.
+  const results = await store.queryRelated({ queryVector: replacedBVector, queryChunkVectors: [], limit: 5 });
+  assert.ok(results.some((r) => r.path === "B.md"));
+});
+
+void test("(requirement 10) finalizeCompactionFromSnapshot never deletes a replacement overlay written after the snapshot was described, using only the bounded {fileName, version} descriptor -- never a live CompactionPlan", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(41);
+  await seedBaseGeneration(fs, [makeNote("A.md", 0, random)], 1);
+  const bIdentity = stableNoteIdentity(canonicalizePath("B.md"));
+  await writeUpsertOverlay(fs, "/root", { identity: bIdentity, sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, noteVector: vector(random), chunkVectors: [] });
+
+  const plan = await planCompaction(fs, "/root");
+  const snapshot = describeCompactionSnapshot(plan);
+  await buildGeneration(fs, "/root", { generationId: 2, embeddingModel: plan.embeddingModel, dimension: plan.dimension, notes: plan.notes });
+
+  // B is replaced AFTER the snapshot was described but BEFORE activation ever runs.
+  const replacedBVector = vector(random);
+  await writeUpsertOverlay(fs, "/root", { identity: bIdentity, sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, noteVector: replacedBVector, chunkVectors: [] });
+
+  await finalizeCompactionFromSnapshot(fs, "/root", 2, snapshot.overlays);
+
+  const survivingB = await readOverlayPrefix(fs, "/root", bIdentity);
+  assert.ok(survivingB, "the replacement must survive activation-from-snapshot");
+  assert.equal(survivingB?.version, 2);
+  assert.equal(await loadCurrentGenerationId(fs, "/root"), 2);
+});
+
 void test("a query concurrent with an in-flight compaction sees the prior committed view until the pointer switch commits, then the new one", async () => {
   const fs = new FakeIndexFs();
   const random = seededRandom(12);
@@ -433,6 +505,41 @@ void test("upsertNote/deleteNote/compact are serialized: three concurrent upsert
   ]);
   const overlay = await readOverlayPrefix(fs, "/root", identity);
   assert.equal(overlay?.version, 3);
+});
+
+void test("(final-closure requirement 2) two INDEPENDENT IndexStore instances over the same fs+root share one mutation queue: their upserts for the same identity are serialized (strictly increasing versions), never racing", async () => {
+  const fs = new FakeIndexFs();
+  const storeA = new IndexStore(fs, "/root");
+  const storeB = new IndexStore(fs, "/root");
+  const identity = stableNoteIdentity(canonicalizePath("A.md"));
+  const random = seededRandom(99);
+  await Promise.all([
+    storeA.upsertNote({ identity, sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, noteVector: vector(random), chunkVectors: [] }),
+    storeB.upsertNote({ identity, sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, noteVector: vector(random), chunkVectors: [] }),
+    storeA.upsertNote({ identity, sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, noteVector: vector(random), chunkVectors: [] }),
+  ]);
+  const overlay = await readOverlayPrefix(fs, "/root", identity);
+  assert.equal(overlay?.version, 3, "all three mutations, across two independent IndexStore instances, must land on strictly increasing versions -- never lost/raced");
+});
+
+void test("(final-closure requirement 2) an independent IndexStore's compact() and another IndexStore's concurrent upsertNote for an UNRELATED identity are serialized through the shared queue, never interleaved mid-mutation", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(98);
+  await seedBaseGeneration(fs, [makeNote("A.md", 0, random)], 1);
+  const storeA = new IndexStore(fs, "/root");
+  const storeB = new IndexStore(fs, "/root");
+  await storeA.upsertNote({ identity: stableNoteIdentity(canonicalizePath("B.md")), sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, noteVector: vector(random), chunkVectors: [] });
+
+  const [compactResult] = await Promise.allSettled([
+    storeA.compact(2),
+    storeB.upsertNote({ identity: stableNoteIdentity(canonicalizePath("C.md")), sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, noteVector: vector(random), chunkVectors: [] }),
+  ]);
+  assert.equal(compactResult.status, "fulfilled");
+
+  // Whichever order the shared queue actually ran them in, the result must be fully consistent:
+  // C.md must be queryable either way (either compacted in, or still a valid pending overlay).
+  const results = await storeA.queryRelated({ queryVector: new Float32Array([1, 0, 0, 0]), queryChunkVectors: [], limit: 10 });
+  assert.ok(results.some((r) => r.path === "C.md"));
 });
 
 void test("queryRelated fails closed with an actionable IndexStoreError when an OWNED overlay file is corrupt -- it never silently resurrects base state or drops the corrupt note", async () => {
@@ -823,4 +930,36 @@ void test("upsertNote enforces PROJECTED ACTUAL steady-state memory at a legal h
   // A tombstone for a BRAND-NEW identity never adds a resident note vector, so it is never
   // blocked by the steady-state check either, even with "First.md"'s overlay still pending.
   await assert.doesNotReject(() => store.deleteNote(stableNoteIdentity(canonicalizePath("Big-1.md"))));
+});
+
+void test("(final-closure requirement 5) the SEMANTIC snapshot match and the BYTE-EXACT manifestArtifactFingerprint are genuinely different checks: identical metadata with altered-but-valid vector bytes passes the former but fails the latter", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(51);
+  const note = makeNote("A.md", 1, random);
+  await buildGeneration(fs, "/root", { generationId: 1, embeddingModel: MODEL, dimension: DIM, notes: [note] });
+  await switchCurrentGeneration(fs, "/root", 1);
+
+  const plan = await planCompaction(fs, "/root");
+  const snapshot = describeCompactionSnapshot(plan);
+  const { manifest: originalManifest } = await verifyGenerationFully(fs, "/root", 1);
+  const originalFingerprint = manifestArtifactFingerprint(originalManifest);
+
+  // Overwrite generation 1 with a FRESH, fully self-consistent build for the EXACT SAME identity/
+  // sourceHash/chunkCount (so the SEMANTIC snapshot must still match) but genuinely DIFFERENT
+  // (still valid, still unit-norm) vector bytes -- e.g. a non-deterministic re-embedding of the
+  // same source. This is "altered-but-valid", never "corrupt": it passes its own full integrity
+  // verification cleanly.
+  const alteredRandom = seededRandom(999);
+  const alteredNote: GenerationInputNote = { ...note, vector: vector(alteredRandom), loadChunkVectors: async () => [vector(alteredRandom)] };
+  await buildGeneration(fs, "/root", { generationId: 1, embeddingModel: MODEL, dimension: DIM, notes: [alteredNote] });
+
+  const { manifest: alteredManifest, noteMetadata: alteredNoteMetadata } = await verifyGenerationFully(fs, "/root", 1);
+
+  // The SEMANTIC check (identity/sourceHash/chunkCount only) still matches -- exactly as
+  // documented, this is not a byte-exact claim.
+  assert.equal(compactionSnapshotMatchesGeneration(snapshot, alteredManifest, alteredNoteMetadata), true);
+
+  // The BYTE-EXACT artifact fingerprint, which DOES cover the real vector-matrix checksum, must
+  // NOT match -- proving a post-receipt exact-artifact check catches what the semantic one cannot.
+  assert.notEqual(manifestArtifactFingerprint(alteredManifest), originalFingerprint);
 });
