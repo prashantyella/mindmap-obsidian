@@ -38,6 +38,24 @@
       ]
     },
     {
+      "name": "normalize_concepts title case matches Python str.title() word-boundary rules (hyphen/apostrophe/digit, not whitespace-only)",
+      "input": [
+        "state-of-the-art system",
+        "o'brien's theory",
+        "3d-printing basics",
+        "well_known concept"
+      ],
+      "limit": 10,
+      "max_words": 10,
+      "case_mode": "title",
+      "output": [
+        "State-Of-The-Art System",
+        "O'Brien'S Theory",
+        "3D-Printing Basics",
+        "Well_Known Concept"
+      ]
+    },
+    {
       "name": "filter_and_map_tags maps close matches to controlled vocabulary",
       "input": [
         "machinelearning",
