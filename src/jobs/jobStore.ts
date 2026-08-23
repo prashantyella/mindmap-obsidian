@@ -79,6 +79,11 @@ export class JobStore {
     return this.store.cleanupStaleTempFiles();
   }
 
+  /** Read-only: counts leftover temp files without removing them -- for preflight, which must never mutate (Checkpoint 9 requirement 2). */
+  countStaleTempFiles(): Promise<number> {
+    return this.store.countStaleTempFiles();
+  }
+
   private async loadOrInit(): Promise<JobStoreDocumentV1> {
     if (this.cached) return this.cached;
     const loaded = await this.store.load();

@@ -6,10 +6,13 @@ import { identityKey, type NoteRowMetadataV1 } from "./generationMetadata";
 import {
   buildGeneration,
   cleanupStaleStaging,
+  countStaleStaging,
   GenerationBuildCancelledError,
   loadCurrentGenerationId,
+  loadCurrentGenerationManifest,
   loadGeneration,
   switchCurrentGeneration,
+  verifyGenerationFully,
   type BuildGenerationInput,
   type GenerationInputNote,
   type LoadedGeneration,
@@ -844,6 +847,52 @@ export class IndexStore {
   }
 
   /**
+   * Read-only, manifest-only note count for the CURRENT committed
+   * generation, when one exists (`null` when there is no current
+   * pointer yet -- a fresh/empty index, never a fabricated `0`). This is
+   * deliberately the CHEAP, NOT-fully-verified count: it confirms a
+   * pointer and a manifest exist, never that `notes.mvx`/`notes.meta.json`
+   * checksums, shapes, or shard declarations actually check out. A caller
+   * that needs to prove the generation is genuinely trustworthy before
+   * querying/reporting a count against it must use
+   * `verifyCurrentGenerationFully()` instead -- see that method's own doc
+   * comment (Checkpoint 9 closure review item 6: "does not prove a current
+   * generation is fully verified despite comments/report claims").
+   */
+  async getCurrentNoteCount(): Promise<number | null> {
+    const manifest = await loadCurrentGenerationManifest(this.fs, this.root);
+    return manifest ? manifest.noteCount : null;
+  }
+
+  /**
+   * Read-only, FULLY verified summary of the current committed generation
+   * -- runs the exact same integrity check (`verifyGenerationFully`,
+   * shared with `switchCurrentGeneration`/`compact`'s own pre-activation
+   * verification) a real activation would: checksums for
+   * `notes.mvx`/`notes.meta.json` against the manifest, shape/count
+   * agreement, every chunk shard's declared ownership cross-checked, and
+   * a sample ranking query actually run against the resident data.
+   * Returns `null` -- never throws, never a fabricated count -- when
+   * there is no current generation yet, OR when verification itself
+   * fails for any reason (a corrupt/tampered shard, a checksum mismatch,
+   * etc.): a caller that needs "this generation is real and intact"
+   * before wiring a query/count into a comparison must treat `null`
+   * exactly like "no generation exists", never attempt to partially
+   * trust a failed verification. Read-only: never writes/activates
+   * anything, unlike `compact()`'s own use of the same underlying check.
+   */
+  async verifyCurrentGenerationFully(): Promise<{ noteCount: number } | null> {
+    const generationId = await loadCurrentGenerationId(this.fs, this.root);
+    if (generationId === null) return null;
+    try {
+      const { manifest } = await verifyGenerationFully(this.fs, this.root, generationId);
+      return { noteCount: manifest.noteCount };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Rejects (before writing anything) if: the pending-overlay-file budget
    * (`MAX_PENDING_OVERLAY_COUNT`/`MAX_PENDING_OVERLAY_CHUNK_ROWS`) would
    * be exceeded; the EFFECTIVE merged corpus would exceed
@@ -926,6 +975,11 @@ export class IndexStore {
   /** Best-effort startup housekeeping: removes any staging directory left behind by a build that never completed (including a cancelled one). Never touches `generations/`, `current.json`, or `overlays/`. */
   cleanupStaleStaging(): Promise<number> {
     return cleanupStaleStaging(this.fs, this.root);
+  }
+
+  /** Read-only: counts stale staging directories without removing them -- for preflight, which must never mutate (Checkpoint 9 requirement 2). */
+  countStaleStaging(): Promise<number> {
+    return countStaleStaging(this.fs, this.root);
   }
 }
 

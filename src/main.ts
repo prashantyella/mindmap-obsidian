@@ -33,6 +33,7 @@ import { reconcileReadingProcessedFromPythonState, shouldTriggerDailyReconciliat
 import { createObsidianVaultApi } from "./readingVault";
 import { ReadingModeController, type ReadingHealth, type ReadingMode, type ReadingPreview } from "./readingMode";
 import { registerMindmapCommands } from "./pluginCommands";
+import { createDevShadowIntegration, type DevShadowIntegration } from "virtual:mindmap-dev-shadow";
 import {
   coerceConfigString,
   getLlmProviderConfigStatus as resolveLlmProviderConfigStatus,
@@ -182,6 +183,19 @@ export default class MindmapPlugin extends Plugin {
   };
   private runtimeCoordinator: RuntimeReadinessCoordinator | null = null;
   private runtimeReadyKicked = false;
+  /**
+   * The Checkpoint 9 TypeScript engine/shadow coordinator, resolved through
+   * `virtual:mindmap-dev-shadow` (a real implementation for a dev build, a
+   * zero-import no-op stub for a production build -- see
+   * `src/engine/devShadowIntegration.ts`/`devShadowStub.ts`). Constructed
+   * lazily -- only the first time the development-only shadow command
+   * actually runs, never during ordinary `onload()`. The integration owns
+   * and disposes its own `MindmapEngine`; this plugin holds no production
+   * `mindmapEngine` property. Production commands/writes stay entirely on
+   * the Python path this checkpoint; nothing here is wired into
+   * `registerMindmapCommands` or any other production entry point.
+   */
+  private diagOverlay: DevShadowIntegration | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -222,6 +236,13 @@ export default class MindmapPlugin extends Plugin {
     );
 
     registerMindmapCommands(this);
+    if (__MINDMAP_DEV_BUILD__) {
+      this.addCommand({
+        id: "mindmap-dev-run-shadow-diagnostics",
+        name: "Development: Run TypeScript shadow diagnostics (read-only)",
+        callback: () => { void this.getOrCreateDiagOverlay().run(); },
+      });
+    }
     this.syncScheduler();
     registerVaultRefreshEvents(this.app.vault, (event) => this.registerEvent(event), (reason, paths) => {
       this.pendingScanService?.requestRefresh(reason, paths);
@@ -235,6 +256,9 @@ export default class MindmapPlugin extends Plugin {
   }
 
   onunload(): void {
+    if (__MINDMAP_DEV_BUILD__) {
+      this.diagOverlay?.dispose();
+    }
     this.runtimeCoordinator?.dispose();
     this.activeReaderChild?.kill();
     this.activeReaderChild = null;
@@ -2038,6 +2062,30 @@ export default class MindmapPlugin extends Plugin {
   private canManageConfig(runtime: ResolvedRuntime): boolean {
     const runtimeDir = getPluginRuntimeDir(this.getRuntimeContext());
     return path.normalize(runtime.configPath).startsWith(path.normalize(runtimeDir));
+  }
+
+  /**
+   * Lazily composes the optional diagnostics overlay integration over a
+   * real, plugin-owned data directory (`<pluginDir>/data/mindmap-engine`)
+   * -- never the vault root, never any Python-managed path. Only ever
+   * called from the dev-only diagnostics command's `callback`, itself only
+   * registered behind `__MINDMAP_DEV_BUILD__`. The integration owns and
+   * disposes its own engine; this method never touches engine internals
+   * directly.
+   */
+  private getOrCreateDiagOverlay(): DevShadowIntegration {
+    if (this.diagOverlay) return this.diagOverlay;
+    this.diagOverlay = createDevShadowIntegration({
+      pluginDir: this.getRuntimeContext().pluginDir,
+      vault: this.app.vault,
+      registerInterval: (callback, intervalMs) => this.registerInterval(window.setInterval(callback, intervalMs)),
+      appendLog: (message) => this.appendLog(message),
+      notice: (message, durationMs) => { new Notice(message, durationMs); },
+      getResolvedRuntime: () => this.getResolvedRuntime(),
+      canManageConfig: (runtime) => this.canManageConfig(runtime),
+      fetchImpl: requestUrlFetch,
+    });
+    return this.diagOverlay;
   }
 
 }

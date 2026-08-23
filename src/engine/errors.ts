@@ -63,6 +63,7 @@ export const ENGINE_ERROR_CODES = [
   "LAUNCH_AGENT_INVALID",
   "LAUNCH_AGENT_WRITE_FAILED",
   "LAUNCH_AGENT_OWNERSHIP_CONFLICT",
+  "PREFLIGHT_CONTRACT_INVALID",
 ] as const;
 
 export type EngineErrorCode = (typeof ENGINE_ERROR_CODES)[number];
