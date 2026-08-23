@@ -8,6 +8,7 @@ import {
   l2Norm,
   MAX_RANKING_LIMIT,
   normalizeVector,
+  normalizeVectorInto,
   rankNotes,
   refineWithChunks,
 } from "./cosineIndex";
@@ -50,6 +51,22 @@ void test("normalizeVector throws on a zero vector rather than silently returnin
 void test("normalizeVector throws on a non-finite component", () => {
   assert.throws(() => normalizeVector(vec(1, Number.NaN)), CosineIndexError);
   assert.throws(() => normalizeVector(vec(Number.POSITIVE_INFINITY, 1)), CosineIndexError);
+});
+
+void test("normalizeVectorInto writes the exact same result as normalizeVector, directly into an existing destination row at an offset", () => {
+  const v = vec(3, 4);
+  const expected = normalizeVector(v);
+  const dest = new Float32Array(6).fill(-1); // pre-filled, so untouched regions are provable
+  normalizeVectorInto(v, dest, 2);
+  assert.deepEqual([...dest], [-1, -1, expected[0], expected[1], -1, -1]);
+});
+
+void test("normalizeVectorInto throws on a zero vector or a non-finite component, leaving the destination untouched", () => {
+  const dest = new Float32Array(2).fill(-1);
+  assert.throws(() => normalizeVectorInto(vec(0, 0), dest), CosineIndexError);
+  assert.deepEqual([...dest], [-1, -1]);
+  assert.throws(() => normalizeVectorInto(vec(1, Number.NaN), dest), CosineIndexError);
+  assert.deepEqual([...dest], [-1, -1], "a rejected (non-finite) vector must never partially write into the destination");
 });
 
 void test("dotProduct of two normalized identical vectors is 1; of two orthogonal vectors is 0", () => {

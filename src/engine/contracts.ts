@@ -188,6 +188,10 @@ function assertIsoTimestamp(value: unknown, field: string, contractName: string)
  * and a `"path"` identity rejects an `appleAnnotationId` field outright
  * rather than ignoring it.
  */
+export function parseNoteIdentityV1(value: unknown, contractName = "NoteIdentityV1"): NoteIdentityV1 {
+  return parseNoteIdentity(value, contractName);
+}
+
 function parseNoteIdentity(value: unknown, contractName: string): NoteIdentityV1 {
   const label = `${contractName}.identity`;
   assertPlainObject(value, label);

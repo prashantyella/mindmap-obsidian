@@ -45,13 +45,16 @@ export const MAX_MANIFEST_NOTE_COUNT = 10_000;
 export const MAX_MANIFEST_CHUNK_COUNT = 100_000;
 /**
  * A single resident decoded shard is part of the steady-state memory
- * budget alongside the note matrix (see `benchmark.test.ts`): 10,000 rows
- * at the max dimension leaves real headroom for note-matrix bytes and
- * metadata bookkeeping inside the approved 128MB steady-state budget. The
- * manifest enforces this per-shard cap directly -- independent of, and
- * tighter than, the codec's own 512MB per-matrix ceiling, which permits a
- * far larger single shard than the steady-state memory budget can afford
- * to keep resident.
+ * budget alongside the note matrix (see `benchmark.test.ts`): at the
+ * design's TARGET dimension (1,024), 10,000 rows leaves real headroom
+ * inside the approved 128MB steady-state budget. This per-shard row cap
+ * is NOT sufficient on its own at a larger declared dimension -- 10,000
+ * rows at `MAX_DIMENSION` (8,192) alone is ~327MB, already far past
+ * 128MB. The combined `computeSteadyStateBytes`/`computeRebuildPeakBytes`/
+ * `computeDiskBytes` helpers in `budgets.ts` (enforced below, after
+ * `dimension` is known) are the AUTHORITATIVE, dimension-aware budget
+ * check; this row cap is a cheap, dimension-independent additional bound,
+ * not a substitute for it.
  */
 export const MAX_MANIFEST_SHARD_ROW_COUNT = 10_000;
 /** A manifest can never declare more shards than there are chunks to distribute among them (each shard must have at least 1 row), so this is tied to `MAX_MANIFEST_CHUNK_COUNT` rather than an independent, looser constant. */
@@ -152,6 +155,7 @@ function parseChunkShardEntry(value: unknown, index: number, dimension: number):
     shardId: requireNormalizedIdentifier(value.shardId, `chunkShards[${index}].shardId`),
     count,
     checksum: requireHex64(value.checksum, `chunkShards[${index}].checksum`),
+    offsetChecksum: requireHex64(value.offsetChecksum, `chunkShards[${index}].offsetChecksum`),
   };
 }
 
@@ -166,9 +170,10 @@ function parseChunkShardEntry(value: unknown, index: number, dimension: number):
  * over-cap `count`, a nonzero `chunkCount` with zero shards (or vice
  * versa), any shard whose declared `count` doesn't sum consistently with
  * `chunkCount`, any declared dimension/count whose encoded matrix could
- * not fit within the codec's byte budget, or a shape whose computed
+ * not fit within the codec's byte budget, a shape whose computed
  * steady-state/rebuild-peak/disk byte accounting (see `budgets.ts`)
- * exceeds the approved 128MB/512MB/600MB budgets.
+ * exceeds the approved 128MB/512MB/600MB budgets, or a missing/malformed
+ * `noteMetadataChecksum`/per-shard `offsetChecksum`.
  */
 export function parseVectorIndexManifestV1(value: unknown): VectorIndexManifestV1 {
   if (!isRecord(value)) {
@@ -193,6 +198,7 @@ export function parseVectorIndexManifestV1(value: unknown): VectorIndexManifestV
   }
   const codecVersion = SUPPORTED_CODEC_VERSION;
   const noteMatrixChecksum = requireHex64(value.noteMatrixChecksum, "manifest.noteMatrixChecksum");
+  const noteMetadataChecksum = requireHex64(value.noteMetadataChecksum, "manifest.noteMetadataChecksum");
   assertFitsMatrixByteBudget(dimension, noteCount, "manifest note matrix");
 
   if (!Array.isArray(value.chunkShards)) {
@@ -261,6 +267,7 @@ export function parseVectorIndexManifestV1(value: unknown): VectorIndexManifestV
     chunkCount,
     codecVersion,
     noteMatrixChecksum,
+    noteMetadataChecksum,
     chunkShards,
   };
 }

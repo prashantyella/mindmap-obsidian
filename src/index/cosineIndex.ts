@@ -36,6 +36,20 @@ export function l2Norm(vector: Float32Array): number {
  * vector was about to enter the index/query path.
  */
 export function normalizeVector(vector: Float32Array): Float32Array {
+  const normalized = new Float32Array(vector.length);
+  normalizeVectorInto(vector, normalized);
+  return normalized;
+}
+
+/**
+ * Normalizes `vector` and writes the result directly into `dest` starting
+ * at `destOffset`, instead of allocating a new array -- for a caller that
+ * already owns the destination slot (e.g. one row of a larger matrix being
+ * assembled), so the full source collection never needs a same-size
+ * temporary copy to survive just to be normalized. Same validation and
+ * zero/non-finite-vector failure semantics as `normalizeVector`.
+ */
+export function normalizeVectorInto(vector: Float32Array, dest: Float32Array, destOffset = 0): void {
   for (let i = 0; i < vector.length; i += 1) {
     if (!Number.isFinite(vector[i])) {
       throw new CosineIndexError(`vector component at index ${i} is not finite.`);
@@ -45,11 +59,9 @@ export function normalizeVector(vector: Float32Array): Float32Array {
   if (!(norm > 0)) {
     throw new CosineIndexError("cannot normalize a zero-norm vector.");
   }
-  const normalized = new Float32Array(vector.length);
   for (let i = 0; i < vector.length; i += 1) {
-    normalized[i] = vector[i] / norm;
+    dest[destOffset + i] = vector[i] / norm;
   }
-  return normalized;
 }
 
 /** Dot product of two equal-length vectors -- the cosine similarity of two ALREADY-normalized vectors. Callers that haven't normalized their inputs should go through `normalizeVector` first; this function itself does no normalization (it is the inner scoring primitive both note ranking and chunk refinement share). */
@@ -127,8 +139,8 @@ function assertNormalizedFiniteVector(vector: Float32Array, label: string): void
   }
 }
 
-/** Deterministic tie-break: higher score first; on an exact score tie, ascending canonical path -- stable and reproducible across runs/machines, never dependent on original array/insertion order. */
-function compareScored(a: ScoredNote, b: ScoredNote): number {
+/** Deterministic tie-break: higher score first; on an exact score tie, ascending canonical path -- stable and reproducible across runs/machines, never dependent on original array/insertion order. Exported so any caller that assembles/merges `ScoredNote[]` from more than one source (e.g. `indexStore.ts` combining lazily-loaded-shard and overlay refinement results) can re-sort with the exact same tie-break `rankNotes`/`refineWithChunks` themselves use. */
+export function compareScored(a: ScoredNote, b: ScoredNote): number {
   if (a.score !== b.score) return b.score - a.score;
   if (a.path < b.path) return -1;
   if (a.path > b.path) return 1;

@@ -43,7 +43,7 @@ export interface ChunkShardNoteOffset {
   length: number;
 }
 
-/** One physical chunk-vector shard's metadata, as recorded in the manifest -- the file itself (Checkpoint 5) is out of scope here; this is the description a manifest needs to reference it later. */
+/** One physical chunk-vector shard's metadata, as recorded in the manifest. */
 export interface ChunkShardManifestEntryV1 {
   schemaVersion: SchemaVersion;
   shardId: string;
@@ -51,6 +51,17 @@ export interface ChunkShardManifestEntryV1 {
   count: number;
   /** SHA-256 hex digest of this shard's encoded vector-matrix bytes (see `vectorCodec.ts`). */
   checksum: string;
+  /**
+   * SHA-256 hex digest of this shard's own per-note offset metadata (its
+   * `ChunkShardNoteOffset[]`, on disk as `shard-<id>.offsets.json` --
+   * Checkpoint 5). A vector-matrix checksum alone only proves the chunk
+   * VECTORS are byte-identical to what was written; it says nothing about
+   * whether the offset metadata mapping notes to rows in that matrix has
+   * been corrupted/truncated/tampered with. Both are integrity-critical:
+   * a corrupt offset table can silently misattribute one note's chunks to
+   * another's identity even when the underlying vector bytes are intact.
+   */
+  offsetChecksum: string;
 }
 
 /**
@@ -75,6 +86,16 @@ export interface VectorIndexManifestV1 {
   /** Version of the binary codec (`vectorCodec.ts`) this generation's matrices were encoded with -- distinct from `schemaVersion` (the manifest's own shape) so the two can evolve independently. */
   codecVersion: number;
   noteMatrixChecksum: string;
+  /**
+   * SHA-256 hex digest of this generation's note ROW metadata (its
+   * `NoteRowMetadataV1[]`, on disk as `notes.meta.json` -- Checkpoint 5):
+   * identity, sourceHash, embeddingModel, chunkCount, and rowIndex for
+   * every note. `noteMatrixChecksum` alone only proves the note VECTORS
+   * are byte-identical to what was written; it says nothing about whether
+   * the metadata mapping each row back to a note identity/sourceHash has
+   * been corrupted. Both are integrity-critical.
+   */
+  noteMetadataChecksum: string;
   chunkShards: ChunkShardManifestEntryV1[];
 }
 

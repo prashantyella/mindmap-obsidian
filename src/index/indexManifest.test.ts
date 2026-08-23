@@ -18,8 +18,9 @@ function validManifest(overrides: Record<string, unknown> = {}): Record<string, 
     chunkCount: 3,
     codecVersion: 1,
     noteMatrixChecksum: VALID_CHECKSUM,
+    noteMetadataChecksum: VALID_CHECKSUM,
     chunkShards: [
-      { schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM },
+      { schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM },
     ],
     ...overrides,
   };
@@ -58,6 +59,25 @@ void test("parseVectorIndexManifestV1 rejects a malformed checksum", () => {
   assert.throws(() => parseVectorIndexManifestV1(validManifest({ noteMatrixChecksum: "A".repeat(64) })), IndexManifestError, "must be lowercase");
 });
 
+void test("parseVectorIndexManifestV1 requires noteMetadataChecksum -- a vector-only checksum is not sufficient", () => {
+  assert.throws(() => parseVectorIndexManifestV1(validManifest({ noteMetadataChecksum: undefined })), IndexManifestError);
+  assert.throws(() => parseVectorIndexManifestV1(validManifest({ noteMetadataChecksum: "not-hex" })), IndexManifestError);
+});
+
+void test("parseVectorIndexManifestV1 requires each shard's offsetChecksum -- a vector-only shard checksum is not sufficient", () => {
+  assert.throws(
+    () => parseVectorIndexManifestV1(validManifest({ chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM }] })),
+    IndexManifestError,
+  );
+  assert.throws(
+    () =>
+      parseVectorIndexManifestV1(
+        validManifest({ chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM, offsetChecksum: "not-hex" }] }),
+      ),
+    IndexManifestError,
+  );
+});
+
 void test("parseVectorIndexManifestV1 rejects a malformed/impossible generationCreatedAt timestamp", () => {
   assert.throws(() => parseVectorIndexManifestV1(validManifest({ generationCreatedAt: "not-a-date" })), IndexManifestError);
   assert.throws(() => parseVectorIndexManifestV1(validManifest({ generationCreatedAt: "2026-02-30T00:00:00.000Z" })), IndexManifestError);
@@ -74,8 +94,8 @@ void test("parseVectorIndexManifestV1 rejects a duplicate shardId", () => {
         validManifest({
           chunkCount: 6,
           chunkShards: [
-            { schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM },
-            { schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM },
+            { schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM },
+            { schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM },
           ],
         }),
       ),
@@ -89,7 +109,7 @@ void test("parseVectorIndexManifestV1 rejects when shard counts do not sum to ch
       parseVectorIndexManifestV1(
         validManifest({
           chunkCount: 10,
-          chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM }],
+          chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM }],
         }),
       ),
     IndexManifestError,
@@ -98,11 +118,11 @@ void test("parseVectorIndexManifestV1 rejects when shard counts do not sum to ch
 
 void test("parseVectorIndexManifestV1 rejects a shard with a malformed checksum or a bad schemaVersion", () => {
   assert.throws(
-    () => parseVectorIndexManifestV1(validManifest({ chunkShards: [{ schemaVersion: 1, shardId: "s", count: 3, checksum: "bad" }] })),
+    () => parseVectorIndexManifestV1(validManifest({ chunkShards: [{ schemaVersion: 1, shardId: "s", count: 3, checksum: "bad", offsetChecksum: VALID_CHECKSUM }] })),
     IndexManifestError,
   );
   assert.throws(
-    () => parseVectorIndexManifestV1(validManifest({ chunkShards: [{ schemaVersion: 2, shardId: "s", count: 3, checksum: VALID_CHECKSUM }] })),
+    () => parseVectorIndexManifestV1(validManifest({ chunkShards: [{ schemaVersion: 2, shardId: "s", count: 3, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM }] })),
     IndexManifestError,
   );
 });
@@ -127,7 +147,7 @@ void test("parseVectorIndexManifestV1 rejects an embeddingModel/shardId containi
   assert.throws(
     () =>
       parseVectorIndexManifestV1(
-        validManifest({ chunkShards: [{ schemaVersion: 1, shardId: `shard${controlChar}0`, count: 3, checksum: VALID_CHECKSUM }] }),
+        validManifest({ chunkShards: [{ schemaVersion: 1, shardId: `shard${controlChar}0`, count: 3, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM }] }),
       ),
     IndexManifestError,
   );
@@ -140,12 +160,12 @@ void test("parseVectorIndexManifestV1 normalizes (trims) embeddingModel/shardId"
 
 void test("parseVectorIndexManifestV1 rejects a nonempty shard with a zero or negative count", () => {
   assert.throws(
-    () => parseVectorIndexManifestV1(validManifest({ chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 0, checksum: VALID_CHECKSUM }] })),
+    () => parseVectorIndexManifestV1(validManifest({ chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 0, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM }] })),
     IndexManifestError,
   );
   assert.throws(
     () =>
-      parseVectorIndexManifestV1(validManifest({ chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: -1, checksum: VALID_CHECKSUM }] })),
+      parseVectorIndexManifestV1(validManifest({ chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: -1, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM }] })),
     IndexManifestError,
   );
 });
@@ -155,7 +175,7 @@ void test("parseVectorIndexManifestV1 rejects a nonzero chunkCount with zero sha
   assert.throws(
     () =>
       parseVectorIndexManifestV1(
-        validManifest({ chunkCount: 0, chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM }] }),
+        validManifest({ chunkCount: 0, chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM }] }),
       ),
     IndexManifestError,
   );
@@ -168,8 +188,8 @@ void test("parseVectorIndexManifestV1 rejects duplicate shardIds that only diffe
         validManifest({
           chunkCount: 6,
           chunkShards: [
-            { schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM },
-            { schemaVersion: 1, shardId: "  shard-0  ", count: 3, checksum: VALID_CHECKSUM },
+            { schemaVersion: 1, shardId: "shard-0", count: 3, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM },
+            { schemaVersion: 1, shardId: "  shard-0  ", count: 3, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM },
           ],
         }),
       ),
@@ -195,7 +215,7 @@ void test("parseVectorIndexManifestV1 accepts the ordinary approved target shape
       dimension: 1024,
       noteCount: 10_000,
       chunkCount: 100_000,
-      chunkShards: Array.from({ length: 10 }, (_, i) => ({ schemaVersion: 1, shardId: `shard-${i}`, count: 10_000, checksum: VALID_CHECKSUM })),
+      chunkShards: Array.from({ length: 10 }, (_, i) => ({ schemaVersion: 1, shardId: `shard-${i}`, count: 10_000, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM })),
     }),
   );
   assert.equal(parsed.noteCount, 10_000);
@@ -214,7 +234,7 @@ void test("parseVectorIndexManifestV1 enforces the exact 10,000-note / 100,000-c
       validManifest({
         noteCount: 0,
         chunkCount: 100_000,
-        chunkShards: Array.from({ length: 10 }, (_, i) => ({ schemaVersion: 1, shardId: `shard-${i}`, count: 10_000, checksum: VALID_CHECKSUM })),
+        chunkShards: Array.from({ length: 10 }, (_, i) => ({ schemaVersion: 1, shardId: `shard-${i}`, count: 10_000, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM })),
       }),
     ),
   );
@@ -229,7 +249,7 @@ void test("parseVectorIndexManifestV1 enforces the exact 10,000-note / 100,000-c
 void test("parseVectorIndexManifestV1 enforces the exact MAX_MANIFEST_SHARD_ROW_COUNT (10,000) per-shard cap (accepts the boundary, rejects one past it, even though the codec's own 512MB ceiling would allow far more)", () => {
   assert.doesNotThrow(() =>
     parseVectorIndexManifestV1(
-      validManifest({ noteCount: 0, chunkCount: 10_000, chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 10_000, checksum: VALID_CHECKSUM }] }),
+      validManifest({ noteCount: 0, chunkCount: 10_000, chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 10_000, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM }] }),
     ),
   );
   assert.throws(
@@ -238,7 +258,7 @@ void test("parseVectorIndexManifestV1 enforces the exact MAX_MANIFEST_SHARD_ROW_
         validManifest({
           noteCount: 0,
           chunkCount: 10_001,
-          chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 10_001, checksum: VALID_CHECKSUM }],
+          chunkShards: [{ schemaVersion: 1, shardId: "shard-0", count: 10_001, checksum: VALID_CHECKSUM, offsetChecksum: VALID_CHECKSUM }],
         }),
       ),
     IndexManifestError,
