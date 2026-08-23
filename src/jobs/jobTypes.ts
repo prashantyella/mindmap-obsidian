@@ -737,6 +737,100 @@ export function parsePersistedJobV1(value: unknown): PersistedJobV1 {
   return { schemaVersion: 1, job, status, attempt: record.attempt, cancelRequested: record.cancelRequested, lastFailureCode, lastFailureClass, receipt, nextAttemptAtMs };
 }
 
+/**
+ * A durable link from one SCHEDULED occurrence's deterministic identity
+ * (`occurrenceId`, computed by `src/scheduling/scheduleTypes.ts` from
+ * schedule id + logical due instant + work identity -- never by this
+ * module) to the exact job it produced. This is what makes
+ * `JobStore.submitScheduledOccurrence` crash-safe across a job that
+ * completes (even synchronously, even reaching a TERMINAL status) before
+ * the schedule's own state is durably advanced: a retry of the SAME
+ * occurrenceId finds this record and returns the SAME job rather than
+ * appending a duplicate, regardless of that job's current status --
+ * `JobStore.appendOrCoalesce` (used by ordinary `JobEngine.submit`, e.g. a
+ * deliberate manual rerun) is completely unaffected and untouched by this
+ * registry: it still coalesces only onto non-terminal work, exactly as
+ * before.
+ *
+ * `acknowledged` is set once the schedule that produced this occurrence has
+ * durably recorded its own "submitted" outcome (crash protocol step d) --
+ * purely registry housekeeping, never load-bearing for correctness: an
+ * unacknowledged record is functionally identical to an acknowledged one
+ * for `submitScheduledOccurrence`'s own lookup, and losing track of whether
+ * an occurrence was ever acknowledged can never cause a duplicate job.
+ * Pruning (`JobStore`'s cap enforcement) may remove only ACKNOWLEDGED
+ * entries -- an unacknowledged entry is a live crash-recovery receipt that
+ * must never be silently dropped while its schedule might still need it.
+ */
+export interface ScheduledOccurrenceRecordV1 {
+  schemaVersion: SchemaVersion;
+  occurrenceId: string;
+  /** The `idempotencyKey` of the job this occurrence is linked to -- redundant with `jobId` but checked independently at parse time against the referenced job's own key, so a corrupted/hand-edited registry pointing an occurrence at a job with a DIFFERENT idempotency key fails closed rather than silently trusting a dangling/mismatched link. */
+  idempotencyKey: string;
+  jobId: string;
+  acknowledged: boolean;
+  createdAt: string;
+  /** Present iff `acknowledged`; never present, never stale, on an unacknowledged record. */
+  acknowledgedAt?: string;
+}
+
+export const MAX_SCHEDULED_OCCURRENCES = 2000;
+const OCCURRENCE_ID_PATTERN = /^[0-9a-f]{64}$/;
+
+/** Value-free on failure: a caller-supplied occurrenceId that fails this check is never echoed into the thrown error. */
+export function assertScheduledOccurrenceId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !OCCURRENCE_ID_PATTERN.test(value)) {
+    throw new EngineError("JOB_SHAPE_INVALID", "occurrenceId must be a 64-character lowercase hex hash.", {});
+  }
+}
+
+function parseScheduledOccurrenceRecordV1(value: unknown): ScheduledOccurrenceRecordV1 {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new EngineError("JOB_STORE_CORRUPT", "ScheduledOccurrenceRecordV1 must be a JSON object.", {});
+  }
+  const record = value as Record<string, unknown>;
+  if (record.schemaVersion !== 1) {
+    throw new EngineError("JOB_STORE_CORRUPT", "ScheduledOccurrenceRecordV1.schemaVersion must be 1.", {});
+  }
+  assertScheduledOccurrenceId(record.occurrenceId);
+  assertBoundedControlFreeIdentifier(record.idempotencyKey, 128, "ScheduledOccurrenceRecordV1.idempotencyKey", "JOB_STORE_CORRUPT");
+  const idempotencyKey = record.idempotencyKey;
+  assertBoundedControlFreeIdentifier(record.jobId, MAX_JOB_ID_LENGTH, "ScheduledOccurrenceRecordV1.jobId", "JOB_STORE_CORRUPT");
+  const jobId = record.jobId;
+  if (typeof record.acknowledged !== "boolean") {
+    throw new EngineError("JOB_STORE_CORRUPT", "ScheduledOccurrenceRecordV1.acknowledged must be a boolean.", {});
+  }
+  if (typeof record.createdAt !== "string") {
+    throw new EngineError("JOB_STORE_CORRUPT", "ScheduledOccurrenceRecordV1.createdAt must be a string.", {});
+  }
+  const createdAtDate = new Date(record.createdAt);
+  if (Number.isNaN(createdAtDate.getTime()) || createdAtDate.toISOString() !== record.createdAt) {
+    throw new EngineError("JOB_STORE_CORRUPT", "ScheduledOccurrenceRecordV1.createdAt must be a canonical UTC ISO-8601 timestamp.", {});
+  }
+  let acknowledgedAt: string | undefined;
+  if (record.acknowledgedAt !== undefined) {
+    if (typeof record.acknowledgedAt !== "string") {
+      throw new EngineError("JOB_STORE_CORRUPT", "ScheduledOccurrenceRecordV1.acknowledgedAt must be a string.", {});
+    }
+    const acknowledgedAtDate = new Date(record.acknowledgedAt);
+    if (Number.isNaN(acknowledgedAtDate.getTime()) || acknowledgedAtDate.toISOString() !== record.acknowledgedAt) {
+      throw new EngineError("JOB_STORE_CORRUPT", "ScheduledOccurrenceRecordV1.acknowledgedAt must be a canonical UTC ISO-8601 timestamp.", {});
+    }
+    if (acknowledgedAtDate.getTime() < createdAtDate.getTime()) {
+      throw new EngineError("JOB_STORE_CORRUPT", "ScheduledOccurrenceRecordV1.acknowledgedAt must not precede createdAt.", {});
+    }
+    acknowledgedAt = record.acknowledgedAt;
+  }
+  if (record.acknowledged !== (acknowledgedAt !== undefined)) {
+    throw new EngineError("JOB_STORE_CORRUPT", "ScheduledOccurrenceRecordV1.acknowledgedAt must be present iff acknowledged is true.", {});
+  }
+  const extra = Object.keys(record).filter((key) => !["schemaVersion", "occurrenceId", "idempotencyKey", "jobId", "acknowledged", "createdAt", "acknowledgedAt"].includes(key));
+  if (extra.length > 0) {
+    throw new EngineError("JOB_STORE_CORRUPT", `ScheduledOccurrenceRecordV1 has unrecognized field(s): ${extra.join(", ")}.`, {});
+  }
+  return { schemaVersion: 1, occurrenceId: record.occurrenceId, idempotencyKey, jobId, acknowledged: record.acknowledged, createdAt: record.createdAt, acknowledgedAt };
+}
+
 export interface ProviderPauseV1 {
   active: boolean;
   code?: string;
@@ -780,6 +874,8 @@ export interface JobStoreDocumentV1 {
   schemaVersion: SchemaVersion;
   jobs: PersistedJobV1[];
   providerPause: ProviderPauseV1;
+  /** Absent on a document persisted before Checkpoint 8's occurrence registry existed -- `parseJobStoreDocumentV1` defaults it to `[]` explicitly (a genuine migration path, never a silent pass-through of some OTHER malformed value: present-but-not-an-array, or present-with-a-malformed-entry, still fails closed). */
+  scheduledOccurrences: ScheduledOccurrenceRecordV1[];
 }
 
 export function parseJobStoreDocumentV1(value: unknown): JobStoreDocumentV1 {
@@ -799,11 +895,13 @@ export function parseJobStoreDocumentV1(value: unknown): JobStoreDocumentV1 {
   const jobs = record.jobs.map((entry) => parsePersistedJobV1(entry));
   const seenIds = new Set<string>();
   const seenKeys = new Set<string>();
+  const jobsById = new Map<string, PersistedJobV1>();
   for (const persisted of jobs) {
     if (seenIds.has(persisted.job.jobId)) {
       throw new EngineError("JOB_STORE_CORRUPT", `Duplicate jobId "${persisted.job.jobId}" in job store.`, {});
     }
     seenIds.add(persisted.job.jobId);
+    jobsById.set(persisted.job.jobId, persisted);
     if (!isTerminalJobStatus(persisted.status)) {
       if (seenKeys.has(persisted.job.idempotencyKey)) {
         throw new EngineError("JOB_STORE_CORRUPT", `Duplicate active idempotencyKey "${persisted.job.idempotencyKey}" in job store.`, {});
@@ -811,8 +909,39 @@ export function parseJobStoreDocumentV1(value: unknown): JobStoreDocumentV1 {
       seenKeys.add(persisted.job.idempotencyKey);
     }
   }
+
+  // Explicit schema/default migration path (requirement 1): absent entirely -> a fresh, empty
+  // registry; present -> strictly parsed and cross-validated against `jobs` above, never trusted
+  // as-is. A malformed present value fails closed exactly like every other field here.
+  let scheduledOccurrences: ScheduledOccurrenceRecordV1[];
+  if (record.scheduledOccurrences === undefined) {
+    scheduledOccurrences = [];
+  } else {
+    if (!Array.isArray(record.scheduledOccurrences)) {
+      throw new EngineError("JOB_STORE_CORRUPT", "JobStoreDocumentV1.scheduledOccurrences must be an array.", {});
+    }
+    if (record.scheduledOccurrences.length > MAX_SCHEDULED_OCCURRENCES) {
+      throw new EngineError("JOB_CAP_EXCEEDED", `JobStoreDocumentV1.scheduledOccurrences exceeds max count (${MAX_SCHEDULED_OCCURRENCES}).`, {});
+    }
+    scheduledOccurrences = record.scheduledOccurrences.map((entry) => parseScheduledOccurrenceRecordV1(entry));
+    const seenOccurrenceIds = new Set<string>();
+    for (const occurrence of scheduledOccurrences) {
+      if (seenOccurrenceIds.has(occurrence.occurrenceId)) {
+        throw new EngineError("JOB_STORE_CORRUPT", `Duplicate occurrenceId "${occurrence.occurrenceId}" in scheduled-occurrence registry.`, {});
+      }
+      seenOccurrenceIds.add(occurrence.occurrenceId);
+      const referencedJob = jobsById.get(occurrence.jobId);
+      if (!referencedJob) {
+        throw new EngineError("JOB_STORE_CORRUPT", `Scheduled occurrence "${occurrence.occurrenceId}" references a missing job "${occurrence.jobId}".`, {});
+      }
+      if (referencedJob.job.idempotencyKey !== occurrence.idempotencyKey) {
+        throw new EngineError("JOB_STORE_CORRUPT", `Scheduled occurrence "${occurrence.occurrenceId}" idempotencyKey does not match its referenced job's idempotencyKey.`, {});
+      }
+    }
+  }
+
   const providerPause = parseProviderPauseV1(record.providerPause);
-  return { schemaVersion: 1, jobs, providerPause };
+  return { schemaVersion: 1, jobs, providerPause, scheduledOccurrences };
 }
 
 /**

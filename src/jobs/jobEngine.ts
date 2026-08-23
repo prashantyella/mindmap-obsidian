@@ -13,6 +13,7 @@ import {
 import { EngineError, isEngineError } from "../engine/errors";
 import type { JobStore } from "./jobStore";
 import {
+  assertScheduledOccurrenceId,
   classifyFailureCode,
   isTerminalJobStatus,
   MAX_ATTEMPT_COUNT,
@@ -303,6 +304,74 @@ export class JobEngine {
     const { job: result } = await this.store.appendOrCoalesce(persisted);
     this.kick();
     return result;
+  }
+
+  /**
+   * The crash-safe scheduled-submission entry point (Checkpoint 8
+   * requirement 6). Restricted to `input.trigger === "scheduled"` -- a
+   * deliberate manual/Reading/startup submit always goes through the
+   * ordinary `submit()` above, which is completely unaffected by this
+   * method or the occurrence registry it writes to (terminal jobs still
+   * never block a manual rerun). `occurrenceId` must be the caller's
+   * deterministic, bounded hex64 occurrence identity (see
+   * `src/scheduling/scheduleTypes.ts`'s `computeScheduleOccurrenceId` --
+   * this module never computes one itself, only validates its SHAPE).
+   *
+   * Delegates entirely to `JobStore.submitScheduledOccurrence`'s single
+   * atomic commit: a retry with the SAME `occurrenceId` always returns the
+   * SAME job, regardless of that job's current status -- including a job
+   * that ran synchronously to a terminal status before this call's own
+   * caller (`CoreScheduler`) got a chance to persist its own outcome. This
+   * is exactly what prevents a duplicate job on a crash-and-restart.
+   */
+  async submitScheduledOccurrence(input: SubmitJobInput, occurrenceId: string): Promise<PersistedJobV1> {
+    if (this.disposed) {
+      throw new EngineError("JOB_SHAPE_INVALID", "Cannot submit a scheduled occurrence: JobEngine has been disposed.", {});
+    }
+    if (input.trigger !== "scheduled") {
+      throw new EngineError("JOB_SHAPE_INVALID", 'submitScheduledOccurrence requires input.trigger === "scheduled".', {});
+    }
+    assertScheduledOccurrenceId(occurrenceId);
+
+    const target = buildTarget(input);
+    const sourceHash = input.kind === "process-note" ? input.sourceHash : undefined;
+    const embeddingModel = input.kind === "process-note" ? input.embeddingModel : undefined;
+    const idempotencyKey = computeJobIdempotencyKey(input.kind, target, input.pipelineVersion, sourceHash, embeddingModel);
+
+    const nowIso = this.nowIso();
+    const job: QueueJobV1 = {
+      schemaVersion: 1,
+      jobId: randomUUID(),
+      trigger: input.trigger,
+      kind: input.kind,
+      target,
+      sourceHash,
+      embeddingModel,
+      pipelineVersion: input.pipelineVersion,
+      phase: JOB_KIND_PHASES[input.kind][0],
+      idempotencyKey,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    const persisted: PersistedJobV1 = { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false };
+    const { job: result } = await this.store.submitScheduledOccurrence(occurrenceId, persisted, nowIso);
+    this.kick();
+    return result;
+  }
+
+  /**
+   * Marks one scheduled occurrence acknowledged -- crash protocol step (d):
+   * called ONLY after the caller (`CoreScheduler`) has already durably
+   * persisted its own "submitted" outcome for this occurrence. Idempotent
+   * and safe to call speculatively/repeatedly; a failure here is harmless
+   * (see `JobStore.acknowledgeScheduledOccurrence`'s doc comment) and is
+   * never load-bearing for correctness -- a caller may swallow a rejection
+   * from this method entirely.
+   */
+  async acknowledgeScheduledOccurrence(occurrenceId: string, atMs?: number): Promise<void> {
+    assertScheduledOccurrenceId(occurrenceId);
+    const nowIso = atMs !== undefined ? new Date(atMs).toISOString() : this.nowIso();
+    await this.store.acknowledgeScheduledOccurrence(occurrenceId, nowIso);
   }
 
   /** No-op if the job is already terminal (nothing left to cancel). */

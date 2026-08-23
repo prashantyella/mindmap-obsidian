@@ -684,3 +684,102 @@ void test("(last-contract guard 4) resetFault() returns false while an explicit 
 
   assert.equal(engine.resetFault(), true);
 });
+
+// ---------------------------------------------------------------------------
+// Checkpoint 8 requirement 6: crash-safe scheduled occurrence submission
+// ---------------------------------------------------------------------------
+
+const OCCURRENCE_ID_A = "a".repeat(64);
+const OCCURRENCE_ID_B = "b".repeat(64);
+
+void test("submitScheduledOccurrence rejects a non-scheduled trigger and a malformed occurrenceId", async () => {
+  const runner = new ScriptedRunner(linearAdvanceScript("rebuild-index"));
+  const { engine } = makeEngine({ "rebuild-index": runner });
+  await assert.rejects(
+    () => engine.submitScheduledOccurrence({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 }, OCCURRENCE_ID_A),
+    (error: unknown) => isEngineErrorLike(error, "JOB_SHAPE_INVALID"),
+  );
+  await assert.rejects(
+    () => engine.submitScheduledOccurrence({ trigger: "scheduled", kind: "rebuild-index", pipelineVersion: 1 }, "not-hex64"),
+    (error: unknown) => isEngineErrorLike(error, "JOB_SHAPE_INVALID"),
+  );
+});
+
+void test("submitScheduledOccurrence: a synchronous-fast runner completes the job BEFORE the caller ever gets a chance to persist its own outcome -- a retry with the same occurrenceId still returns the SAME terminal job, never a duplicate", async () => {
+  // The runner advances a rebuild-index job through every phase synchronously -- by the time
+  // submitScheduledOccurrence's own promise resolves, JobEngine's background pump may have ALREADY
+  // driven this job all the way to "completed" (kick() fires the pump immediately after append,
+  // and drain()'s loop below never waits on wall-clock time). This is exactly the race requirement
+  // 6 targets: a scheduler that crashes before persisting its own "submitted" outcome must still
+  // find the SAME job on retry.
+  const runner = new ScriptedRunner(linearAdvanceScript("rebuild-index"));
+  const { engine, store } = makeEngine({ "rebuild-index": runner });
+
+  const first = await engine.submitScheduledOccurrence({ trigger: "scheduled", kind: "rebuild-index", pipelineVersion: 1 }, OCCURRENCE_ID_A);
+  await engine.drain(); // ensure the pump has fully settled (deterministic instead of racing a background kick)
+  const afterFirst = await store.getById(first.job.jobId);
+  assert.equal(afterFirst?.status, "completed");
+
+  // Simulate the "crash before ScheduleStore state persisted" retry: identical occurrenceId.
+  const retry = await engine.submitScheduledOccurrence({ trigger: "scheduled", kind: "rebuild-index", pipelineVersion: 1 }, OCCURRENCE_ID_A);
+  assert.equal(retry.job.jobId, first.job.jobId, "the retry must return the exact same job, not a new one");
+  assert.equal(retry.status, "completed");
+  assert.equal((await store.list()).length, 1, "at most one job for this occurrence, ever");
+});
+
+void test("submitScheduledOccurrence: a DIFFERENT occurrenceId for the same work identity is treated as a genuinely new occurrence (a fresh due instant), not a duplicate coalesce", async () => {
+  const runner = new ScriptedRunner(linearAdvanceScript("rebuild-index"));
+  const { engine, store } = makeEngine({ "rebuild-index": runner });
+  const input = { trigger: "scheduled" as const, kind: "rebuild-index" as const, pipelineVersion: 1 };
+
+  const first = await engine.submitScheduledOccurrence(input, OCCURRENCE_ID_A);
+  await engine.drain();
+  // Same idempotencyKey (identical work), but the FIRST job is now terminal, so a genuinely new
+  // logical occurrence (a new due instant, hence a new occurrenceId) legitimately gets its OWN job
+  // -- this is the ordinary "the previous run finished; today's run is new work" case.
+  const second = await engine.submitScheduledOccurrence(input, OCCURRENCE_ID_B);
+  assert.notEqual(second.job.jobId, first.job.jobId);
+  assert.equal((await store.list()).length, 2);
+});
+
+void test("submitScheduledOccurrence: a manual submit racing a scheduled occurrence for identical work links the occurrence to whichever job wins, never duplicating", async () => {
+  const runner = new ScriptedRunner(linearAdvanceScript("rebuild-index"));
+  const { engine, store } = makeEngine({ "rebuild-index": runner });
+
+  const manual = await engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 });
+  const scheduled = await engine.submitScheduledOccurrence({ trigger: "scheduled", kind: "rebuild-index", pipelineVersion: 1 }, OCCURRENCE_ID_A);
+  assert.equal(scheduled.job.jobId, manual.job.jobId, "the occurrence links to the already-existing manual job rather than duplicating it");
+  assert.equal((await store.list()).length, 1);
+});
+
+void test("acknowledgeScheduledOccurrence is idempotent and safe to call for an unknown occurrenceId", async () => {
+  const runner = new ScriptedRunner(linearAdvanceScript("rebuild-index"));
+  const { engine, store } = makeEngine({ "rebuild-index": runner });
+  await assert.doesNotReject(() => engine.acknowledgeScheduledOccurrence(OCCURRENCE_ID_A));
+
+  const job = await engine.submitScheduledOccurrence({ trigger: "scheduled", kind: "rebuild-index", pipelineVersion: 1 }, OCCURRENCE_ID_A);
+  const occurrence = await store.getScheduledOccurrence(OCCURRENCE_ID_A);
+  assert.equal(occurrence?.jobId, job.job.jobId);
+  assert.equal(occurrence?.acknowledged, false);
+
+  await engine.acknowledgeScheduledOccurrence(OCCURRENCE_ID_A, 2_000_000);
+  await engine.acknowledgeScheduledOccurrence(OCCURRENCE_ID_A, 3_000_000); // second ack: idempotent no-op
+  const acked = await store.getScheduledOccurrence(OCCURRENCE_ID_A);
+  assert.equal(acked?.acknowledged, true);
+});
+
+void test("ordinary submit()/manual reruns remain completely unaffected by scheduled-occurrence submission -- a terminal job never blocks a deliberate manual rerun", async () => {
+  const runner = new ScriptedRunner(linearAdvanceScript("rebuild-index"));
+  const { engine, store } = makeEngine({ "rebuild-index": runner });
+  const scheduled = await engine.submitScheduledOccurrence({ trigger: "scheduled", kind: "rebuild-index", pipelineVersion: 1 }, OCCURRENCE_ID_A);
+  await engine.drain();
+  assert.equal((await store.getById(scheduled.job.jobId))?.status, "completed");
+
+  const manualRerun = await engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 });
+  assert.notEqual(manualRerun.job.jobId, scheduled.job.jobId, "a manual rerun after terminal must create a new job, exactly as before this checkpoint");
+  assert.equal((await store.list()).length, 2);
+});
+
+function isEngineErrorLike(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === code;
+}

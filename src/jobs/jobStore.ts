@@ -2,14 +2,17 @@ import { AtomicStore, type AtomicStoreFs } from "../engine/atomicStore";
 import { EngineError } from "../engine/errors";
 import {
   assertLegalPhaseTransition,
+  assertScheduledOccurrenceId,
   assertValidSuccessorShape,
   isTerminalJobStatus,
   MAX_PERSISTED_JOBS,
+  MAX_SCHEDULED_OCCURRENCES,
   MAX_STORE_SERIALIZED_BYTES,
   parseJobStoreDocumentV1,
   type JobStoreDocumentV1,
   type PersistedJobV1,
   type ProviderPauseV1,
+  type ScheduledOccurrenceRecordV1,
 } from "./jobTypes";
 
 const JOB_STORE_FILE_NAME = "jobs/queue.json";
@@ -79,7 +82,7 @@ export class JobStore {
   private async loadOrInit(): Promise<JobStoreDocumentV1> {
     if (this.cached) return this.cached;
     const loaded = await this.store.load();
-    const doc = loaded ?? { schemaVersion: 1 as const, jobs: [], providerPause: { active: false } };
+    const doc = loaded ?? { schemaVersion: 1 as const, jobs: [], providerPause: { active: false }, scheduledOccurrences: [] };
     this.cached = deepFreeze(doc);
     return this.cached;
   }
@@ -108,6 +111,15 @@ export class JobStore {
     const run = this.tail.then(async () => {
       const doc = await this.loadOrInit();
       const { doc: next, resultOf } = fn(doc);
+      // Reference-equality fast path (final-integration requirement 2): a genuine no-op mutation
+      // (e.g. acknowledging an already-acknowledged/unknown occurrence) returns the exact SAME
+      // `doc` object it was handed -- never a clone -- as its proposed next document. When that's
+      // the case there is nothing to persist: skip re-validation/`AtomicStore.save` entirely rather
+      // than writing a byte-identical document back to disk. `doc` is already the last committed,
+      // frozen, verified document (straight from `loadOrInit`), so returning it as-is is safe.
+      if (next === doc) {
+        return resultOf(doc);
+      }
       const verified = deepFreeze(parseJobStoreDocumentV1(deepClone(next)));
       await this.store.save(verified);
       this.cached = verified;
@@ -161,8 +173,8 @@ export class JobStore {
       if (!isTerminalJobStatus(job.status) && doc.jobs.some((entry) => entry.job.idempotencyKey === job.job.idempotencyKey && !isTerminalJobStatus(entry.status))) {
         throw new EngineError("JOB_SHAPE_INVALID", `Duplicate active idempotencyKey "${job.job.idempotencyKey}".`, {});
       }
-      const jobs = this.withinCap(doc.jobs, 1);
-      return { doc: { ...doc, jobs: [...jobs, job] }, resultOf: () => undefined };
+      const { jobs, scheduledOccurrences } = this.pruneForCap(doc, 1);
+      return { doc: { ...doc, jobs: [...jobs, job], scheduledOccurrences }, resultOf: () => undefined };
     });
   }
 
@@ -200,38 +212,193 @@ export class JobStore {
       if (doc.jobs.some((entry) => entry.job.jobId === job.job.jobId)) {
         throw new EngineError("JOB_SHAPE_INVALID", `Duplicate jobId "${job.job.jobId}".`, {});
       }
-      const jobs = this.withinCap(doc.jobs, 1);
+      const { jobs, scheduledOccurrences } = this.pruneForCap(doc, 1);
       const newJobId = job.job.jobId;
       const resultOf = (verified: JobStoreDocumentV1): { job: PersistedJobV1; coalesced: boolean } => ({
         job: verified.jobs.find((entry) => entry.job.jobId === newJobId)!,
         coalesced: false,
       });
-      return { doc: { ...doc, jobs: [...jobs, job] }, resultOf };
+      return { doc: { ...doc, jobs: [...jobs, job], scheduledOccurrences }, resultOf };
     });
   }
 
-  /** Shared cap-enforcement/pruning logic used by both `appendJob` and `appendOrCoalesce`. */
+  /** Every job any UNACKNOWLEDGED occurrence record still references -- a live crash-recovery receipt, never eligible for terminal-job cap pruning even though the job itself may be terminal. */
+  private jobIdsProtectedByPendingOccurrences(doc: JobStoreDocumentV1): ReadonlySet<string> {
+    return new Set(doc.scheduledOccurrences.filter((entry) => !entry.acknowledged).map((entry) => entry.jobId));
+  }
+
   /**
-   * `protectedJobIds` (Checkpoint 7 last-contract guard 2): entries whose
-   * `jobId` is in this set are NEVER pruned, even if terminal -- used by
-   * `supersedeWithSuccessor` to guarantee the just-superseded old job
-   * (freshly marked terminal in THIS same commit) always survives cap
-   * enforcement, so the `old` job in its result is always well-defined
-   * rather than silently absent because it happened to be the
-   * oldest-by-`updatedAt` terminal entry at the exact moment it was created.
+   * The ONE cap-enforcement/pruning path every mutation that appends a job
+   * goes through -- `appendJob`, `appendOrCoalesce`, `supersedeWithSuccessor`,
+   * and `submitScheduledOccurrence`'s "new" branch. Prunes terminal jobs
+   * (oldest `updatedAt` first) to make room, same as before, but ALSO keeps
+   * the occurrence registry consistent with whatever it just pruned
+   * (requirement 1): every job an UNACKNOWLEDGED occurrence still
+   * references is protected from pruning (as before); every job an
+   * ACKNOWLEDGED occurrence references that DOES get pruned has its
+   * occurrence record removed IN THE SAME COMMIT, so this can never
+   * propose a document with a dangling occurrence-registry cross-reference
+   * -- `parseJobStoreDocumentV1`'s own referential-integrity check would
+   * otherwise reject the very document this method is trying to produce.
+   *
+   * `extraProtectedJobIds` layers in a caller-specific protection on top
+   * (e.g. `supersedeWithSuccessor`'s just-superseded `oldJobId`).
    */
-  private withinCap(jobs: readonly PersistedJobV1[], additional: number, protectedJobIds: ReadonlySet<string> = new Set()): PersistedJobV1[] {
-    let result = [...jobs];
-    if (result.length + additional > MAX_PERSISTED_JOBS) {
-      const terminal = result.filter((entry) => isTerminalJobStatus(entry.status) && !protectedJobIds.has(entry.job.jobId)).sort((a, b) => a.job.updatedAt.localeCompare(b.job.updatedAt));
-      const nonTerminal = result.filter((entry) => !isTerminalJobStatus(entry.status) || protectedJobIds.has(entry.job.jobId));
-      const keepTerminalCount = Math.max(0, terminal.length - (result.length + additional - MAX_PERSISTED_JOBS));
-      result = [...terminal.slice(terminal.length - keepTerminalCount), ...nonTerminal];
-      if (result.length + additional > MAX_PERSISTED_JOBS) {
-        throw new EngineError("JOB_CAP_EXCEEDED", `Cannot append job: ${result.length} non-prunable jobs already persisted (max ${MAX_PERSISTED_JOBS}).`, {});
+  private pruneForCap(
+    doc: JobStoreDocumentV1,
+    additionalJobs: number,
+    extraProtectedJobIds: ReadonlySet<string> = new Set(),
+  ): { jobs: PersistedJobV1[]; scheduledOccurrences: ScheduledOccurrenceRecordV1[] } {
+    let jobs = [...doc.jobs];
+    let scheduledOccurrences = doc.scheduledOccurrences;
+    if (jobs.length + additionalJobs > MAX_PERSISTED_JOBS) {
+      const protectedJobIds = new Set([...this.jobIdsProtectedByPendingOccurrences(doc), ...extraProtectedJobIds]);
+      const terminal = jobs.filter((entry) => isTerminalJobStatus(entry.status) && !protectedJobIds.has(entry.job.jobId)).sort((a, b) => a.job.updatedAt.localeCompare(b.job.updatedAt));
+      const nonTerminal = jobs.filter((entry) => !isTerminalJobStatus(entry.status) || protectedJobIds.has(entry.job.jobId));
+      const keepTerminalCount = Math.max(0, terminal.length - (jobs.length + additionalJobs - MAX_PERSISTED_JOBS));
+      const keptTerminal = terminal.slice(terminal.length - keepTerminalCount);
+      const prunedTerminal = terminal.slice(0, terminal.length - keepTerminalCount);
+      jobs = [...keptTerminal, ...nonTerminal];
+      if (jobs.length + additionalJobs > MAX_PERSISTED_JOBS) {
+        throw new EngineError("JOB_CAP_EXCEEDED", `Cannot append job: ${jobs.length} non-prunable jobs already persisted (max ${MAX_PERSISTED_JOBS}).`, {});
+      }
+      if (prunedTerminal.length > 0) {
+        const prunedJobIds = new Set(prunedTerminal.map((entry) => entry.job.jobId));
+        // Every pruned job's UNACKNOWLEDGED occurrence link is impossible here (those jobs were
+        // protected above) -- only ACKNOWLEDGED links can reference a pruned job, and those are
+        // dropped together with it so no dangling cross-reference is ever proposed.
+        scheduledOccurrences = scheduledOccurrences.filter((entry) => !prunedJobIds.has(entry.jobId));
       }
     }
+    return { jobs, scheduledOccurrences };
+  }
+
+  /**
+   * Bounded, deterministic pruning for the occurrence registry itself
+   * (distinct from job-cap pruning above): only ACKNOWLEDGED entries are
+   * ever eligible, oldest-`acknowledgedAt`-first. If the registry is still
+   * over cap after removing every acknowledged entry -- i.e. it is at
+   * capacity with UNACKNOWLEDGED (live crash-recovery) receipts alone --
+   * this fails closed with a actionable `JOB_CAP_EXCEEDED`, rather than
+   * silently dropping a receipt a crash recovery might still need.
+   */
+  private withinOccurrenceCap(records: readonly ScheduledOccurrenceRecordV1[]): ScheduledOccurrenceRecordV1[] {
+    if (records.length <= MAX_SCHEDULED_OCCURRENCES) return [...records];
+    const acknowledged = [...records.filter((entry) => entry.acknowledged)].sort((a, b) => (a.acknowledgedAt as string).localeCompare(b.acknowledgedAt as string));
+    const unacknowledged = records.filter((entry) => !entry.acknowledged);
+    const overBy = records.length - MAX_SCHEDULED_OCCURRENCES;
+    const keepAcknowledgedCount = Math.max(0, acknowledged.length - overBy);
+    const result = [...acknowledged.slice(acknowledged.length - keepAcknowledgedCount), ...unacknowledged];
+    if (result.length > MAX_SCHEDULED_OCCURRENCES) {
+      throw new EngineError(
+        "JOB_CAP_EXCEEDED",
+        `Cannot record scheduled occurrence: ${unacknowledged.length} unacknowledged occurrence(s) already persisted (max ${MAX_SCHEDULED_OCCURRENCES}) and no more acknowledged entries can be pruned.`,
+        {},
+      );
+    }
     return result;
+  }
+
+  async getScheduledOccurrence(occurrenceId: string): Promise<ScheduledOccurrenceRecordV1 | null> {
+    assertScheduledOccurrenceId(occurrenceId);
+    const doc = await this.loadOrInit();
+    return doc.scheduledOccurrences.find((entry) => entry.occurrenceId === occurrenceId) ?? null;
+  }
+
+  /**
+   * The one atomic entry point for crash-safe scheduled submission
+   * (requirement 6). Within ONE `mutate()` turn:
+   *  a) If `occurrenceId` already has a registry link, return ITS job --
+   *     regardless of that job's current status (terminal included). This
+   *     is what makes a retry after a crash between a successful submit
+   *     and the caller's own outcome-persist safe: even a job that
+   *     completed (or failed) synchronously in between is still found and
+   *     returned, never duplicated.
+   *  b) Otherwise, if a non-terminal job with the SAME idempotencyKey
+   *     already exists (e.g. a concurrent manual/timer submit for the
+   *     identical work won the race), atomically link `occurrenceId` to
+   *     THAT job instead of appending a new one -- the occurrence registry
+   *     always points at whichever job actually represents this work.
+   *  c) Otherwise, atomically append `job` AND its occurrence link
+   *     together, in this same commit.
+   * A fault at any point before this commit lands leaves NEITHER the job
+   * nor the occurrence link persisted -- `AtomicStore.save`'s all-or-
+   * nothing write guarantees that, same as every other mutation here.
+   */
+  submitScheduledOccurrence(occurrenceId: string, job: PersistedJobV1, nowIso: string): Promise<{ job: PersistedJobV1; linked: "existing-occurrence" | "existing-work" | "new" }> {
+    assertScheduledOccurrenceId(occurrenceId);
+    return this.mutate((doc) => {
+      const existingOccurrence = doc.scheduledOccurrences.find((entry) => entry.occurrenceId === occurrenceId);
+      if (existingOccurrence) {
+        const linkedJobId = existingOccurrence.jobId;
+        if (!doc.jobs.some((entry) => entry.job.jobId === linkedJobId)) {
+          throw new EngineError("JOB_STORE_CORRUPT", `Scheduled occurrence "${occurrenceId}" references a missing job "${linkedJobId}".`, {});
+        }
+        const resultOf = (verified: JobStoreDocumentV1): { job: PersistedJobV1; linked: "existing-occurrence" | "existing-work" | "new" } => ({
+          job: verified.jobs.find((entry) => entry.job.jobId === linkedJobId)!,
+          linked: "existing-occurrence",
+        });
+        return { doc, resultOf };
+      }
+
+      const existingWork = doc.jobs.find((entry) => entry.job.idempotencyKey === job.job.idempotencyKey && !isTerminalJobStatus(entry.status));
+      if (existingWork) {
+        const linkedJobId = existingWork.job.jobId;
+        const registryRecord: ScheduledOccurrenceRecordV1 = { schemaVersion: 1, occurrenceId, idempotencyKey: job.job.idempotencyKey, jobId: linkedJobId, acknowledged: false, createdAt: nowIso };
+        const scheduledOccurrences = this.withinOccurrenceCap([...doc.scheduledOccurrences, registryRecord]);
+        const resultOf = (verified: JobStoreDocumentV1): { job: PersistedJobV1; linked: "existing-occurrence" | "existing-work" | "new" } => ({
+          job: verified.jobs.find((entry) => entry.job.jobId === linkedJobId)!,
+          linked: "existing-work",
+        });
+        return { doc: { ...doc, scheduledOccurrences }, resultOf };
+      }
+
+      if (doc.jobs.some((entry) => entry.job.jobId === job.job.jobId)) {
+        throw new EngineError("JOB_SHAPE_INVALID", `Duplicate jobId "${job.job.jobId}".`, {});
+      }
+      const { jobs, scheduledOccurrences: prunedOccurrences } = this.pruneForCap(doc, 1);
+      const newJobId = job.job.jobId;
+      const registryRecord: ScheduledOccurrenceRecordV1 = { schemaVersion: 1, occurrenceId, idempotencyKey: job.job.idempotencyKey, jobId: newJobId, acknowledged: false, createdAt: nowIso };
+      const scheduledOccurrences = this.withinOccurrenceCap([...prunedOccurrences, registryRecord]);
+      const resultOf = (verified: JobStoreDocumentV1): { job: PersistedJobV1; linked: "existing-occurrence" | "existing-work" | "new" } => ({
+        job: verified.jobs.find((entry) => entry.job.jobId === newJobId)!,
+        linked: "new",
+      });
+      return { doc: { ...doc, jobs: [...jobs, job], scheduledOccurrences }, resultOf };
+    });
+  }
+
+  /**
+   * Marks one occurrence record acknowledged -- idempotent (a no-op, never
+   * an error, for an unknown or already-acknowledged occurrenceId) so a
+   * caller can safely retry it after a crash/failure with no coordination.
+   * Purely registry housekeeping (see `ScheduledOccurrenceRecordV1`'s doc
+   * comment) -- never load-bearing for crash-safety itself.
+   */
+  async acknowledgeScheduledOccurrence(occurrenceId: string, nowIso: string): Promise<void> {
+    assertScheduledOccurrenceId(occurrenceId);
+    // Read-only fast path (final-integration requirement 2): checked against the last COMMITTED
+    // document, without ever entering the mutation tail, so a call for an unknown or
+    // already-acknowledged occurrenceId (the common case once `reconcileAcknowledgements` has
+    // already caught up) costs nothing beyond a read. Racy by nature (another mutation may land
+    // between this check and the `mutate()` call below), so it is purely a shortcut -- the
+    // `mutate()` callback re-checks the SAME condition against the document actually being
+    // mutated, and `mutate()`'s own reference-equality skip (see its doc comment) is what actually
+    // guarantees no `AtomicStore.save` happens for a genuine no-op, race or not.
+    const cached = await this.loadOrInit();
+    const cachedEntry = cached.scheduledOccurrences.find((entry) => entry.occurrenceId === occurrenceId);
+    if (!cachedEntry || cachedEntry.acknowledged) return;
+
+    await this.mutate((doc) => {
+      const index = doc.scheduledOccurrences.findIndex((entry) => entry.occurrenceId === occurrenceId);
+      if (index === -1 || doc.scheduledOccurrences[index].acknowledged) {
+        return { doc, resultOf: () => undefined };
+      }
+      const updated: ScheduledOccurrenceRecordV1 = { ...doc.scheduledOccurrences[index], acknowledged: true, acknowledgedAt: nowIso };
+      const scheduledOccurrences = [...doc.scheduledOccurrences];
+      scheduledOccurrences[index] = updated;
+      return { doc: { ...doc, scheduledOccurrences }, resultOf: () => undefined };
+    });
   }
 
   /**
@@ -351,7 +518,10 @@ export class JobStore {
       // `oldJobId` is protected from cap pruning here: it was JUST marked terminal in this same
       // commit and so would otherwise be the prime pruning target (oldest-`updatedAt` terminal
       // entry) the very moment it's created, leaving `resultOf`'s `old` lookup silently empty.
-      jobs = this.withinCap(jobs, 1, new Set([oldJobId]));
+      // `pruneForCap` also keeps the occurrence registry consistent with whatever it prunes.
+      const pruned = this.pruneForCap({ ...doc, jobs }, 1, new Set([oldJobId]));
+      jobs = pruned.jobs;
+      const scheduledOccurrences = pruned.scheduledOccurrences;
       const newSuccessorId = successor.job.jobId;
       jobs = [...jobs, successor];
       const resultOf = (verified: JobStoreDocumentV1): { old: PersistedJobV1; successor: PersistedJobV1; coalesced: boolean } => ({
@@ -359,7 +529,7 @@ export class JobStore {
         successor: verified.jobs.find((entry) => entry.job.jobId === newSuccessorId)!,
         coalesced: false,
       });
-      return { doc: { ...doc, jobs }, resultOf };
+      return { doc: { ...doc, jobs, scheduledOccurrences }, resultOf };
     });
   }
 

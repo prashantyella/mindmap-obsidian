@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 import type { AtomicStoreFs } from "../engine/atomicStore";
 import { canonicalizePath, computeJobIdempotencyKey, stableNoteIdentity, type QueueJobV1 } from "../engine/contracts";
@@ -30,7 +31,10 @@ class FakeFs implements AtomicStoreFs {
     this.files.set(path, contents);
   }
 
+  renameCallCount = 0;
+
   async rename(fromPath: string, toPath: string): Promise<void> {
+    this.renameCallCount += 1; // `rename` is AtomicStore's one atomic-commit call -- its count is exactly "how many times something was actually persisted"
     if (this.faults.has("rename")) throw new Error(`injected failure at rename: ${fromPath}`);
     const value = this.files.get(fromPath);
     if (value === undefined) throw new Error(`ENOENT: ${fromPath}`);
@@ -686,4 +690,404 @@ void test("provider pause round-trips through save/load", async () => {
 
   const fresh = new JobStore(fs, "/root");
   assert.deepEqual(await fresh.getProviderPause(), { active: true, code: "EMBEDDING_ENDPOINT_INVALID", pausedAtMs: 1000 });
+});
+
+// ---------------------------------------------------------------------------
+// Checkpoint 8 requirement 6: crash-safe scheduled occurrence registry
+// ---------------------------------------------------------------------------
+
+function occurrenceIdFor(seed: string): string {
+  return createHash("sha256").update(seed, "utf8").digest("hex");
+}
+
+void test("submitScheduledOccurrence: a brand-new occurrenceId appends the job AND its registry link atomically ('new')", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const job = buildPersisted({ path: "Notes/A.md" });
+  const occurrenceId = occurrenceIdFor("occ-1");
+
+  const result = await store.submitScheduledOccurrence(occurrenceId, job, "2026-08-23T00:00:00.000Z");
+  assert.equal(result.linked, "new");
+  assert.equal(result.job.job.jobId, job.job.jobId);
+
+  const occurrence = await store.getScheduledOccurrence(occurrenceId);
+  assert.ok(occurrence);
+  assert.equal(occurrence?.jobId, job.job.jobId);
+  assert.equal(occurrence?.idempotencyKey, job.job.idempotencyKey);
+  assert.equal(occurrence?.acknowledged, false);
+  assert.equal((await store.list()).length, 1);
+});
+
+void test("submitScheduledOccurrence: a retry with the SAME occurrenceId returns the SAME job, even after it reached a terminal status ('existing-occurrence')", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const job = buildPersisted({ path: "Notes/A.md" });
+  const occurrenceId = occurrenceIdFor("occ-2");
+
+  const first = await store.submitScheduledOccurrence(occurrenceId, job, "2026-08-23T00:00:00.000Z");
+  assert.equal(first.linked, "new");
+
+  // Simulate the job racing to completion synchronously, before any outcome was ever persisted
+  // by the caller (the exact scenario requirement 6 targets) -- walking legally one phase at a
+  // time, exactly as JobEngine's own phase-step machinery would.
+  for (const phase of ["embed", "extract-metadata", "confirm-source", "write-note", "write-overlay"] as const) {
+    await store.updateJob(job.job.jobId, (current) => ({ ...current, job: { ...current.job, phase } }));
+  }
+  await store.updateJob(job.job.jobId, (current) => ({ ...current, status: "completed", job: { ...current.job, phase: "complete" } }));
+
+  // A brand-new PersistedJobV1 (different jobId) is what a naive retry would construct -- but the
+  // SAME occurrenceId must short-circuit to the already-completed job instead.
+  const retryJob = buildPersisted({ path: "Notes/A.md" });
+  assert.notEqual(retryJob.job.jobId, job.job.jobId);
+  const retry = await store.submitScheduledOccurrence(occurrenceId, retryJob, "2026-08-23T00:05:00.000Z");
+  assert.equal(retry.linked, "existing-occurrence");
+  assert.equal(retry.job.job.jobId, job.job.jobId);
+  assert.equal(retry.job.status, "completed");
+  assert.equal((await store.list()).length, 1, "at most one job for this occurrence, ever");
+});
+
+void test("submitScheduledOccurrence: a manual/timer race for the SAME work links this occurrence to the ALREADY-existing non-terminal job instead of duplicating it ('existing-work')", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const manualJob = buildPersisted({ path: "Notes/A.md", trigger: "manual" });
+  await store.appendJob(manualJob);
+
+  const scheduledJob = buildPersisted({ path: "Notes/A.md", trigger: "scheduled" });
+  assert.equal(scheduledJob.job.idempotencyKey, manualJob.job.idempotencyKey, "identical work -> identical idempotencyKey");
+  const occurrenceId = occurrenceIdFor("occ-race");
+
+  const result = await store.submitScheduledOccurrence(occurrenceId, scheduledJob, "2026-08-23T00:00:00.000Z");
+  assert.equal(result.linked, "existing-work");
+  assert.equal(result.job.job.jobId, manualJob.job.jobId, "linked to whichever job actually won the race");
+  assert.equal((await store.list()).length, 1, "no duplicate job created");
+
+  const occurrence = await store.getScheduledOccurrence(occurrenceId);
+  assert.equal(occurrence?.jobId, manualJob.job.jobId);
+});
+
+void test("ordinary appendOrCoalesce (plain JobEngine.submit path) is completely unaffected by the occurrence registry -- a manual rerun after terminal still creates a NEW job", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const job = buildPersisted({ path: "Notes/A.md" });
+  await store.appendJob(job);
+  await store.updateJob(job.job.jobId, (current) => ({ ...current, status: "cancelled" }));
+
+  const rerun = buildPersisted({ path: "Notes/A.md" });
+  const { coalesced } = await store.appendOrCoalesce(rerun);
+  assert.equal(coalesced, false, "a terminal job must never block a deliberate manual rerun through the ordinary submit path");
+  assert.equal((await store.list()).length, 2);
+});
+
+void test("acknowledgeScheduledOccurrence is idempotent: unknown, first-time, and already-acknowledged occurrenceIds are all safe no-ops/successes", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const job = buildPersisted({ path: "Notes/A.md" });
+  const occurrenceId = occurrenceIdFor("occ-ack");
+
+  await assert.doesNotReject(() => store.acknowledgeScheduledOccurrence(occurrenceId, "2026-08-23T00:00:00.000Z"));
+  assert.equal(await store.getScheduledOccurrence(occurrenceId), null);
+
+  await store.submitScheduledOccurrence(occurrenceId, job, "2026-08-23T00:00:00.000Z");
+  await store.acknowledgeScheduledOccurrence(occurrenceId, "2026-08-23T00:05:00.000Z");
+  const acked = await store.getScheduledOccurrence(occurrenceId);
+  assert.equal(acked?.acknowledged, true);
+  assert.equal(acked?.acknowledgedAt, "2026-08-23T00:05:00.000Z");
+
+  // Acking again (e.g. a retried best-effort ack) must not change acknowledgedAt or throw.
+  await store.acknowledgeScheduledOccurrence(occurrenceId, "2026-08-23T00:10:00.000Z");
+  const stillAcked = await store.getScheduledOccurrence(occurrenceId);
+  assert.equal(stillAcked?.acknowledgedAt, "2026-08-23T00:05:00.000Z");
+});
+
+void test("terminal-job cap pruning never removes a job an UNACKNOWLEDGED occurrence still references", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+
+  const pendingJob = buildJob({ path: "Notes/Pending.md", updatedAt: "2019-01-01T00:00:00.000Z", phase: "complete" }); // oldest updatedAt -> prime pruning target
+  const pendingPersisted: PersistedJobV1 = { schemaVersion: 1, job: pendingJob, status: "completed", attempt: 1, cancelRequested: false };
+  const occurrenceId = occurrenceIdFor("occ-protected");
+  const registryRecord = { schemaVersion: 1 as const, occurrenceId, idempotencyKey: pendingJob.idempotencyKey, jobId: pendingJob.jobId, acknowledged: false, createdAt: "2026-08-23T00:00:00.000Z" };
+
+  const fillerCount = 4999;
+  const fillerJobs: PersistedJobV1[] = [];
+  for (let i = 0; i < fillerCount; i += 1) {
+    const job = buildJob({ path: `Notes/Filler${i}.md`, updatedAt: `2021-01-01T00:00:${String(i % 60).padStart(2, "0")}.000Z` });
+    fillerJobs.push({ schemaVersion: 1, job, status: "cancelled", attempt: 0, cancelRequested: false });
+  }
+  const seededDoc = { schemaVersion: 1 as const, jobs: [pendingPersisted, ...fillerJobs], providerPause: { active: false as const }, scheduledOccurrences: [registryRecord] };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: seededDoc }));
+  assert.equal((await store.list()).length, 5000);
+
+  // Appending one more job would exceed the cap -- ordinary terminal-job pruning must skip the
+  // occurrence-protected job even though it is the oldest-by-updatedAt terminal entry.
+  const newJob = buildPersisted({ path: "Notes/New.md" });
+  await store.appendJob(newJob);
+
+  const stillThere = await store.getById(pendingJob.jobId);
+  assert.ok(stillThere, "a job an unacknowledged occurrence still references must never be pruned");
+});
+
+void test("scheduled-occurrence registry parse: migrates a document with NO scheduledOccurrences field to an empty registry", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const preExistingDoc = { schemaVersion: 1 as const, jobs: [buildPersisted({ path: "Notes/A.md" })], providerPause: { active: false as const } };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: preExistingDoc }));
+
+  const jobs = await store.list();
+  assert.equal(jobs.length, 1);
+  assert.equal(await store.getScheduledOccurrence(occurrenceIdFor("anything")), null);
+
+  // And a subsequent occurrence submit against this migrated store works normally.
+  const result = await store.submitScheduledOccurrence(occurrenceIdFor("occ-post-migration"), buildPersisted({ path: "Notes/B.md" }), "2026-08-23T00:00:00.000Z");
+  assert.equal(result.linked, "new");
+});
+
+void test("scheduled-occurrence registry parse: rejects a non-array scheduledOccurrences (fails closed, never silently accepted)", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const doc = { schemaVersion: 1 as const, jobs: [], providerPause: { active: false as const }, scheduledOccurrences: "not-an-array" };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: doc }));
+  await assert.rejects(() => store.list(), (error: unknown) => isEngineError(error) && error.code === "STORE_SCHEMA_INVALID");
+});
+
+void test("scheduled-occurrence registry parse: rejects a dangling job reference", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const record = { schemaVersion: 1 as const, occurrenceId: occurrenceIdFor("dangling"), idempotencyKey: "some-key", jobId: "no-such-job", acknowledged: false, createdAt: "2026-08-23T00:00:00.000Z" };
+  const doc = { schemaVersion: 1 as const, jobs: [], providerPause: { active: false as const }, scheduledOccurrences: [record] };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: doc }));
+  await assert.rejects(() => store.list(), (error: unknown) => isEngineError(error) && error.code === "STORE_SCHEMA_INVALID");
+});
+
+void test("scheduled-occurrence registry parse: rejects a duplicate occurrenceId", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const job = buildJob({ path: "Notes/A.md" });
+  const persisted: PersistedJobV1 = { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false };
+  const occurrenceId = occurrenceIdFor("dup");
+  const record = { schemaVersion: 1 as const, occurrenceId, idempotencyKey: job.idempotencyKey, jobId: job.jobId, acknowledged: false, createdAt: "2026-08-23T00:00:00.000Z" };
+  const doc = { schemaVersion: 1 as const, jobs: [persisted], providerPause: { active: false as const }, scheduledOccurrences: [record, record] };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: doc }));
+  await assert.rejects(() => store.list(), (error: unknown) => isEngineError(error) && error.code === "STORE_SCHEMA_INVALID");
+});
+
+void test("scheduled-occurrence registry parse: rejects an idempotencyKey that does not match its referenced job's own key", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const job = buildJob({ path: "Notes/A.md" });
+  const persisted: PersistedJobV1 = { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false };
+  const record = { schemaVersion: 1 as const, occurrenceId: occurrenceIdFor("mismatch"), idempotencyKey: "not-the-real-key", jobId: job.jobId, acknowledged: false, createdAt: "2026-08-23T00:00:00.000Z" };
+  const doc = { schemaVersion: 1 as const, jobs: [persisted], providerPause: { active: false as const }, scheduledOccurrences: [record] };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: doc }));
+  await assert.rejects(() => store.list(), (error: unknown) => isEngineError(error) && error.code === "STORE_SCHEMA_INVALID");
+});
+
+void test("scheduled-occurrence registry parse: acknowledgedAt must be present iff acknowledged is true", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const job = buildJob({ path: "Notes/A.md" });
+  const persisted: PersistedJobV1 = { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false };
+  const badRecord = { schemaVersion: 1 as const, occurrenceId: occurrenceIdFor("bad-ack"), idempotencyKey: job.idempotencyKey, jobId: job.jobId, acknowledged: true, createdAt: "2026-08-23T00:00:00.000Z" };
+  const doc = { schemaVersion: 1 as const, jobs: [persisted], providerPause: { active: false as const }, scheduledOccurrences: [badRecord] };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: doc }));
+  await assert.rejects(() => store.list(), (error: unknown) => isEngineError(error) && error.code === "STORE_SCHEMA_INVALID");
+});
+
+void test("occurrence registry cap: acknowledged entries are pruned oldest-first, but unacknowledged entries are never dropped and fail closed when the registry is full of them", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+
+  const jobs: PersistedJobV1[] = [];
+  const records: { schemaVersion: 1; occurrenceId: string; idempotencyKey: string; jobId: string; acknowledged: boolean; createdAt: string; acknowledgedAt?: string }[] = [];
+  for (let i = 0; i < 2000; i += 1) {
+    const job = buildJob({ path: `Notes/Occ${i}.md`, updatedAt: "2026-08-23T00:00:00.000Z", phase: "complete" });
+    jobs.push({ schemaVersion: 1, job, status: "completed", attempt: 1, cancelRequested: false });
+    records.push({
+      schemaVersion: 1,
+      occurrenceId: occurrenceIdFor(`cap-${i}`),
+      idempotencyKey: job.idempotencyKey,
+      jobId: job.jobId,
+      acknowledged: true,
+      createdAt: "2026-08-23T00:00:00.000Z",
+      acknowledgedAt: `2026-08-23T00:${String(i % 60).padStart(2, "0")}:00.000Z`,
+    });
+  }
+  const doc = { schemaVersion: 1 as const, jobs, providerPause: { active: false as const }, scheduledOccurrences: records };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: doc }));
+  assert.equal((await store.list()).length, 2000);
+
+  // Registry is exactly at cap (2000), all acknowledged -- adding one more must prune the oldest
+  // acknowledged entry to make room, never fail.
+  const newJob = buildPersisted({ path: "Notes/NewOcc.md" });
+  const newOccurrenceId = occurrenceIdFor("cap-new");
+  const result = await store.submitScheduledOccurrence(newOccurrenceId, newJob, "2026-08-23T01:00:00.000Z");
+  assert.equal(result.linked, "new");
+  assert.ok(await store.getScheduledOccurrence(newOccurrenceId));
+  assert.equal(await store.getScheduledOccurrence(occurrenceIdFor("cap-0")), null, "the oldest-acknowledged entry was pruned to make room");
+
+  // Now fill the registry to cap with entries that are ALL unacknowledged -- no more pruning is
+  // possible, so one more must fail closed rather than silently drop a live crash-recovery receipt.
+  const allUnackedJobs: PersistedJobV1[] = [];
+  const allUnackedRecords: { schemaVersion: 1; occurrenceId: string; idempotencyKey: string; jobId: string; acknowledged: boolean; createdAt: string }[] = [];
+  for (let i = 0; i < 2000; i += 1) {
+    const job = buildJob({ path: `Notes/Unacked${i}.md`, updatedAt: "2026-08-23T00:00:00.000Z" });
+    allUnackedJobs.push({ schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false });
+    allUnackedRecords.push({ schemaVersion: 1, occurrenceId: occurrenceIdFor(`unacked-${i}`), idempotencyKey: job.idempotencyKey, jobId: job.jobId, acknowledged: false, createdAt: "2026-08-23T00:00:00.000Z" });
+  }
+  const fs2 = new FakeFs();
+  const store2 = new JobStore(fs2, "/root");
+  const doc2 = { schemaVersion: 1 as const, jobs: allUnackedJobs, providerPause: { active: false as const }, scheduledOccurrences: allUnackedRecords };
+  fs2.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: doc2 }));
+  assert.equal((await store2.list()).length, 2000);
+
+  const overflowJob = buildPersisted({ path: "Notes/Overflow.md" });
+  await assert.rejects(
+    () => store2.submitScheduledOccurrence(occurrenceIdFor("overflow"), overflowJob, "2026-08-23T01:00:00.000Z"),
+    (error: unknown) => isEngineError(error) && error.code === "JOB_CAP_EXCEEDED",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Final-integration requirement 1: occurrence/job pruning consistency
+// ---------------------------------------------------------------------------
+
+/** Seeds a store at exactly MAX_PERSISTED_JOBS with one ACKNOWLEDGED-occurrence-linked terminal job (oldest updatedAt -> prime pruning target) plus filler terminal jobs, and returns the target job + its occurrenceId. */
+function seedAtCapWithAcknowledgedOccurrence(fs: FakeFs): { job: QueueJobV1; occurrenceId: string } {
+  const targetJob = buildJob({ path: "Notes/Acked.md", updatedAt: "2019-01-01T00:00:00.000Z", phase: "complete" });
+  const targetPersisted: PersistedJobV1 = { schemaVersion: 1, job: targetJob, status: "completed", attempt: 1, cancelRequested: false };
+  const occurrenceId = occurrenceIdFor("prune-consistency");
+  const record = {
+    schemaVersion: 1 as const,
+    occurrenceId,
+    idempotencyKey: targetJob.idempotencyKey,
+    jobId: targetJob.jobId,
+    acknowledged: true,
+    createdAt: "2019-01-01T00:00:00.000Z",
+    acknowledgedAt: "2019-01-01T00:01:00.000Z",
+  };
+
+  const fillerCount = 4999;
+  const fillerJobs: PersistedJobV1[] = [];
+  for (let i = 0; i < fillerCount; i += 1) {
+    const job = buildJob({ path: `Notes/Filler${i}.md`, updatedAt: `2021-01-01T00:00:${String(i % 60).padStart(2, "0")}.000Z` });
+    fillerJobs.push({ schemaVersion: 1, job, status: "cancelled", attempt: 0, cancelRequested: false });
+  }
+  const seededDoc = { schemaVersion: 1 as const, jobs: [targetPersisted, ...fillerJobs], providerPause: { active: false as const }, scheduledOccurrences: [record] };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: seededDoc }));
+  return { job: targetJob, occurrenceId };
+}
+
+void test("(final-integration 1) appendJob pruning a terminal job referenced by an ACKNOWLEDGED occurrence removes that occurrence record in the SAME commit -- no dangling reference", async () => {
+  const fs = new FakeFs();
+  const { job: targetJob, occurrenceId } = seedAtCapWithAcknowledgedOccurrence(fs);
+  const store = new JobStore(fs, "/root");
+  assert.equal((await store.list()).length, 5000);
+
+  await store.appendJob(buildPersisted({ path: "Notes/New.md" }));
+
+  assert.equal(await store.getById(targetJob.jobId), null, "the acknowledged-occurrence job was pruned");
+  assert.equal(await store.getScheduledOccurrence(occurrenceId), null, "its now-dangling occurrence record was pruned together with it");
+
+  // Reload from a fresh store instance -- the persisted document itself must parse cleanly (no
+  // dangling cross-reference was ever written to disk).
+  const fresh = new JobStore(fs, "/root");
+  await assert.doesNotReject(() => fresh.list());
+});
+
+void test("(final-integration 1) appendOrCoalesce pruning a terminal job referenced by an ACKNOWLEDGED occurrence removes that occurrence record too", async () => {
+  const fs = new FakeFs();
+  const { job: targetJob, occurrenceId } = seedAtCapWithAcknowledgedOccurrence(fs);
+  const store = new JobStore(fs, "/root");
+
+  await store.appendOrCoalesce(buildPersisted({ path: "Notes/New2.md" }));
+
+  assert.equal(await store.getById(targetJob.jobId), null);
+  assert.equal(await store.getScheduledOccurrence(occurrenceId), null);
+  const fresh = new JobStore(fs, "/root");
+  await assert.doesNotReject(() => fresh.list());
+});
+
+void test("(final-integration 1) supersedeWithSuccessor pruning a terminal job referenced by an ACKNOWLEDGED occurrence removes that occurrence record too", async () => {
+  const fs = new FakeFs();
+  const { job: targetJob, occurrenceId } = seedAtCapWithAcknowledgedOccurrence(fs);
+  const store = new JobStore(fs, "/root");
+
+  const doc = await store.list();
+  const oldForSupersede = doc.find((entry) => entry.job.jobId !== targetJob.jobId)!;
+  for (const phase of ["embed", "extract-metadata", "confirm-source", "write-note", "write-overlay"] as const) {
+    await store.updateJob(oldForSupersede.job.jobId, (current) => ({ ...current, job: { ...current.job, phase } }));
+  }
+  await store.updateJob(oldForSupersede.job.jobId, (current) => ({ ...current, status: "active" }));
+  const active = await store.getById(oldForSupersede.job.jobId);
+  await store.supersedeWithSuccessor(active!.job.jobId, (current) => ({ ...current, status: "cancelled" }), buildSuccessorFor(active!));
+
+  assert.equal(await store.getById(targetJob.jobId), null);
+  assert.equal(await store.getScheduledOccurrence(occurrenceId), null);
+  const fresh = new JobStore(fs, "/root");
+  await assert.doesNotReject(() => fresh.list());
+});
+
+void test("(final-integration 1) submitScheduledOccurrence's 'new' branch pruning a terminal job referenced by an ACKNOWLEDGED occurrence removes that occurrence record too", async () => {
+  const fs = new FakeFs();
+  const { job: targetJob, occurrenceId } = seedAtCapWithAcknowledgedOccurrence(fs);
+  const store = new JobStore(fs, "/root");
+
+  await store.submitScheduledOccurrence(occurrenceIdFor("prune-consistency-new"), buildPersisted({ path: "Notes/New3.md" }), "2026-08-23T00:00:00.000Z");
+
+  assert.equal(await store.getById(targetJob.jobId), null);
+  assert.equal(await store.getScheduledOccurrence(occurrenceId), null);
+  const fresh = new JobStore(fs, "/root");
+  await assert.doesNotReject(() => fresh.list());
+});
+
+void test("(final-integration 1) UNACKNOWLEDGED-occurrence jobs remain fully protected across every append path (never pruned, regardless of which path triggers pruning)", async () => {
+  const fs = new FakeFs();
+  const pendingJob = buildJob({ path: "Notes/StillPending.md", updatedAt: "2018-01-01T00:00:00.000Z", phase: "complete" });
+  const pendingPersisted: PersistedJobV1 = { schemaVersion: 1, job: pendingJob, status: "completed", attempt: 1, cancelRequested: false };
+  const pendingOccurrenceId = occurrenceIdFor("still-pending");
+  const pendingRecord = { schemaVersion: 1 as const, occurrenceId: pendingOccurrenceId, idempotencyKey: pendingJob.idempotencyKey, jobId: pendingJob.jobId, acknowledged: false, createdAt: "2018-01-01T00:00:00.000Z" };
+
+  const fillerCount = 4999;
+  const fillerJobs: PersistedJobV1[] = [];
+  for (let i = 0; i < fillerCount; i += 1) {
+    const job = buildJob({ path: `Notes/Filler${i}.md`, updatedAt: `2021-01-01T00:00:${String(i % 60).padStart(2, "0")}.000Z` });
+    fillerJobs.push({ schemaVersion: 1, job, status: "cancelled", attempt: 0, cancelRequested: false });
+  }
+  const seededDoc = { schemaVersion: 1 as const, jobs: [pendingPersisted, ...fillerJobs], providerPause: { active: false as const }, scheduledOccurrences: [pendingRecord] };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: seededDoc }));
+
+  const store = new JobStore(fs, "/root");
+  await store.appendJob(buildPersisted({ path: "Notes/New4.md" }));
+  assert.ok(await store.getById(pendingJob.jobId), "an unacknowledged occurrence's job must never be pruned");
+  assert.ok(await store.getScheduledOccurrence(pendingOccurrenceId));
+});
+
+// ---------------------------------------------------------------------------
+// Last-acceptance requirement 2: JobStore ack no-op must not save
+// ---------------------------------------------------------------------------
+
+void test("(last-acceptance 2) acknowledgeScheduledOccurrence for an UNKNOWN occurrenceId performs zero writes", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  await store.appendJob(buildPersisted({ path: "Notes/A.md" })); // one initial write to prime the store
+  const before = fs.renameCallCount;
+  await store.acknowledgeScheduledOccurrence(occurrenceIdFor("unknown"), "2026-08-23T00:00:00.000Z");
+  assert.equal(fs.renameCallCount, before, "no write for an unknown occurrenceId");
+});
+
+void test("(last-acceptance 2) acknowledgeScheduledOccurrence is a single write for the first call, then zero writes for every repeat", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const job = buildPersisted({ path: "Notes/A.md" });
+  const occurrenceId = occurrenceIdFor("repeat-ack");
+  await store.submitScheduledOccurrence(occurrenceId, job, "2026-08-23T00:00:00.000Z");
+  const afterSubmit = fs.renameCallCount;
+
+  await store.acknowledgeScheduledOccurrence(occurrenceId, "2026-08-23T00:05:00.000Z");
+  assert.equal(fs.renameCallCount, afterSubmit + 1, "the first ack writes exactly once");
+
+  for (let i = 0; i < 10; i += 1) {
+    await store.acknowledgeScheduledOccurrence(occurrenceId, "2026-08-23T00:10:00.000Z");
+  }
+  assert.equal(fs.renameCallCount, afterSubmit + 1, "every repeated ack of an already-acknowledged occurrence performs zero further writes");
 });
