@@ -234,7 +234,22 @@ class IndividualNoteTests(unittest.TestCase):
                 self.assertEqual(main(), 1)
 
             self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0], (["Notes"], True))
+            self.assertEqual(calls[0], (["Notes", "Books/Apple Books"], True))
+
+            config.update({"notes_paths_all": ["Notes", "Books/Apple Books"]})
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            calls.clear()
+            with patch("mindmap.list_notes", side_effect=counted_list_notes), \
+                    patch("chromadb.PersistentClient", side_effect=RuntimeError("stop before indexing")), \
+                    patch.object(sys, "argv", [
+                        "mindmap.py", "--config", str(config_path), "--note",
+                        "Books/Apple Books/Author/Book/Annotations/one.md",
+                    ]):
+                self.assertEqual(main(), 1)
+
+            # Already in scope: the root must not be duplicated in the scan paths.
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0], (["Notes", "Books/Apple Books"], True))
 
     def test_state_preserves_unrelated_entries_and_removes_failed_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:

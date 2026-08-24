@@ -127,7 +127,7 @@ void test("release workflow checkout preserves persist-credentials: false", () =
 void test("eslint-plugin-obsidianmd is pinned (not a caret/range) as a dev dependency", () => {
   const spec = packageJson.devDependencies["eslint-plugin-obsidianmd"];
   assert.ok(spec, "expected eslint-plugin-obsidianmd in devDependencies");
-  assert.doesNotMatch(spec, /^[\^~]/, "the version spec must be pinned exactly, not a caret/tilde range");
+  assert.match(spec, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, "the version spec must be an exact version, not a range");
 });
 
 void test("lint:obsidian is a separate npm script scoped to src, distinct from the main lint gate", () => {
@@ -159,4 +159,16 @@ void test("CHANGELOG.md documents the current release under its own version head
 
   assert.match(versionBody, /minAppVersion/);
   assert.match(versionBody, /1\.7\.2/);
+});
+
+// ---------------------------------------------------------------------------
+// (7) esbuild must lower dynamic import() so readingVault.ts's
+// `await import("obsidian")` compiles to a deferred require("obsidian")
+// (the only form Obsidian's CommonJS plugin loader resolves), rather than
+// being preserved as a native dynamic import of a bare specifier.
+// ---------------------------------------------------------------------------
+
+void test("esbuild.config.mjs lowers dynamic import so external bare-specifier import(\"obsidian\") resolves through require", () => {
+  const config = readSource("esbuild.config.mjs");
+  assert.match(config, /supported:\s*\{\s*["']dynamic-import["']:\s*false\s*\}/);
 });

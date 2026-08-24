@@ -14,7 +14,7 @@ export interface RelatedSectionLink {
   kind: RelatedCandidateKind;
 }
 
-const WIKILINK_DELIMITER_PATTERN = /[[\]|]/;
+const WIKILINK_DELIMITER_PATTERN = /[[\]|<>]/;
 
 /**
  * Validates and canonicalizes a related-note target immediately before it
@@ -24,7 +24,11 @@ const WIKILINK_DELIMITER_PATTERN = /[[\]|]/;
  * (control characters, absolute/drive-letter/UNC paths, `..` traversal,
  * empty) plus `[`, `]`, `|`, which would otherwise let a crafted path
  * break out of the `[[path|label]]` wikilink syntax it is about to be
- * embedded in.
+ * embedded in, and `<`, `>`, which would otherwise let a crafted path
+ * inject markup into the surrounding `<span>`. The path/label are emitted
+ * verbatim (matching python/mindmap.py's `update_related_section`) rather
+ * than HTML-escaped -- escaping would change the wikilink target itself
+ * for any otherwise-valid filename containing `&`, `'`, or `"`.
  */
 function canonicalizeRelatedTarget(rawPath: string): CanonicalPath | null {
   let canonical: CanonicalPath;
@@ -46,16 +50,6 @@ function pathStem(fullPath: string): string {
   return dotIndex > 0 ? basename.slice(0, dotIndex) : basename;
 }
 
-/** HTML-escapes text embedded inside the generated `<span>` markup, so a crafted note path/basename (e.g. containing `<`, `"`, `&`) can never inject markup or break out of the span. */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 /** Validates/canonicalizes every candidate up front and drops the unsafe ones -- so a link list that becomes empty only after filtering is treated exactly like an originally-empty list (no callout header emitted for zero surviving items). */
 function filterValidLinks(links: readonly RelatedSectionLink[]): { path: CanonicalPath; kind: RelatedCandidateKind }[] {
   const valid: { path: CanonicalPath; kind: RelatedCandidateKind }[] = [];
@@ -70,9 +64,8 @@ function filterValidLinks(links: readonly RelatedSectionLink[]): { path: Canonic
 function renderCalloutLines(links: readonly { path: CanonicalPath; kind: RelatedCandidateKind }[], newline: "\r\n" | "\n"): string {
   const lines = ["> [!mindmap]- Mindmap"];
   for (const link of links) {
-    const label = escapeHtml(pathStem(link.path));
-    const escapedPath = escapeHtml(link.path);
-    lines.push(`> - <span class="mindmap-link is-${link.kind}">[[${escapedPath}|${label}]]</span>`);
+    const label = pathStem(link.path);
+    lines.push(`> - <span class="mindmap-link is-${link.kind}">[[${link.path}|${label}]]</span>`);
   }
   return lines.join(newline);
 }

@@ -79,7 +79,12 @@ function readAnnotationId(text: string): string | undefined {
 async function ensureAncestorFolders(vault: NoteVaultAdapter, filePath: string): Promise<void> {
   const parts = filePath.split("/");
   for (let index = 0; index < parts.length - 1; index += 1) {
-    await vault.ensureFolder(parts.slice(0, index + 1).join("/"));
+    const folder = parts.slice(0, index + 1).join("/");
+    try {
+      await vault.ensureFolder(folder);
+    } catch {
+      throw new EngineError("VAULT_WRITE_FAILED", `Failed to ensure research companion folder "${folder}".`, { path: folder });
+    }
   }
 }
 

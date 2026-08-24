@@ -3052,8 +3052,11 @@ def main():
         # linking); an ordinary explicit note must not implicitly widen
         # candidates to include Reading annotations it was never scoped to.
         target_is_reading_annotation = target_note.is_apple_annotation and is_under_reading_root(target_note.relpath)
+        candidate_scan_paths = all_scope_paths
+        if target_is_reading_annotation and not is_relpath_in_scope(READING_NOTES_ROOT, all_scope_paths):
+            candidate_scan_paths = [*all_scope_paths, READING_NOTES_ROOT]
         all_scope_notes = list_notes(
-            vault_root, all_scope_paths, configured_min_words, mindmap_heading,
+            vault_root, candidate_scan_paths, configured_min_words, mindmap_heading,
             include_reading_annotations=target_is_reading_annotation,
         )
         allowed_paths = {n.relpath for n in all_scope_notes}

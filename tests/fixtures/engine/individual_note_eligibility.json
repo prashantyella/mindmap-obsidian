@@ -2,7 +2,7 @@
   "provenance": {
     "fixtureSchemaVersion": 1,
     "pythonOracleFile": "python/mindmap.py",
-    "pythonOracleSha256": "43fe2377e88f5c327fda26665c404266d4bbb8bee5efb4ec9746817d380c3280",
+    "pythonOracleSha256": "ba73eaaaf19960bb95c66022286882fa7d6104d568179c503cc1c10298da7e1c",
     "generator": "tools/parity/generate_fixtures.py"
   },
   "cases": [

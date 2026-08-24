@@ -24,6 +24,11 @@ void test("assertAllowedPluginArgs validates individual note values", () => {
   assert.throws(() => assertAllowedPluginArgs(["--note", "Notes/one.txt"], ".obsidian"), /Markdown/i);
 });
 
+void test("assertAllowedPluginArgs rejects a leading ./ that would otherwise mask a runtime-internal target", () => {
+  assert.throws(() => assertAllowedPluginArgs(["--note", "./.obsidian/plugins/mindmap-ai/data.md"], ".obsidian"), /runtime/i);
+  assert.throws(() => assertAllowedPluginArgs(["--note", ".obsidian/./plugins/mindmap-ai/data.md"], ".obsidian"), /runtime/i);
+});
+
 void test("assertAllowedPluginArgs uses the real configDir, not a blanket dot-prefix guess", () => {
   // Vault#configDir is user-configurable; the exact configured root and its
   // descendants must be rejected, whatever its name.

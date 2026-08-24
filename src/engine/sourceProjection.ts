@@ -171,24 +171,30 @@ function stripTrailingDividerRun(tokens: LineToken[]): LineToken[] {
 }
 
 /**
- * Removes the first `> [!...]- Mindmap`/`> [!...]- Related` callout block
- * (the current related-section output format) together with its owned
- * preceding blank-line/`---`-divider run — see `stripTrailingDividerRun`.
- * Only the divider run immediately preceding the callout is owned by it;
- * everything before that divider run is left untouched.
+ * Removes every `> [!...]- Mindmap`/`> [!...]- Related` callout block
+ * (the current related-section output format), each together with its own
+ * owned preceding blank-line/`---`-divider run — see
+ * `stripTrailingDividerRun`. Only the divider run immediately preceding a
+ * given callout is owned by it; everything before that divider run is left
+ * untouched. Mirrors `strip_related_section` in python/mindmap.py, which
+ * likewise removes every such block, not just the first.
  */
 function stripCalloutAndOwnedDivider(tokens: LineToken[]): { tokens: LineToken[]; changed: boolean } {
-  const start = tokens.findIndex((token) => MANAGED_CALLOUT_PATTERN.test(token.content.trim()));
-  if (start === -1) {
-    return { tokens, changed: false };
+  let current = tokens;
+  let changed = false;
+  for (;;) {
+    const start = current.findIndex((token) => MANAGED_CALLOUT_PATTERN.test(token.content.trim()));
+    if (start === -1) {
+      return { tokens: current, changed };
+    }
+    let end = start + 1;
+    while (end < current.length && current[end].content.startsWith(">")) {
+      end += 1;
+    }
+    const prefix = stripTrailingDividerRun(current.slice(0, start));
+    current = [...prefix, ...current.slice(end)];
+    changed = true;
   }
-  let end = start + 1;
-  while (end < tokens.length && tokens[end].content.startsWith(">")) {
-    end += 1;
-  }
-  const prefix = stripTrailingDividerRun(tokens.slice(0, start));
-  const suffix = tokens.slice(end);
-  return { tokens: [...prefix, ...suffix], changed: true };
 }
 
 /**

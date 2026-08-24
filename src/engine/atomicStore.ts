@@ -31,7 +31,7 @@ export interface AtomicStoreOptions<T> {
   schemaVersion: number;
   /** Strict shape validation for a freshly-parsed JSON document; throws (any error) to reject it. Called on every load, including immediately after a write-back verification read. */
   parse: (value: unknown) => T;
-  /** Maximum bytes this store will ever read back from `fileName` or a temp file; guards against an unbounded/corrupt file wedging the plugin. */
+  /** Maximum bytes this store will accept from `fileName` or a temp file. The seam has no size-probe primitive, so this is enforced after `fs.readFile` returns rather than before -- it rejects an oversized document from being parsed or persisted, but does not bound the memory used by the read itself. */
   maxBytes?: number;
 }
 

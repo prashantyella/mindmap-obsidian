@@ -379,7 +379,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       action: state.running ? undefined : "runActiveNote" as const,
     }] : []),
     {
-      title: (state.running ? `Run active${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope") + (blocking ? setupRequiredSuffix : ""),
+      title: (state.running ? `Run current scope${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope") + (blocking ? setupRequiredSuffix : ""),
       icon: state.running ? "loader-circle" : "play",
       disabled: state.running || researchBusy || !state.scopeReady || blocking,
       action: state.running ? undefined : "runCurrent",

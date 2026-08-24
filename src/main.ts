@@ -1353,7 +1353,7 @@ export default class MindmapPlugin extends Plugin {
           : "## Mindmap";
       const statePathValue = typeof config.state_path === "string"
         ? config.state_path
-        : `${this.app.vault.configDir}/plugins/${this.manifest.id}/data/state.json`;
+        : path.join(this.getRuntimeContext().pluginDir, "data", "state.json");
       const pythonStatePath = path.isAbsolute(statePathValue)
         ? statePathValue
         : path.resolve(this.getRuntimeContext().vaultRoot, statePathValue);
@@ -1631,6 +1631,7 @@ export default class MindmapPlugin extends Plugin {
         const result = await importAppleBooksAnnotations(payload, {
           vault: createObsidianVaultApi(this.app.vault),
           state,
+          configDir: this.app.vault.configDir,
         });
         return {
           imported: result.imported,

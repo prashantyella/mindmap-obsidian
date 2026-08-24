@@ -25,6 +25,7 @@ function loadCases(): FrontmatterCase[] {
 }
 
 void test("updateFrontmatter matches every ported python/mindmap.py update_frontmatter golden fixture byte-for-byte", () => {
+  let executed = 0;
   for (const testCase of loadCases()) {
     if (testCase.updates === undefined) continue;
     const output = updateFrontmatter(testCase.input, {
@@ -33,7 +34,9 @@ void test("updateFrontmatter matches every ported python/mindmap.py update_front
       removeKeys: testCase.remove_keys,
     });
     assert.equal(output, testCase.output, testCase.name);
+    executed += 1;
   }
+  assert.ok(executed > 0, "the fixture must contain at least one update case");
 });
 
 void test("parseFrontmatter matches the python/mindmap.py parse_frontmatter golden fixture", () => {

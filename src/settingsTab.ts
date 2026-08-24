@@ -242,7 +242,7 @@ export class MindmapSettingTab extends PluginSettingTab {
             const parsed = Number.parseInt(value.trim(), 10);
             this.plugin.settings.schedulerIntervalMinutes = Number.isFinite(parsed) ? parsed : DEFAULT_SETTINGS.schedulerIntervalMinutes;
             await this.plugin.saveSettings();
-            this.display();
+            text.setValue(String(this.plugin.settings.schedulerIntervalMinutes));
           });
         });
     }
@@ -256,7 +256,7 @@ export class MindmapSettingTab extends PluginSettingTab {
           bindCommitOnBlurOrEnter(text.inputEl, text.getValue(), async (value) => {
             this.plugin.settings.launchAgentDailyHour = normalizeHour(Number.parseInt(value.trim(), 10));
             await this.plugin.saveSettings();
-            this.display();
+            text.setValue(String(this.plugin.settings.launchAgentDailyHour));
           });
         })
         .addText((text) => {
@@ -264,7 +264,7 @@ export class MindmapSettingTab extends PluginSettingTab {
           bindCommitOnBlurOrEnter(text.inputEl, text.getValue(), async (value) => {
             this.plugin.settings.launchAgentDailyMinute = normalizeMinute(Number.parseInt(value.trim(), 10));
             await this.plugin.saveSettings();
-            this.display();
+            text.setValue(String(this.plugin.settings.launchAgentDailyMinute).padStart(2, "0"));
           });
         });
     }
@@ -291,7 +291,7 @@ export class MindmapSettingTab extends PluginSettingTab {
           bindCommitOnBlurOrEnter(text.inputEl, text.getValue(), async (value) => {
             this.plugin.settings.launchAgentWeeklyHour = normalizeHour(Number.parseInt(value.trim(), 10));
             await this.plugin.saveSettings();
-            this.display();
+            text.setValue(String(this.plugin.settings.launchAgentWeeklyHour));
           });
         })
         .addText((text) => {
@@ -299,7 +299,7 @@ export class MindmapSettingTab extends PluginSettingTab {
           bindCommitOnBlurOrEnter(text.inputEl, text.getValue(), async (value) => {
             this.plugin.settings.launchAgentWeeklyMinute = normalizeMinute(Number.parseInt(value.trim(), 10));
             await this.plugin.saveSettings();
-            this.display();
+            text.setValue(String(this.plugin.settings.launchAgentWeeklyMinute).padStart(2, "0"));
           });
         });
     }
@@ -496,7 +496,7 @@ export class MindmapSettingTab extends PluginSettingTab {
         bindCommitOnBlurOrEnter(text.inputEl, text.getValue(), async (value) => {
           this.plugin.settings[field] = value.trim();
           await this.plugin.saveSettings();
-          this.display();
+          text.setValue(this.plugin.settings[field]);
         });
       })
       .addExtraButton((button) => {

@@ -10,9 +10,11 @@ class FakeVault implements NoteVaultAdapter {
   files = new Map<string, string>();
   folders = new Set<string>();
   writeCount = 0;
+  readCount = 0;
   failNextWrite = false;
 
   async read(path: string): Promise<string | null> {
+    this.readCount += 1;
     return this.files.get(path) ?? null;
   }
 
@@ -274,6 +276,7 @@ void test("writeMetadata fails closed and performs no vault read when path does 
       }),
     (error: unknown) => isEngineError(error) && error.code === "IDENTITY_INVALID",
   );
+  assert.equal(vault.readCount, 0, "a misrouted path must not reach the vault at all");
 });
 
 void test("writeMetadata fails closed when metadata.identity does not match the note identity being written", async () => {
@@ -372,6 +375,7 @@ void test("writeMetadata fails closed on a malformed expectedSourceHash without 
       }),
     (error: unknown) => isEngineError(error) && error.code === "CONTRACT_SHAPE_INVALID",
   );
+  assert.equal(vault.readCount, 0, "a malformed expectedSourceHash must be rejected without reading the vault");
 });
 
 void test("writeMetadata wraps a vault write failure as a structured EngineError without leaking the adapter's raw error text", async () => {

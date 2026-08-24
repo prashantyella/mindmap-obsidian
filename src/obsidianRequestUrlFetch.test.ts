@@ -28,6 +28,31 @@ void test("obsidianRequestUrlFetch.ts preserves abort/timeout behavior by racing
   assert.match(source, /Promise\.race/);
 });
 
+void test("obsidianRequestUrlFetch.ts normalizes input/init through the Request constructor so a Request passed as input keeps its own method/headers/body/signal", () => {
+  const source = readSource("src/obsidianRequestUrlFetch.ts");
+  assert.match(source, /new Request\(input, init\)/);
+});
+
+void test("obsidianRequestUrlFetch.ts rejects an already-aborted signal before starting requestUrl", () => {
+  const source = readSource("src/obsidianRequestUrlFetch.ts");
+  const abortedCheckIndex = source.indexOf("if (signal.aborted)");
+  const requestUrlCallIndex = source.indexOf("requestUrl({");
+  assert.ok(abortedCheckIndex !== -1 && requestUrlCallIndex !== -1);
+  assert.ok(abortedCheckIndex < requestUrlCallIndex, "the aborted check must run before requestUrl is invoked");
+});
+
+void test("obsidianRequestUrlFetch.ts preserves an arbitrary-bytes body via arrayBuffer() rather than text()", () => {
+  const source = readSource("src/obsidianRequestUrlFetch.ts");
+  assert.match(source, /request\.arrayBuffer\(\)/);
+});
+
+void test("obsidianRequestUrlFetch.ts removes its abort listener once the race settles, using a named handler", () => {
+  const source = readSource("src/obsidianRequestUrlFetch.ts");
+  assert.match(source, /let onAbort/);
+  assert.match(source, /signal\.removeEventListener\("abort", onAbort\)/);
+  assert.match(source, /\}\s*finally\s*\{/);
+});
+
 void test("source audit: exaResearchProvider.ts and localResearchModel.ts never reference the bare global fetch", () => {
   for (const file of ["src/exaResearchProvider.ts", "src/localResearchModel.ts"]) {
     const source = readSource(file);

@@ -29,7 +29,8 @@ function listTsFiles(dir: string): string[] {
  * esbuild's only entry point (src/main.ts, per esbuild.config.mjs) is not
  * tools/parity itself and does not transitively require it.
  */
-const IMPORT_OR_REQUIRE_OF_PARITY_PATTERN = /(?:from\s+|require\()\s*["'][^"']*tools\/parity[^"']*["']/;
+const IMPORT_OR_REQUIRE_OF_PARITY_PATTERN =
+  /(?:\bfrom\s+|\brequire\s*\(|\bimport\s*\(|\bimport\s+)\s*["'][^"']*tools\/parity[^"']*["']/;
 
 void test("no file under src/ has an import/require statement naming tools/parity", () => {
   const offenders: string[] = [];

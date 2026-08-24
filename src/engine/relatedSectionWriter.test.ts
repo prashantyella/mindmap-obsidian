@@ -54,11 +54,17 @@ void test("clearManagedRelatedSection is a byte-exact no-op when nothing managed
   assert.equal(clearManagedRelatedSection(body), body);
 });
 
-void test("updateRelatedSection HTML-escapes a path/label containing HTML metacharacters instead of injecting markup", () => {
-  const maliciousPath = canonicalizePath('Notes/<img src=x onerror=alert(1)>&"\'.md');
+void test("updateRelatedSection silently skips a candidate whose path contains < or > instead of injecting markup", () => {
+  const maliciousPath = canonicalizePath('Notes/<img src=x onerror=alert(1)>.md');
   const output = updateRelatedSection("Body.\n", [{ path: maliciousPath, kind: "core" }], { newline: "\n" });
   assert.doesNotMatch(output, /<img/);
-  assert.match(output, /&lt;img src=x onerror=alert\(1\)&gt;&amp;&quot;&#39;/);
+  assert.equal(output, "Body.\n", "with the only candidate rejected, no callout should be rendered at all");
+});
+
+void test("updateRelatedSection emits & ' \" in a path/label verbatim, matching python/mindmap.py (no HTML escaping)", () => {
+  const ordinaryPath = canonicalizePath("Notes/Design & Ops's \"Review\".md");
+  const output = updateRelatedSection("Body.\n", [{ path: ordinaryPath, kind: "core" }], { newline: "\n" });
+  assert.match(output, /\[\[Notes\/Design & Ops's "Review"\.md\|Design & Ops's "Review"\]\]/);
 });
 
 void test("updateRelatedSection silently skips a candidate whose path contains a wikilink delimiter instead of emitting broken syntax", () => {

@@ -41,6 +41,11 @@ const ctx = await esbuild.context({
   format: "cjs",
   platform: "node",
   target: "es2020",
+  // Obsidian's plugin loader resolves "obsidian" only via CommonJS require,
+  // not a native dynamic import() of a bare specifier (which esbuild would
+  // otherwise preserve verbatim for an external module). This lowers
+  // readingVault.ts's `await import("obsidian")` to a deferred require().
+  supported: { "dynamic-import": false },
   sourcemap: production ? false : "inline",
   logLevel: "info",
   outfile: path.join(outdir, "main.js"),

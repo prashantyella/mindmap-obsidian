@@ -270,6 +270,17 @@ void test("projectSource: re-hashing after Mindmap changes an existing callout's
   assert.equal(projectSource(identity, firstWrite).sourceHash, projectSource(identity, secondWrite).sourceHash);
 });
 
+void test("projectSource strips every managed callout when a legacy write left two, not just the first", () => {
+  const identity = identityFor("Notes/Example.md");
+  const before = "Body content.\n";
+  const doubled =
+    "Body content.\n\n---\n\n> [!mindmap]- Mindmap\n> - <span class=\"mindmap-link is-core\">[[Notes/A|A]]</span>\n\n---\n\n> [!mindmap]- Related\n> - <span class=\"mindmap-link is-core\">[[Notes/B|B]]</span>\n";
+  const beforeProjection = projectSource(identity, before);
+  const doubledProjection = projectSource(identity, doubled);
+  assert.equal(doubledProjection.projectedBody, before);
+  assert.equal(beforeProjection.sourceHash, doubledProjection.sourceHash);
+});
+
 void test("projectSource: a divider unrelated to the callout (not immediately preceding it) is left in place, not consumed", () => {
   const identity = identityFor("Notes/Example.md");
   const raw = "User section one.\n\n---\n\nUser section two.\n\n---\n\n> [!mindmap]- Mindmap\n> - <span class=\"mindmap-link is-core\">[[Notes/A|A]]</span>\n";

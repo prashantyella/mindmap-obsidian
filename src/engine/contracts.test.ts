@@ -290,7 +290,6 @@ void test("computeJobIdempotencyKey is deterministic and distinguishes trigger/k
   assert.equal(key1, key2);
 
   const otherTrigger = computeJobIdempotencyKey("scheduled", "process-note", NOTE_TARGET, 1, HASH_A, "model-a");
-  const otherKind = computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 1, HASH_A, "model-a");
   const otherTarget = computeJobIdempotencyKey("manual", "process-note", { schemaVersion: 1, kind: "note", identity: stableNoteIdentity(canonicalizePath("Notes/Other.md")) }, 1, HASH_A, "model-a");
   const otherHash = computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 1, HASH_B, "model-a");
   const otherModel = computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 1, HASH_A, "model-b");
@@ -299,7 +298,10 @@ void test("computeJobIdempotencyKey is deterministic and distinguishes trigger/k
   const globalJob = computeJobIdempotencyKey("manual", "rebuild-index", GLOBAL_TARGET, 1);
   const distinctKeys = new Set([key1, otherTrigger, otherTarget, otherHash, otherModel, otherVersion, scopeJob, globalJob]);
   assert.equal(distinctKeys.size, 8);
-  assert.equal(otherKind, key1);
+
+  const scopeSync = computeJobIdempotencyKey("manual", "reading-sync", SCOPE_TARGET, 1);
+  const scopeRefresh = computeJobIdempotencyKey("manual", "scope-refresh", SCOPE_TARGET, 1);
+  assert.notEqual(scopeSync, scopeRefresh, "computeJobIdempotencyKey must distinguish kind even when trigger/target/pipelineVersion match");
 });
 
 void test("computeJobIdempotencyKey distinguishes two different scope ids and note-vs-scope targets with the same trailing text", () => {

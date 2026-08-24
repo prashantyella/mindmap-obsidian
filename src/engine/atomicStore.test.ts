@@ -153,7 +153,7 @@ void test("a rename failure leaves previously committed state completely unchang
   assert.equal([...fs.files.keys()].some((k) => k.includes(".atomic-tmp-")), false);
 });
 
-void test("save reads the temp file back and verifies it before renaming (write-back verification)", async () => {
+void test("save fsyncs the parent directory once after the rename when the seam supports it", async () => {
   const fs = new FakeFs();
   const store = makeStore(fs);
   await store.save({ count: 1, label: "a" });

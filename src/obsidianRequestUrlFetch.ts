@@ -38,25 +38,36 @@ function abortError(): DOMException {
  * not the caller-visible timeout behavior.
  */
 export const requestUrlFetch: typeof fetch = async (input, init) => {
-  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-  const method = init?.method ?? "GET";
-  const headers = normalizeHeaders(init?.headers);
-  const body = typeof init?.body === "string" ? init.body : undefined;
-  const signal = init?.signal ?? undefined;
+  // Normalizing through the platform Request constructor (rather than
+  // reading init.* directly) means a caller passing a Request as `input`
+  // keeps its method/headers/body/signal even when `init` is omitted --
+  // exactly like the global fetch it stands in for.
+  const request = new Request(input, init);
+  const signal = request.signal;
 
-  const request = requestUrl({ url, method, headers, body, throw: false }).then((response) => new Response(response.text, {
+  if (signal.aborted) {
+    throw abortError();
+  }
+
+  const method = request.method;
+  const headers = normalizeHeaders(request.headers);
+  // arrayBuffer() (not text()) so an arbitrary-bytes body survives
+  // unchanged; requestUrl's RequestUrlParam.body accepts ArrayBuffer directly.
+  const body = request.body === null ? undefined : await request.arrayBuffer();
+
+  const pending = requestUrl({ url: request.url, method, headers, body, throw: false }).then((response) => new Response(response.text, {
     status: response.status,
     headers: response.headers,
   }));
 
-  if (!signal) {
-    return await request;
-  }
-  if (signal.aborted) {
-    throw abortError();
-  }
+  let onAbort: (() => void) | undefined;
   const aborted = new Promise<never>((_resolve, reject) => {
-    signal.addEventListener("abort", () => reject(abortError()), { once: true });
+    onAbort = () => reject(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
   });
-  return await Promise.race([request, aborted]);
+  try {
+    return await Promise.race([pending, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
 };

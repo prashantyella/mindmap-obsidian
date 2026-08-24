@@ -208,13 +208,24 @@ if (!/id-token:\s*write/.test(workflow) || !/attestations:\s*write/.test(workflo
     throw new Error("Release workflow must publish the GitHub release via softprops/action-gh-release.");
   }
   const publishStep = workflow.slice(publishIndex);
-  for (const asset of RELEASE_ASSETS) {
-    if (!publishStep.includes(asset)) {
-      throw new Error(`Release workflow must publish ${asset}`);
-    }
+  const filesMatch = /files:\s*\|\s*\n((?:[ \t]+\S.*\n?)+)/.exec(publishStep);
+  if (!filesMatch) {
+    throw new Error("Release workflow's publish step must set files: | to a literal block list of asset paths.");
   }
-  if (publishStep.includes("release/mindmap-python.zip")) {
-    throw new Error("Official release must publish only main.js, manifest.json, and styles.css -- mindmap-python.zip must not be a published release asset.");
+  const publishedAssets = filesMatch[1]
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const publishedAssetSet = new Set(publishedAssets);
+  const expectedAssetSet = new Set(RELEASE_ASSETS);
+  const missing = RELEASE_ASSETS.filter((asset) => !publishedAssetSet.has(asset));
+  const unexpected = publishedAssets.filter((asset) => !expectedAssetSet.has(asset));
+  if (missing.length > 0 || unexpected.length > 0) {
+    throw new Error(
+      `Release workflow must publish exactly ${JSON.stringify(RELEASE_ASSETS)}` +
+        (missing.length > 0 ? `; missing: ${missing.join(", ")}` : "") +
+        (unexpected.length > 0 ? `; unexpected: ${unexpected.join(", ")}` : ""),
+    );
   }
   if (!/generate_release_notes:\s*true/.test(publishStep) && !publishStep.includes("body_path")) {
     throw new Error("Release workflow must make the release non-empty via generate_release_notes: true (preferred) or an explicit body_path.");
