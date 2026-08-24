@@ -1,6 +1,7 @@
 import { canonicalizePath, stableNoteIdentity, type NoteIdentityV1 } from "./contracts";
 import { EngineError } from "./errors";
 import { parseFrontmatter } from "./frontmatterEngine";
+import { projectSource } from "./sourceProjection";
 import { READING_ANNOTATIONS_FOLDER } from "../readingTypes";
 import {
   isSafeIndividualNotePath,
@@ -237,6 +238,110 @@ function canonicalizeCandidatePaths(candidatePaths: readonly unknown[]): string[
  *    per-file read failure or ineligibility is recorded as a bounded
  *    reason count and the walk continues, never aborting the whole plan.
  */
+/**
+ * Classifies ONE candidate path against the shared eligibility rules --
+ * factored out of `planCatalogSample` so `planFullCatalogDiscovery` (real
+ * migration/production discovery, Checkpoint 10A) walks the EXACT same
+ * decision tree instead of a parallel, drift-prone copy. Calls `skip` with
+ * the closed reason code and returns `null` for anything ineligible;
+ * returns the classified `CatalogPlanItem` on success. Never throws for an
+ * ordinary skip -- only a truly unexpected internal error would escape.
+ */
+async function classifyCandidate(
+  relpath: string,
+  config: CatalogPlannerConfig,
+  scopeFolders: string[],
+  runtimeFolder: string | null,
+  reader: CatalogTextReader,
+  signal: AbortSignal | undefined,
+  skip: (code: CatalogSkipReasonCode) => void,
+): Promise<CatalogPlanItem | null> {
+  if (!isSafeIndividualNotePath(relpath, config.configDir)) {
+    skip("UNSAFE_PATH");
+    return null;
+  }
+  if (runtimeFolder !== null && isWithinFolder(relpath, runtimeFolder)) {
+    skip("UNSAFE_PATH");
+    return null;
+  }
+
+  const readingIncluded = config.includeReadingAnnotations !== false;
+  const isAnnotationShaped = readingIncluded && isStructurallyValidAnnotationPath(relpath);
+  const isIndexShaped = readingIncluded && isReadingIndexShapedPath(relpath);
+  const inOrdinaryScope = isWithinScope(relpath, scopeFolders);
+  // Reading-root inclusion is STRICT: only a structurally valid annotation path (or the
+  // generated-index shape, so it can still be positively identified and excluded below) is ever
+  // admitted through this branch -- never an arbitrary ordinary file anywhere else under the
+  // broad Reading root (Checkpoint 9 closure review item 3). An ordinary note that merely LIVES
+  // under the Reading root but isn't shaped like either of these is only visible at all if the
+  // caller's ORDINARY `scopeFolders` independently cover it.
+  if (!inOrdinaryScope && !isAnnotationShaped && !isIndexShaped) {
+    skip("OUT_OF_SCOPE");
+    return null;
+  }
+  if (isResearchCompanionPath(relpath)) {
+    skip("RESEARCH_COMPANION");
+    return null;
+  }
+
+  let text: string;
+  try {
+    text = await reader.readText(relpath, signal);
+  } catch {
+    skip("READ_FAILED");
+    return null;
+  }
+
+  if (isIndexShaped && hasCompleteManagedIndexMarkers(text)) {
+    skip("MANAGED_ARTIFACT");
+    return null;
+  }
+
+  // Only a note both STRUCTURALLY shaped like a real annotation AND carrying the annotation
+  // frontmatter type gets annotation-identity treatment -- an ordinary note elsewhere that
+  // copy-pasted the type value, or a structurally-shaped file missing the type, is never mistaken
+  // for a real annotation (Checkpoint 9 requirement 9/closure review item 3).
+  const annotation = isAnnotationShaped && isAppleBooksAnnotationType(text);
+  // A candidate admitted through the STRICT Reading-annotation path ONLY (not independently
+  // covered by the caller's ordinary scopeFolders) must actually BE a real annotation -- if its
+  // frontmatter type doesn't match, it is skipped outright, never silently downgraded into an
+  // ordinary path-identity note just because it happened to pass the annotation-shape gate
+  // (Checkpoint 9 closure review item 4). A candidate the caller's ORDINARY scope independently
+  // covers keeps the pre-existing, explicitly-tested ordinary-note policy: it is still included
+  // as an ordinary note when it isn't a real annotation.
+  if (isAnnotationShaped && !inOrdinaryScope && !annotation) {
+    skip("OUT_OF_SCOPE");
+    return null;
+  }
+  const body = bodyAfterFrontmatter(text);
+  const minimum = minimumWordsForNote(text, config.minimumWords);
+  // `normalizedWordCount` (Unicode-aware word matching) is used uniformly for BOTH ordinary and
+  // annotation notes here (closure review item 3) -- unlike `individualNote.ts`'s own
+  // `assessActiveNote`, which only applies it to annotations; this module's own eligibility
+  // count does not need to byte-for-byte match that one code path's historical behavior.
+  const wordCount = normalizedWordCount(body);
+  if (wordCount < minimum) {
+    skip("TOO_SHORT");
+    return null;
+  }
+
+  try {
+    const canonical = canonicalizePath(relpath);
+    if (annotation) {
+      const annotationId = readAnnotationIdFrontmatter(text);
+      if (!annotationId) {
+        skip("MISSING_ANNOTATION_ID");
+        return null;
+      }
+      return { relpath, identity: stableNoteIdentity(canonical, annotationId), isAppleAnnotation: true, rawContent: text };
+    }
+    return { relpath, identity: stableNoteIdentity(canonical), isAppleAnnotation: false, rawContent: text };
+  } catch {
+    skip("IDENTITY_INVALID");
+    return null;
+  }
+}
+
 export async function planCatalogSample(candidatePaths: readonly string[], config: CatalogPlannerConfig, reader: CatalogTextReader, maxCount: number = DEFAULT_MAX_CATALOG_SAMPLE, signal?: AbortSignal): Promise<CatalogPlanResult> {
   assertValidMaxCount(maxCount);
   assertValidMinimumWords(config.minimumWords);
@@ -258,95 +363,208 @@ export async function planCatalogSample(candidatePaths: readonly string[], confi
       aborted = true;
       break;
     }
-
-    if (!isSafeIndividualNotePath(relpath, config.configDir)) {
-      skip("UNSAFE_PATH");
-      continue;
-    }
-    if (runtimeFolder !== null && isWithinFolder(relpath, runtimeFolder)) {
-      skip("UNSAFE_PATH");
-      continue;
-    }
-
-    const readingIncluded = config.includeReadingAnnotations !== false;
-    const isAnnotationShaped = readingIncluded && isStructurallyValidAnnotationPath(relpath);
-    const isIndexShaped = readingIncluded && isReadingIndexShapedPath(relpath);
-    const inOrdinaryScope = isWithinScope(relpath, scopeFolders);
-    // Reading-root inclusion is STRICT: only a structurally valid annotation path (or the
-    // generated-index shape, so it can still be positively identified and excluded below) is ever
-    // admitted through this branch -- never an arbitrary ordinary file anywhere else under the
-    // broad Reading root (Checkpoint 9 closure review item 3). An ordinary note that merely LIVES
-    // under the Reading root but isn't shaped like either of these is only visible at all if the
-    // caller's ORDINARY `scopeFolders` independently cover it.
-    if (!inOrdinaryScope && !isAnnotationShaped && !isIndexShaped) {
-      skip("OUT_OF_SCOPE");
-      continue;
-    }
-    if (isResearchCompanionPath(relpath)) {
-      skip("RESEARCH_COMPANION");
-      continue;
-    }
-
-    let text: string;
-    try {
-      text = await reader.readText(relpath, signal);
-    } catch {
-      skip("READ_FAILED");
-      continue;
-    }
-
-    if (isIndexShaped && hasCompleteManagedIndexMarkers(text)) {
-      skip("MANAGED_ARTIFACT");
-      continue;
-    }
-
-    // Only a note both STRUCTURALLY shaped like a real annotation AND carrying the annotation
-    // frontmatter type gets annotation-identity treatment -- an ordinary note elsewhere that
-    // copy-pasted the type value, or a structurally-shaped file missing the type, is never mistaken
-    // for a real annotation (Checkpoint 9 requirement 9/closure review item 3).
-    const annotation = isAnnotationShaped && isAppleBooksAnnotationType(text);
-    // A candidate admitted through the STRICT Reading-annotation path ONLY (not independently
-    // covered by the caller's ordinary scopeFolders) must actually BE a real annotation -- if its
-    // frontmatter type doesn't match, it is skipped outright, never silently downgraded into an
-    // ordinary path-identity note just because it happened to pass the annotation-shape gate
-    // (Checkpoint 9 closure review item 4). A candidate the caller's ORDINARY scope independently
-    // covers keeps the pre-existing, explicitly-tested ordinary-note policy: it is still included
-    // as an ordinary note when it isn't a real annotation.
-    if (isAnnotationShaped && !inOrdinaryScope && !annotation) {
-      skip("OUT_OF_SCOPE");
-      continue;
-    }
-    const body = bodyAfterFrontmatter(text);
-    const minimum = minimumWordsForNote(text, config.minimumWords);
-    // `normalizedWordCount` (Unicode-aware word matching) is used uniformly for BOTH ordinary and
-    // annotation notes here (closure review item 3) -- unlike `individualNote.ts`'s own
-    // `assessActiveNote`, which only applies it to annotations; this module's own eligibility
-    // count does not need to byte-for-byte match that one code path's historical behavior.
-    const wordCount = normalizedWordCount(body);
-    if (wordCount < minimum) {
-      skip("TOO_SHORT");
-      continue;
-    }
-
-    try {
-      const canonical = canonicalizePath(relpath);
-      if (annotation) {
-        const annotationId = readAnnotationIdFrontmatter(text);
-        if (!annotationId) {
-          skip("MISSING_ANNOTATION_ID");
-          continue;
-        }
-        items.push({ relpath, identity: stableNoteIdentity(canonical, annotationId), isAppleAnnotation: true, rawContent: text });
-      } else {
-        items.push({ relpath, identity: stableNoteIdentity(canonical), isAppleAnnotation: false, rawContent: text });
-      }
-    } catch {
-      skip("IDENTITY_INVALID");
-      continue;
-    }
+    const item = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
+    if (item) items.push(item);
   }
 
   return { items, skipReasonCounts, aborted };
+}
+
+/**
+ * Checkpoint 10A: the safety ceiling on a FULL production catalog
+ * discovery pass (migration/rebuild note enumeration) -- deliberately much
+ * higher than `DEFAULT_MAX_CATALOG_SAMPLE` (a 50-note DEV DIAGNOSTIC
+ * sample, Checkpoint 9's own bound, left completely untouched here) since
+ * migration must discover every eligible note in a real vault, not a
+ * capped preview. Still a hard, explicit cap -- defense-in-depth against
+ * an unbounded scan, never silently unbounded.
+ */
+export const MAX_CATALOG_DISCOVERY_ITEMS = 20_000;
+
+/**
+ * Full (non-sampled) catalog discovery for real production use
+ * (Checkpoint 10A migration/rebuild note enumeration): walks EVERY
+ * canonicalized, sorted candidate and classifies each one via the exact
+ * same `classifyCandidate` decision tree `planCatalogSample` itself uses
+ * -- never a parallel reimplementation -- collecting every eligible item
+ * up to `MAX_CATALOG_DISCOVERY_ITEMS`, not a small fixed sample. Still
+ * fully Node-testable/Obsidian-free; a caller in `src/engine` or
+ * `src/migration` supplies real vault paths/text via `CatalogTextReader`.
+ */
+export async function planFullCatalogDiscovery(candidatePaths: readonly string[], config: CatalogPlannerConfig, reader: CatalogTextReader, signal?: AbortSignal, maxItems: number = MAX_CATALOG_DISCOVERY_ITEMS): Promise<CatalogPlanResult> {
+  assertValidMaxCount(maxItems);
+  assertValidMinimumWords(config.minimumWords);
+  const scopeFolders = canonicalizeScopeFolders(config.scopeFolders);
+  const runtimeFolder = config.runtimeFolder !== undefined ? canonicalizeScopeFolder(config.runtimeFolder) : null;
+  const sorted = canonicalizeCandidatePaths(candidatePaths).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const bound = Math.min(maxItems, MAX_CATALOG_DISCOVERY_ITEMS);
+
+  const items: CatalogPlanItem[] = [];
+  const skipReasonCounts: Partial<Record<CatalogSkipReasonCode, number>> = {};
+  const skip = (code: CatalogSkipReasonCode) => {
+    skipReasonCounts[code] = (skipReasonCounts[code] ?? 0) + 1;
+  };
+
+  let aborted = false;
+  for (const relpath of sorted) {
+    if (items.length >= bound) break;
+    if (signal?.aborted) {
+      aborted = true;
+      break;
+    }
+    const item = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
+    if (item) items.push(item);
+  }
+
+  return { items, skipReasonCounts, aborted };
+}
+
+/**
+ * Checkpoint 10A item 8: the safety ceiling on total UTF-8 bytes a single
+ * `streamFullCatalogDiscovery` pass will ever read across every candidate
+ * combined -- a second, independent bound alongside `MAX_CATALOG_DISCOVERY_ITEMS`
+ * (a 10,000-note vault of unusually large files could exceed a sane memory/
+ * time budget well before hitting the item-count cap alone).
+ */
+export const MAX_CATALOG_DISCOVERY_TOTAL_BYTES = 500_000_000;
+
+export interface CatalogDiscoveryStreamItem {
+  identity: NoteIdentityV1;
+  sourceHash: string;
+}
+
+export interface CatalogDiscoveryStreamResult {
+  items: CatalogDiscoveryStreamItem[];
+  /** Every skip this run recorded, keyed by its closed reason code -- see `CatalogPlanResult`. */
+  skipReasonCounts: Partial<Record<CatalogSkipReasonCode, number>>;
+  /** `true` when `signal` aborted the walk, OR `maxTotalBytes` was reached, before every sorted candidate was considered. */
+  aborted: boolean;
+  /** Bounded, content-free running total of UTF-8 bytes read across every classified candidate this pass -- never a byte of the content itself. */
+  totalBytesRead: number;
+}
+
+function assertValidMaxBytes(maxTotalBytes: number): void {
+  if (!Number.isFinite(maxTotalBytes) || !Number.isInteger(maxTotalBytes) || maxTotalBytes <= 0) {
+    throw new EngineError("CONTRACT_SHAPE_INVALID", "streamFullCatalogDiscovery maxTotalBytes must be a positive integer.", {});
+  }
+}
+
+/**
+ * Checkpoint 10A item 8: "do not retain 10,000 note bodies" -- a
+ * content-free streaming counterpart to `planFullCatalogDiscovery` for
+ * migration/scope-refresh discovery. Reads, classifies, and projects
+ * (`sourceHash` only, via the SAME `projectSource` every write path uses)
+ * exactly ONE candidate's raw text at a time; that text is never appended
+ * to any array or otherwise retained past the single loop iteration that
+ * read it -- only the tiny `{identity, sourceHash}` pair survives. Bounded
+ * by both item count (`maxItems`, capped at `MAX_CATALOG_DISCOVERY_ITEMS`)
+ * and total bytes read (`maxTotalBytes`, capped at
+ * `MAX_CATALOG_DISCOVERY_TOTAL_BYTES`), and cancellable via `signal`,
+ * checked between every candidate exactly like `planFullCatalogDiscovery`.
+ *
+ * A caller that later needs a specific note's full body again (e.g.
+ * migration ingestion re-reading one identity to embed it) re-reads that
+ * ONE identity through `NoteSourceReader`/`CatalogTextReader` directly --
+ * never by re-running this discovery pass and searching its output for
+ * content that was never retained in the first place.
+ */
+export async function streamFullCatalogDiscovery(
+  candidatePaths: readonly string[],
+  config: CatalogPlannerConfig,
+  reader: CatalogTextReader,
+  signal?: AbortSignal,
+  maxItems: number = MAX_CATALOG_DISCOVERY_ITEMS,
+  maxTotalBytes: number = MAX_CATALOG_DISCOVERY_TOTAL_BYTES,
+): Promise<CatalogDiscoveryStreamResult> {
+  assertValidMaxCount(maxItems);
+  assertValidMaxBytes(maxTotalBytes);
+  assertValidMinimumWords(config.minimumWords);
+  const scopeFolders = canonicalizeScopeFolders(config.scopeFolders);
+  const runtimeFolder = config.runtimeFolder !== undefined ? canonicalizeScopeFolder(config.runtimeFolder) : null;
+  const sorted = canonicalizeCandidatePaths(candidatePaths).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const bound = Math.min(maxItems, MAX_CATALOG_DISCOVERY_ITEMS);
+  const byteBound = Math.min(maxTotalBytes, MAX_CATALOG_DISCOVERY_TOTAL_BYTES);
+
+  const items: CatalogDiscoveryStreamItem[] = [];
+  const skipReasonCounts: Partial<Record<CatalogSkipReasonCode, number>> = {};
+  const skip = (code: CatalogSkipReasonCode) => {
+    skipReasonCounts[code] = (skipReasonCounts[code] ?? 0) + 1;
+  };
+
+  let aborted = false;
+  let totalBytesRead = 0;
+  for (const relpath of sorted) {
+    if (items.length >= bound) break;
+    if (signal?.aborted) {
+      aborted = true;
+      break;
+    }
+    if (totalBytesRead >= byteBound) {
+      aborted = true;
+      break;
+    }
+    const item = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
+    if (!item) continue;
+    // Item 4 (10A blocker pass): this candidate was actually READ -- its bytes count toward
+    // `totalBytesRead` regardless of whether it fits under `byteBound`, so the reported total
+    // always reflects every byte this pass actually pulled off disk. But a candidate whose OWN
+    // bytes would push the running total past `byteBound` is never itself accepted into `items`
+    // -- accepting it first and only checking the bound on the NEXT iteration would let a single
+    // oversized note blow through the budget by an unbounded amount before the walk ever noticed.
+    const itemBytes = Buffer.byteLength(item.rawContent, "utf8");
+    totalBytesRead += itemBytes;
+    if (totalBytesRead > byteBound) {
+      aborted = true;
+      break;
+    }
+    const sourceHash = projectSource(item.identity, item.rawContent).sourceHash;
+    items.push({ identity: item.identity, sourceHash });
+    // `item`/`item.rawContent` fall out of scope here -- never accumulated across iterations.
+  }
+
+  return { items, skipReasonCounts, aborted, totalBytesRead };
+}
+
+/**
+ * Checkpoint 10A item 8: resolves a SINGLE apple-annotation identity by its
+ * `appleAnnotationId` without ever retaining more than one candidate's raw
+ * text at a time -- a content-free counterpart to scanning
+ * `planFullCatalogDiscovery`'s full retained-body result for a match.
+ * Returns as soon as a match is found (never keeps scanning the rest of
+ * the vault), and returns `null` if no candidate matches within
+ * `maxCandidates`/before `signal` aborts.
+ */
+export async function findCatalogItemByAnnotationId(
+  candidatePaths: readonly string[],
+  config: CatalogPlannerConfig,
+  reader: CatalogTextReader,
+  appleAnnotationId: string,
+  signal?: AbortSignal,
+  maxCandidates: number = MAX_CATALOG_DISCOVERY_ITEMS,
+): Promise<{ identity: NoteIdentityV1; rawContent: string } | null> {
+  assertValidMaxCount(maxCandidates);
+  assertValidMinimumWords(config.minimumWords);
+  const scopeFolders = canonicalizeScopeFolders(config.scopeFolders);
+  const runtimeFolder = config.runtimeFolder !== undefined ? canonicalizeScopeFolder(config.runtimeFolder) : null;
+  const sorted = canonicalizeCandidatePaths(candidatePaths).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const bound = Math.min(maxCandidates, MAX_CATALOG_DISCOVERY_ITEMS);
+  const skipReasonCounts: Partial<Record<CatalogSkipReasonCode, number>> = {};
+  const skip = (code: CatalogSkipReasonCode) => {
+    skipReasonCounts[code] = (skipReasonCounts[code] ?? 0) + 1;
+  };
+
+  let considered = 0;
+  for (const relpath of sorted) {
+    if (considered >= bound) break;
+    if (signal?.aborted) break;
+    const item = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
+    considered += 1;
+    if (item && item.isAppleAnnotation && item.identity.appleAnnotationId === appleAnnotationId) {
+      return { identity: item.identity, rawContent: item.rawContent };
+    }
+    // A non-matching `item` (and its `rawContent`) is discarded here -- never accumulated.
+  }
+  return null;
 }
 
 /** Structural shape only: `Books/Apple Books/<author>/<book>/Research/<file>.md` -- the Mindmap-managed research-companion folder sits alongside `Annotations`. Checked only for a candidate that already passed the strict annotation/index-shape-or-ordinary-scope gate above, so this can never itself be a scope-widening check. */

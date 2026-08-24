@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { planCatalogSample, type CatalogTextReader } from "./vaultCatalogPlanner";
+import { findCatalogItemByAnnotationId, planCatalogSample, streamFullCatalogDiscovery, type CatalogTextReader } from "./vaultCatalogPlanner";
 
 function reader(files: Record<string, string>): CatalogTextReader {
   return {
@@ -275,4 +275,72 @@ void test("planCatalogSample excludes a non-Markdown file", async () => {
   const result = await planCatalogSample(Object.keys(files), { scopeFolders: ["Notes"], minimumWords: 1 }, reader(files));
   assert.equal(result.items.length, 0);
   assert.equal(result.skipReasonCounts.UNSAFE_PATH, 1);
+});
+
+void test("streamFullCatalogDiscovery returns content-free items (identity + sourceHash only, never rawContent) for every eligible note", async () => {
+  const files = { "Notes/a.md": NOTE_TEXT, "Notes/b.md": NOTE_TEXT + " extra" };
+  const result = await streamFullCatalogDiscovery(Object.keys(files), { scopeFolders: ["Notes"], minimumWords: 5 }, reader(files));
+  assert.equal(result.items.length, 2);
+  for (const item of result.items) {
+    assert.equal(Object.prototype.hasOwnProperty.call(item, "rawContent"), false, "streamed items must never carry rawContent");
+    assert.equal(typeof item.sourceHash, "string");
+    assert.match(item.sourceHash, /^[0-9a-f]{64}$/);
+  }
+  assert.ok(result.totalBytesRead > 0);
+  assert.equal(result.aborted, false);
+});
+
+void test("streamFullCatalogDiscovery never reads past an aborted signal", async () => {
+  const files: Record<string, string> = { "Notes/a.md": NOTE_TEXT, "Notes/b.md": NOTE_TEXT, "Notes/c.md": NOTE_TEXT };
+  const controller = new AbortController();
+  let reads = 0;
+  const countingReader: CatalogTextReader = {
+    async readText(relpath: string) {
+      reads += 1;
+      if (reads >= 2) controller.abort();
+      return files[relpath];
+    },
+  };
+  const result = await streamFullCatalogDiscovery(Object.keys(files), { scopeFolders: ["Notes"], minimumWords: 5 }, countingReader, controller.signal);
+  assert.equal(result.aborted, true);
+  assert.ok(result.items.length < 3, "abort must stop the walk before every candidate is considered");
+});
+
+void test("streamFullCatalogDiscovery stops once maxTotalBytes is reached, bounding total memory footprint regardless of item count", async () => {
+  const files = { "Notes/a.md": NOTE_TEXT, "Notes/b.md": NOTE_TEXT, "Notes/c.md": NOTE_TEXT };
+  const byteBound = Buffer.byteLength(NOTE_TEXT, "utf8");
+  const result = await streamFullCatalogDiscovery(Object.keys(files), { scopeFolders: ["Notes"], minimumWords: 5 }, reader(files), undefined, undefined, byteBound);
+  assert.equal(result.aborted, true);
+  assert.equal(result.items.length, 1, "the walk must stop after the byte bound is reached, never processing every candidate");
+});
+
+void test("findCatalogItemByAnnotationId returns the single matching annotation's identity/rawContent without scanning further once found", async () => {
+  const annotationText = ["---", "type: apple-books-annotation", "annotation_id: abc123", "---", "This annotation quote has more than eight words in total, for sure."].join("\n");
+  const files = { "Books/Apple Books/Author/Book/Annotations/note.md": annotationText, "Notes/other.md": NOTE_TEXT };
+  const found = await findCatalogItemByAnnotationId(Object.keys(files), { scopeFolders: [], minimumWords: 5 }, reader(files), "abc123");
+  assert.ok(found);
+  assert.equal(found?.identity.appleAnnotationId, "abc123");
+  assert.equal(found?.rawContent, annotationText);
+});
+
+void test("findCatalogItemByAnnotationId returns null when no candidate matches", async () => {
+  const files = { "Notes/other.md": NOTE_TEXT };
+  const found = await findCatalogItemByAnnotationId(Object.keys(files), { scopeFolders: ["Notes"], minimumWords: 5 }, reader(files), "does-not-exist");
+  assert.equal(found, null);
+});
+
+void test("streamFullCatalogDiscovery (item 4) never accepts the item that would cross maxTotalBytes, but still counts its bytes as read -- a byte budget can never be silently exceeded by one oversized note", async () => {
+  const small = NOTE_TEXT;
+  const large = NOTE_TEXT + " " + "extra ".repeat(200);
+  const files = { "Notes/a-small.md": small, "Notes/b-large.md": large };
+  const smallBytes = Buffer.byteLength(small, "utf8");
+  const largeBytes = Buffer.byteLength(large, "utf8");
+  // Budget fits the first (small) item alone, but not both -- the large second item would cross it.
+  const byteBound = smallBytes + 10;
+  assert.ok(largeBytes > 10, "test fixture sanity: the large note must not itself fit in the remaining headroom");
+
+  const result = await streamFullCatalogDiscovery(Object.keys(files), { scopeFolders: ["Notes"], minimumWords: 5 }, reader(files), undefined, undefined, byteBound);
+  assert.equal(result.items.length, 1, "the byte-crossing second item must never be accepted into items");
+  assert.equal(result.aborted, true);
+  assert.equal(result.totalBytesRead, smallBytes + largeBytes, "the byte-crossing item's bytes must still be counted as read, even though it was not accepted");
 });
