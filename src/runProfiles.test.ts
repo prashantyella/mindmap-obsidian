@@ -1,32 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { getDailyMaintenanceArgs, getRunProfile } from "./runProfiles";
+import { getRunProfile } from "./runProfiles";
 
-void test("getRunProfile returns current-scope apply arguments", () => {
-  assert.deepEqual(getRunProfile("current"), {
-    args: ["--current", "--apply"],
-    label: "current scope",
-  });
+void test("getRunProfile returns current-scope label with no confirmation", () => {
+  assert.deepEqual(getRunProfile("current"), { label: "current scope" });
 });
 
-void test("getRunProfile returns one-note apply arguments", () => {
-  assert.deepEqual(getRunProfile("note", "Notes/one.md"), {
-    args: ["--note=Notes/one.md", "--apply"],
-    label: "individual note Notes/one.md",
-  });
+void test("getRunProfile returns one-note label", () => {
+  assert.deepEqual(getRunProfile("note", "Notes/one.md"), { label: "individual note Notes/one.md" });
 });
 
-void test("getRunProfile returns all-scope apply arguments", () => {
-  assert.deepEqual(getRunProfile("all"), {
-    args: ["--all", "--apply"],
-    label: "all scopes",
-  });
+void test("getRunProfile throws when scope is note and no path is given", () => {
+  assert.throws(() => getRunProfile("note"));
 });
 
-void test("getRunProfile returns metadata-only refresh arguments with confirmation", () => {
+void test("getRunProfile returns all-scope label with no confirmation", () => {
+  assert.deepEqual(getRunProfile("all"), { label: "all scopes" });
+});
+
+void test("getRunProfile returns metadata-only refresh label with confirmation", () => {
   assert.deepEqual(getRunProfile("metadataAll"), {
-    args: ["--all", "--tag", "--refresh-all", "--apply"],
     label: "all scopes metadata refresh",
     confirmation: {
       title: "Run metadata refresh?",
@@ -37,9 +31,8 @@ void test("getRunProfile returns metadata-only refresh arguments with confirmati
   });
 });
 
-void test("getRunProfile returns all-scope full refresh arguments", () => {
+void test("getRunProfile returns all-scope full refresh label with confirmation", () => {
   assert.deepEqual(getRunProfile("refreshAll"), {
-    args: ["--all", "--refresh-all", "--apply"],
     label: "all scopes full refresh",
     confirmation: {
       title: "Run full refresh?",
@@ -50,21 +43,12 @@ void test("getRunProfile returns all-scope full refresh arguments", () => {
   });
 });
 
-void test("getDailyMaintenanceArgs extends the all-scope apply run with the Reading pending flag", () => {
-  assert.deepEqual(getDailyMaintenanceArgs(), ["--all", "--apply", "--include-reading-pending"]);
-});
-
-void test("getRunProfile('all') for manual runs never includes the Reading pending flag", () => {
-  assert.deepEqual(getRunProfile("all").args, ["--all", "--apply"]);
-});
-
-void test("getRunProfile returns all-scope full rebuild arguments", () => {
+void test("getRunProfile returns all-scope full rebuild label with confirmation", () => {
   assert.deepEqual(getRunProfile("rebuildAll"), {
-    args: ["--all", "--refresh-all", "--rebuild", "--apply"],
     label: "all scopes full rebuild",
     confirmation: {
       title: "Run full rebuild?",
-      message: "This deletes and recreates the local vector collections, then refreshes every all-scope note.",
+      message: "This rebuilds the local vector index from the committed generation, then refreshes every all-scope note.",
       confirmText: "Run full rebuild",
       confirmClass: "mod-warning",
     },

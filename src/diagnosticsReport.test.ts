@@ -9,7 +9,6 @@ import {
   MAX_FIELD_CHARS,
   MAX_REPORT_CHARS,
   MAX_REPORT_LOG_LINES,
-  MAX_RUNTIME_MESSAGES,
   redactSecrets,
   redactUrl,
   truncateField,
@@ -19,26 +18,13 @@ import {
 function reportInput(overrides: Partial<DiagnosticsReportInput> = {}): DiagnosticsReportInput {
   return {
     generatedAt: "2026-08-22T00:00:00.000Z",
-    runtime: {
-      command: "python3",
-      args: ["mindmap.py", "--current", "--apply"],
-      scriptPath: "/Users/tester/vault/.obsidian/plugins/mindmap-ai/python/mindmap.py",
-      configPath: "/Users/tester/vault/.obsidian/plugins/mindmap-ai/python/config.json",
-      valid: true,
-      trustLevel: "trusted",
-      trustInterpreter: "bundled",
-      trustScript: "bundled",
-      trustConfig: "bundled",
-      messages: [],
-    },
+    engine: { available: true },
     provider: {
-      canManage: true,
-      provider: "ollama",
-      baseUrl: "http://localhost:11434",
-      model: "llama3.1:8b",
-      hasApiKey: false,
-      maxTokens: 1024,
-      enableThinking: true,
+      embedBaseUrl: "http://localhost:11434",
+      embedModel: "mxbai-embed-large",
+      llmBaseUrl: "http://localhost:11434",
+      llmModel: "llama3.1:8b",
+      llmMaxTokens: 1024,
     },
     preflight: { inProgress: false, lastRunAt: null, result: null },
     scheduler: { mode: "manual", launchAgentHealth: null, nextRunAt: null, lastMessage: "Manual mode." },
@@ -65,24 +51,12 @@ void test("diagnostics report includes the required detail sections", () => {
     preflight: { inProgress: false, lastRunAt: 1755820800000, result: { ok: true, summary: "All checks passed.", checks: [{ code: "OK", label: "Ollama", status: "ok", message: "reachable" }], rawStdout: "", rawStderr: "", exitCode: 0 } },
   }));
 
-  assert.match(report, /Runtime/);
-  assert.match(report, /Command: python3 mindmap\.py --current --apply/);
-  assert.match(report, /Script: .*mindmap\.py/);
-  assert.match(report, /Config: .*config\.json/);
-  assert.match(report, /Trust: trusted/);
+  assert.match(report, /Engine/);
+  assert.match(report, /Available: yes/);
   assert.match(report, /Provider/);
   assert.match(report, /Preflight/);
   assert.match(report, /Scheduler/);
   assert.match(report, /Recent log/);
-});
-
-void test("the API key value is never included in the report, only whether one is set", () => {
-  const withKey = buildDiagnosticsReport(reportInput({ provider: { ...reportInput().provider, hasApiKey: true } }));
-  assert.match(withKey, /API key: set/);
-  assert.doesNotMatch(withKey, /sk-|Bearer/);
-
-  const withoutKey = buildDiagnosticsReport(reportInput());
-  assert.match(withoutKey, /API key: not set/);
 });
 
 void test("preflight check context redacts sensitive keys but keeps other diagnostic context", () => {
@@ -163,11 +137,11 @@ void test("redactUrl strips userinfo credentials and redacts sensitive query par
 
 void test("the provider base URL is redacted in the report when it carries credentials or a sensitive query token", () => {
   const report = buildDiagnosticsReport(reportInput({
-    provider: { ...reportInput().provider, baseUrl: "http://svc-user:svc-pass@localhost:8000/v1?api_key=sk-live-abc123" },
+    provider: { ...reportInput().provider, llmBaseUrl: "http://svc-user:svc-pass@localhost:8000/v1?api_key=sk-live-abc123" },
   }));
   assert.doesNotMatch(report, /svc-pass/);
   assert.doesNotMatch(report, /sk-live-abc123/);
-  assert.match(report, /Base URL:/);
+  assert.match(report, /Metadata base URL:/);
 });
 
 void test("preflight check context is redacted recursively through nested objects and arrays at any depth", () => {
@@ -245,12 +219,6 @@ void test("more preflight checks than MAX_CHECKS are bounded with an explicit li
     preflight: { inProgress: false, lastRunAt: null, result: { ok: true, summary: "many checks", checks, rawStdout: "", rawStderr: "", exitCode: 0 } },
   }));
   assert.match(report, /\[\+5 more, truncated\]/);
-});
-
-void test("more runtime messages than MAX_RUNTIME_MESSAGES are bounded with an explicit list-truncation marker", () => {
-  const messages = Array.from({ length: MAX_RUNTIME_MESSAGES + 3 }, (_, index) => ({ level: "info", message: `message ${index}` }));
-  const report = buildDiagnosticsReport(reportInput({ runtime: { ...reportInput().runtime, messages } }));
-  assert.match(report, /\[\+3 more, truncated\]/);
 });
 
 void test("the whole report carries a deterministic total character cap with an explicit truncation marker", () => {

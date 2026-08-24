@@ -1,17 +1,8 @@
-export type OverviewAction = "openMindmap" | "runChecks" | "setupRuntime" | "cancelSetup" | "openPythonDownload";
-
-export interface OverviewRuntimeSetup {
-  phase: string;
-  message: string;
-  canSetup: boolean;
-  canCancel: boolean;
-}
+export type OverviewAction = "openMindmap" | "runChecks";
 
 export interface OverviewInput {
-  runtimeValid: boolean;
-  runtimeSetup: OverviewRuntimeSetup | null;
-  scopeCanManage: boolean;
-  providerCanManage: boolean;
+  productionEngineAvailable: boolean;
+  scopeComplete: boolean;
   preflightOk: boolean | null;
 }
 
@@ -21,49 +12,23 @@ export interface OverviewState {
   actions: OverviewAction[];
 }
 
-const RUNTIME_SETUP_HEALTHY_PHASES = new Set(["not-applicable", "ready"]);
-
 /**
  * One compact, pure readiness summary for the settings Overview row.
- *
- * Every message here is a fixed, curated string (or the runtime-setup
- * coordinator's own already-curated progress message) rather than a
- * forwarded guidance/error string from scope or provider config resolution
- * -- those can legitimately embed a resolved vault-relative or absolute
- * path (e.g. "scriptPath does not exist: /Users/.../mindmap.py", or an
- * fs ENOENT message), which Overview must never render.
+ * Every message here is a fixed, curated string -- never a forwarded
+ * guidance/error string from scope or provider config resolution.
  */
 export function buildOverviewState(input: OverviewInput): OverviewState {
-  const setup = input.runtimeSetup;
-  if (setup && !RUNTIME_SETUP_HEALTHY_PHASES.has(setup.phase)) {
-    const actions: OverviewAction[] = ["openMindmap"];
-    if (setup.canSetup) actions.push("setupRuntime");
-    if (setup.canCancel) actions.push("cancelSetup");
-    // "unavailable" (no compatible Python found) leaves canSetup/canCancel
-    // both false -- without this, the user would be stranded with no
-    // recovery action at all beyond Open Mindmap.
-    if (setup.phase === "unavailable") actions.push("openPythonDownload");
-    return { ready: false, message: setup.message, actions };
-  }
-
-  if (!input.runtimeValid) {
+  if (!input.productionEngineAvailable) {
     return {
       ready: false,
-      message: "Mindmap runtime needs attention. Open Troubleshooting for details.",
+      message: "The Mindmap TypeScript engine is not available. Open Troubleshooting for details.",
       actions: ["openMindmap", "runChecks"],
     };
   }
-  if (!input.scopeCanManage) {
+  if (!input.scopeComplete) {
     return {
       ready: false,
       message: "Scope setup needs attention. Open the Scope section to fix it.",
-      actions: ["openMindmap"],
-    };
-  }
-  if (!input.providerCanManage) {
-    return {
-      ready: false,
-      message: "Local AI provider setup needs attention. Open the Local AI section to fix it.",
       actions: ["openMindmap"],
     };
   }

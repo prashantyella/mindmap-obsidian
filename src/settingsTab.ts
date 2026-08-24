@@ -5,32 +5,9 @@ import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
 import { buildScheduleVisibility, isSchedulerRecoveryActionable } from "./scheduleVisibility";
 import { normalizeHour, normalizeMinute } from "./launchAgent";
 import type MindmapPlugin from "./main";
-import { DEFAULT_METADATA_MODEL, type LlmProviderConfig } from "./pluginConfig";
+import type { LlmProviderConfigStatus } from "./pluginConfig";
 import { ScopeManager } from "./scopeManager";
-import { DEFAULT_SETTINGS, type RuntimeField } from "./settings";
-
-const FIELD_META: Record<RuntimeField, { name: string; description: string }> = {
-  pythonCommand: {
-    name: "Python command",
-    description: "Use a PATH command (for example python3) or a vault-relative executable path.",
-  },
-  scriptPath: {
-    name: "Script path",
-    description: "Leave blank to use the bundled script, or enter a vault-relative path.",
-  },
-  configPath: {
-    name: "Config path",
-    description: "Leave blank to use the bundled config, or enter a vault-relative path.",
-  },
-};
-
-function thisPluginId(): string {
-  return "mindmap-ai";
-}
-
-function getPluginRuntimeRelativePath(configDir: string): string {
-  return `${configDir}/plugins/${thisPluginId()}/python`;
-}
+import { DEFAULT_SETTINGS } from "./settings";
 
 // Intentionally not implementing getSettingDefinitions() (the declarative
 // settings-search API): adopting it would raise minAppVersion from 1.7.2 to
@@ -38,16 +15,11 @@ function getPluginRuntimeRelativePath(configDir: string): string {
 // This is the one accepted obsidianmd/settings-tab/prefer-setting-definitions
 // warning in the official lint gate.
 export class MindmapSettingTab extends PluginSettingTab {
-  private unsubscribeRuntimeSetup: (() => void) | null = null;
-
   constructor(app: MindmapPlugin["app"], private readonly plugin: MindmapPlugin) {
     super(app, plugin);
   }
 
   display(): void {
-    this.unsubscribeRuntimeSetup?.();
-    this.unsubscribeRuntimeSetup = this.plugin.subscribeRuntimeSetupState(() => this.display());
-
     const { containerEl } = this;
     containerEl.empty();
 
@@ -57,12 +29,6 @@ export class MindmapSettingTab extends PluginSettingTab {
     this.renderSchedule();
     this.renderLocalAi();
     this.renderTroubleshooting();
-  }
-
-  hide(): void {
-    this.unsubscribeRuntimeSetup?.();
-    this.unsubscribeRuntimeSetup = null;
-    super.hide();
   }
 
   private renderSection(title: string, description: string, containerEl: HTMLElement = this.containerEl): void {
@@ -96,30 +62,6 @@ export class MindmapSettingTab extends PluginSettingTab {
         .setButtonText("Run checks")
         .onClick(() => {
           void this.plugin.runPreflight("manual").then(() => this.display());
-        }));
-    }
-    if (state.actions.includes("setupRuntime")) {
-      setting.addButton((button) => button
-        .setCta()
-        .setButtonText("Set up runtime")
-        .onClick(async () => {
-          await this.plugin.startRuntimeSetup();
-          this.display();
-        }));
-    }
-    if (state.actions.includes("cancelSetup")) {
-      setting.addButton((button) => button
-        .setButtonText("Cancel setup")
-        .onClick(() => {
-          this.plugin.cancelRuntimeSetup();
-          this.display();
-        }));
-    }
-    if (state.actions.includes("openPythonDownload")) {
-      setting.addButton((button) => button
-        .setButtonText("Open python download page")
-        .onClick(() => {
-          this.plugin.openPythonRuntimeDownloadPage();
         }));
     }
   }
@@ -190,13 +132,6 @@ export class MindmapSettingTab extends PluginSettingTab {
 
   private renderScope(): void {
     this.renderSection("Scope", "Choose folders for current-note runs and full-vault runs.");
-    const status = this.plugin.getScopeSetupStatus();
-
-    if (!status.canManage) {
-      new Setting(this.containerEl).setName("Scope").setDesc(status.guidance);
-      return;
-    }
-
     const scopeManager = this.containerEl.createDiv();
     new ScopeManager(this.plugin, scopeManager).render();
   }
@@ -324,7 +259,8 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   // ---------------------------------------------------------------------
-  // Local AI: text fields commit on blur/Enter, not per keystroke.
+  // Local AI: Ollama-only (embedding + metadata). Text fields commit on
+  // blur/Enter, not per keystroke.
   // ---------------------------------------------------------------------
 
   private bindProviderText(text: TextComponent, commit: (value: string) => boolean): void {
@@ -332,62 +268,48 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderLocalAi(): void {
-    this.renderSection("Local AI", "Local model service for summaries, tags, concepts, and links.");
-
-    const status = this.plugin.getLlmProviderConfigStatus();
-    if (!status.canManage) {
-      new Setting(this.containerEl).setName("Local AI").setDesc(status.guidance);
-      return;
-    }
+    this.renderSection("Local AI", "Ollama-hosted models for embeddings, and for summaries, tags, concepts, and links.");
 
     new Setting(this.containerEl)
-      .setName("Provider")
-      .addDropdown((dropdown) => {
-        dropdown
-          .addOption("ollama", "Ollama")
-          .addOption("openai_compatible", "OpenAI compatible")
-          .setValue(status.provider)
-          .onChange((value) => {
-            this.saveProviderConfig({ provider: value === "openai_compatible" ? "openai_compatible" : "ollama" });
-            this.display();
-          });
-      })
-      .addButton((button) => {
-        button.setButtonText("Use omlx").onClick(() => {
-          this.saveProviderConfig({
-            provider: "openai_compatible",
-            baseUrl: "http://localhost:8000/v1",
-            model: DEFAULT_METADATA_MODEL,
-            maxTokens: 1024,
-            enableThinking: false,
-          });
-          this.display();
+      .setName("Embedding base URL")
+      .setDesc("Ollama server URL used for the vector index.")
+      .addText((text) => {
+        text.setPlaceholder("http://localhost:11434").setValue(this.plugin.settings.embedBaseUrl);
+        this.bindProviderText(text, (value) => {
+          this.plugin.settings.embedBaseUrl = value.trim();
+          void this.plugin.saveSettings();
+          return true;
         });
       });
 
     new Setting(this.containerEl)
-      .setName("Base URL")
-      .setDesc(status.provider === "openai_compatible" ? "Include the /v1 suffix." : "Ollama server URL.")
+      .setName("Embedding model")
+      .setDesc("Ollama embedding model, e.g. mxbai-embed-large.")
       .addText((text) => {
-        text.setPlaceholder(status.provider === "openai_compatible" ? "http://localhost:8000/v1" : "http://localhost:11434").setValue(status.baseUrl);
+        text.setPlaceholder("mxbai-embed-large").setValue(this.plugin.settings.embedModel);
+        this.bindProviderText(text, (value) => {
+          this.plugin.settings.embedModel = value.trim();
+          void this.plugin.saveSettings();
+          return true;
+        });
+      });
+
+    const status = this.plugin.getLlmProviderConfigStatus();
+
+    new Setting(this.containerEl)
+      .setName("Metadata base URL")
+      .setDesc("Ollama server URL used for metadata extraction.")
+      .addText((text) => {
+        text.setPlaceholder("http://localhost:11434").setValue(status.baseUrl);
         this.bindProviderText(text, (value) => this.saveProviderConfig({ baseUrl: value }));
       });
 
     new Setting(this.containerEl)
-      .setName("Model")
-      .setDesc("Model used for metadata extraction.")
+      .setName("Metadata model")
+      .setDesc("Model used for metadata extraction, e.g. llama3.1:8b.")
       .addText((text) => {
-        text.setPlaceholder(status.provider === "openai_compatible" ? DEFAULT_METADATA_MODEL : "llama3.1:8b").setValue(status.model);
+        text.setPlaceholder("llama3.1:8b").setValue(status.model);
         this.bindProviderText(text, (value) => this.saveProviderConfig({ model: value }));
-      });
-
-    new Setting(this.containerEl)
-      .setName("Local API key")
-      .setDesc("Stored in the local plugin runtime config.")
-      .addText((text) => {
-        text.inputEl.type = "password";
-        text.setPlaceholder("Optional").setValue(status.apiKey);
-        this.bindProviderText(text, (value) => this.saveProviderConfig({ apiKey: value }));
       });
 
     new Setting(this.containerEl)
@@ -400,16 +322,6 @@ export class MindmapSettingTab extends PluginSettingTab {
           return this.saveProviderConfig({ maxTokens: Number.isFinite(parsed) ? parsed : 1024 });
         });
       });
-
-    new Setting(this.containerEl)
-      .setName("Model thinking")
-      .setDesc("Disable for qwen/omlx JSON extraction.")
-      .addToggle((toggle) => {
-        toggle.setValue(status.enableThinking).onChange((value) => {
-          this.saveProviderConfig({ enableThinking: value });
-          this.display();
-        });
-      });
   }
 
   /**
@@ -418,23 +330,9 @@ export class MindmapSettingTab extends PluginSettingTab {
    * on failure -- otherwise a failed save would look "committed" and the
    * user could never retry it by re-blurring the same text.
    */
-  private saveProviderConfig(patch: Partial<LlmProviderConfig>): boolean {
-    const status = this.plugin.getLlmProviderConfigStatus();
-    if (!status.canManage) {
-      new Notice(status.guidance, 8000);
-      return false;
-    }
-
+  private saveProviderConfig(patch: Partial<Pick<LlmProviderConfigStatus, "baseUrl" | "model" | "maxTokens">>): boolean {
     try {
-      this.plugin.saveLlmProviderConfig({
-        provider: status.provider,
-        baseUrl: status.baseUrl,
-        model: status.model,
-        apiKey: status.apiKey,
-        maxTokens: status.maxTokens,
-        enableThinking: status.enableThinking,
-        ...patch,
-      });
+      void this.plugin.saveLlmProviderConfig(patch);
       return true;
     } catch (error) {
       new Notice(error instanceof Error ? error.message : "Mindmap provider config could not be saved.", 8000);
@@ -460,55 +358,28 @@ export class MindmapSettingTab extends PluginSettingTab {
       void this.plugin.copyDiagnostics();
     }));
 
-    this.renderRuntimeSetupDetail(details);
-    this.renderSection("Advanced runtime overrides", "Leave these blank unless you need a custom local setup.", details);
-    this.renderPathSetting("pythonCommand", details);
-    this.renderPathSetting("scriptPath", details);
-    this.renderPathSetting("configPath", details);
-  }
-
-  /** Runtime setup progress/cancel surfaces primarily in Overview; this keeps the raw phase/message visible for troubleshooting without duplicating the primary actions. */
-  private renderRuntimeSetupDetail(containerEl: HTMLElement): void {
-    const state = this.plugin.getRuntimeSetupState();
-    if (!state || state.phase === "not-applicable") {
-      return;
-    }
-    new Setting(containerEl)
-      .setName("Runtime setup phase")
-      .setDesc(`${state.phase}: ${state.message}`)
-      .setClass(state.phase === "ready" ? "mindmap-validation-ok" : state.phase === "failed" || state.phase === "unavailable" ? "mindmap-validation-error" : "");
-  }
-
-  private renderPathSetting(field: RuntimeField, containerEl: HTMLElement): void {
-    const metadata = FIELD_META[field];
-    const runtimePath = getPluginRuntimeRelativePath(this.app.vault.configDir);
-    const placeholder = field === "pythonCommand"
-      ? DEFAULT_SETTINGS.pythonCommand
-      : field === "scriptPath"
-        ? `${runtimePath}/mindmap.py`
-        : `${runtimePath}/config.json`;
-
-    new Setting(containerEl)
-      .setName(metadata.name)
-      .setDesc(metadata.description)
+    this.renderSection("Advanced", "Apple Books database overrides -- leave blank to auto-discover.", details);
+    new Setting(details)
+      .setName("Apple Books annotation database path")
+      .setDesc("Leave blank to auto-discover.")
       .addText((text) => {
-        text.setPlaceholder(placeholder).setValue(this.plugin.settings[field]);
+        text.setPlaceholder("auto-discover").setValue(this.plugin.settings.appleAnnotationDbPath);
         bindCommitOnBlurOrEnter(text.inputEl, text.getValue(), async (value) => {
-          this.plugin.settings[field] = value.trim();
+          this.plugin.settings.appleAnnotationDbPath = value.trim();
           await this.plugin.saveSettings();
-          text.setValue(this.plugin.settings[field]);
+          return true;
         });
-      })
-      .addExtraButton((button) => {
-        button
-          .setIcon("reset")
-          .setTooltip("Reset to default")
-          .onClick(async () => {
-            this.plugin.settings[field] = DEFAULT_SETTINGS[field];
-            await this.plugin.saveSettings();
-            new Notice(`${metadata.name} reset to default.`);
-            this.display();
-          });
+      });
+    new Setting(details)
+      .setName("Apple Books library database path")
+      .setDesc("Leave blank to auto-discover.")
+      .addText((text) => {
+        text.setPlaceholder("auto-discover").setValue(this.plugin.settings.appleLibraryDbPath);
+        bindCommitOnBlurOrEnter(text.inputEl, text.getValue(), async (value) => {
+          this.plugin.settings.appleLibraryDbPath = value.trim();
+          await this.plugin.saveSettings();
+          return true;
+        });
       });
   }
 }

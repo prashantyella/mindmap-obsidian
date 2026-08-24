@@ -8,22 +8,18 @@ export interface RunConfirmation {
 }
 
 export interface RunProfile {
-  args: string[];
   label: string;
   confirmation?: RunConfirmation;
 }
 
 const RUN_PROFILES: Record<Exclude<RunScope, "note">, RunProfile> = {
   current: {
-    args: ["--current", "--apply"],
     label: "current scope",
   },
   all: {
-    args: ["--all", "--apply"],
     label: "all scopes",
   },
   metadataAll: {
-    args: ["--all", "--tag", "--refresh-all", "--apply"],
     label: "all scopes metadata refresh",
     confirmation: {
       title: "Run metadata refresh?",
@@ -33,7 +29,6 @@ const RUN_PROFILES: Record<Exclude<RunScope, "note">, RunProfile> = {
     },
   },
   refreshAll: {
-    args: ["--all", "--refresh-all", "--apply"],
     label: "all scopes full refresh",
     confirmation: {
       title: "Run full refresh?",
@@ -43,25 +38,15 @@ const RUN_PROFILES: Record<Exclude<RunScope, "note">, RunProfile> = {
     },
   },
   rebuildAll: {
-    args: ["--all", "--refresh-all", "--rebuild", "--apply"],
     label: "all scopes full rebuild",
     confirmation: {
       title: "Run full rebuild?",
-      message: "This deletes and recreates the local vector collections, then refreshes every all-scope note.",
+      message: "This rebuilds the local vector index from the committed generation, then refreshes every all-scope note.",
       confirmText: "Run full rebuild",
       confirmClass: "mod-warning",
     },
   },
 };
-
-/**
- * Daily scheduled maintenance only: extends the all-scope run's note universe
- * with pending Books/Apple Books annotations. Weekly, manual, current, and
- * individual-note runs must never include this flag.
- */
-export function getDailyMaintenanceArgs(): string[] {
-  return [...RUN_PROFILES.all.args, "--include-reading-pending"];
-}
 
 export function getRunProfile(scope: RunScope, notePath?: string): RunProfile {
   if (scope === "note") {
@@ -69,7 +54,6 @@ export function getRunProfile(scope: RunScope, notePath?: string): RunProfile {
       throw new Error("An individual note path is required.");
     }
     return {
-      args: [`--note=${notePath}`, "--apply"],
       label: `individual note ${notePath}`,
     };
   }

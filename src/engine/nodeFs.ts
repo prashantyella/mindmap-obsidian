@@ -177,6 +177,17 @@ export class NodeOwnedFs implements IndexFs {
         current = parent;
         continue;
       }
+      const rootFromAncestor = path.relative(current, this.root);
+      if (rootFromAncestor === "" || (!rootFromAncestor.startsWith(`..${path.sep}`) && rootFromAncestor !== ".." && !path.isAbsolute(rootFromAncestor))) {
+        const prospectiveRoot = path.join(real, rootFromAncestor);
+        const full = suffix.length > 0 ? path.join(real, ...suffix) : real;
+        const withSep = prospectiveRoot.endsWith(path.sep) ? prospectiveRoot : `${prospectiveRoot}${path.sep}`;
+        if (full !== prospectiveRoot && !full.startsWith(withSep)) {
+          throw new NodeFsContainmentError(`${context} resolves (via symlink) outside the owned root.`);
+        }
+        this.pinnedRootRealPath ??= prospectiveRoot;
+        return;
+      }
       await this.assertRealWithinRoot(real, suffix, context);
       return;
     }

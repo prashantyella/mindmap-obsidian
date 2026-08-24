@@ -128,17 +128,3 @@ void test("workspace view exposes lookup, pin, and score affordances", () => {
   assert.equal(mainSource.includes("pinnedConnections"), true);
   assert.equal(commandSource.includes("mindmap-open-lookup"), true);
 });
-
-void test("semantic worker launches the worker script without the runtime app script", () => {
-  const sourceRoot = process.cwd();
-  const clientSource = fs.readFileSync(path.join(sourceRoot, "src", "semanticWorkerClient.ts"), "utf8");
-  const spawnStart = clientSource.indexOf("  private spawnWorker(): void {");
-  const spawnEnd = clientSource.indexOf("  private request<TResult>", spawnStart);
-
-  assert.notEqual(spawnStart, -1);
-  assert.notEqual(spawnEnd, -1);
-
-  const spawnSource = clientSource.slice(spawnStart, spawnEnd);
-  assert.equal(spawnSource.includes("[workerPath]"), true);
-  assert.equal(spawnSource.includes("...this.options.runtime.command.args"), false);
-});

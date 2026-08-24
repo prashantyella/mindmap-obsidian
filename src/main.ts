@@ -2,18 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
 
 import { FileSystemAdapter, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 
-import { buildSpawnFailureResult, formatPreflightNotice, parsePreflightOutput, type PreflightResult } from "./diagnostics";
-import { listVaultFolderOptions, readScopeSelection, type ScopeSelection, type VaultFolderOption } from "./onboarding";
+import { formatPreflightNotice, type PreflightResult } from "./diagnostics";
+import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } from "./onboarding";
 import { createProductionPendingScanService, ProductionPendingScanService } from "./engine/productionPendingScan";
-import { formatCommandPreview, getPluginRuntimeDir, resolveRuntime, type ResolvedRuntime, type RuntimeContext } from "./pathResolver";
-import { createNodeDiscoveryFs, createNodeProcessInvoker, getDefaultAppSupportRoot } from "./runtimeDiscovery";
-import { createNodeSetupFs, createNodeSetupSpawner } from "./runtimeSetup";
-import { PYTHON_MACOS_DOWNLOAD_URL, RUNTIME_SETUP_CONFIRMATION_COPY, RuntimeReadinessCoordinator, shouldTriggerRuntimeReadyKickoff, type CoordinatorState } from "./runtimeSetupCoordinator";
-import { buildRuntimePreflightVerifier } from "./runtimeVerifier";
 import type { PendingSnapshot } from "./pendingScan";
 import { discoverAppleBooksDatabasePaths } from "./appleBooksDiscovery";
 import { classifyResearchTarget, completeAppleAnnotationResearchForNote, importAppleBooksAnnotations, updateAppleAnnotationResearchStatus, writeAppleAnnotationCompanion } from "./appleBooksImport";
@@ -23,10 +17,8 @@ import { ExaResearchProvider } from "./exaResearchProvider";
 import { requestUrlFetch } from "./obsidianRequestUrlFetch";
 import { getExaCredential, hasExaCredential } from "./keychainCredential";
 import { createConfiguredLocalResearchModel } from "./localResearchModel";
-import { resolveLocalModelApiKey } from "./localModelApiKey";
 import { isSafeManualResearchPath } from "./manualResearchGuard";
 import { collectResearch, researchNote } from "./webResearch";
-import { startAppleBooksReaderProcess } from "./appleBooksReaderProcess";
 import { prepareActiveNoteResearchInput } from "./researchInput";
 import { renderCompanionResearchContent } from "./researchWriter";
 import { MAX_RESEARCH_INPUT_CHARS, WebResearchError } from "./webResearchTypes";
@@ -34,28 +26,21 @@ import { createReadingStateStore, type ReadingStateStore } from "./readingState"
 import { createObsidianVaultApi } from "./readingVault";
 import { ReadingModeController, type ReadingHealth, type ReadingMode, type ReadingPreview } from "./readingMode";
 import { registerMindmapCommands } from "./pluginCommands";
-import { createDevShadowIntegration, type DevShadowIntegration } from "virtual:mindmap-dev-shadow";
 import {
-  coerceConfigString,
   getLlmProviderConfigStatus as resolveLlmProviderConfigStatus,
   getScopeSetupStatus as resolveScopeSetupStatus,
   saveLlmProviderConfig as writeLlmProviderConfig,
   saveScopeSetup as writeScopeSetup,
-  type LlmProviderConfig,
   type LlmProviderConfigStatus,
   type ScopeSetupStatus,
 } from "./pluginConfig";
 import type { DiagnosticsSummaryState, SchedulerSummaryState } from "./pluginSummaries";
 import { buildOverviewState, type OverviewState } from "./settingsOverview";
 import { buildDiagnosticsOneLine, buildDiagnosticsReport } from "./diagnosticsReport";
-import { assertAllowedPluginArgs } from "./runArguments";
-import { getRunProfile, type RunProfile, type RunScope } from "./runProfiles";
+import { getRunProfile, type RunScope } from "./runProfiles";
 import { NO_ACTIVE_NOTE, type ActiveNoteEligibility } from "./individualNote";
 import { resolveActiveNoteEligibility } from "./individualNoteActions";
 import { confirmMindmapRun } from "./runConfirmModal";
-import { migrateLegacyPluginVaultRoot } from "./runtimeConfigMigration";
-import { ensureBundledRuntimeAssets, type BundledRuntimeAssets } from "./runtimeAssets";
-import { MindmapSemanticEnvironment, type SemanticEnvironmentStatus } from "./semanticEnvironment";
 import type { LiveRelatedResponse, LiveRelatedResult, LookupRelatedResponse } from "./semanticTypes";
 import { buildMindmapLocalGraphState, isMindmapLocalGraphLeaf } from "./localGraph";
 import {
@@ -76,15 +61,6 @@ import {
 import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./settings";
 import { MindmapSettingTab } from "./settingsTab";
 import { MindmapWorkspaceView, MINDMAP_VIEW_TYPE } from "./workspaceView";
-import { BUNDLED_RUNTIME_ASSETS as UNTYPED_BUNDLED_RUNTIME_ASSETS } from "virtual:runtime-assets";
-
-// The "virtual:runtime-assets" specifier only resolves at bundle time (see
-// esbuild.config.mjs); its ambient declaration in runtime-assets.d.ts types
-// it correctly for plain tsc, but typescript-eslint's typed-linting program
-// cannot resolve a no-substitution ambient module the same way and reports
-// its export as an error type. Re-asserting through the declared type here
-// (not a rule suppression) restores the real, already-verified shape.
-const BUNDLED_RUNTIME_ASSETS = UNTYPED_BUNDLED_RUNTIME_ASSETS as unknown as BundledRuntimeAssets;
 import {
   configureStatusBarElement,
   renderStatusBarElement,
@@ -110,41 +86,27 @@ import type { MigrationStatusV1 } from "./migration/migrationContract";
 import type { PreflightReportV1 } from "./engine/preflight";
 import { AppleBooksSqliteReader, createNodeAppleBooksFsAdapter } from "./reading/appleBooksSqlite";
 import { createNodeSqliteProcess } from "./reading/sqliteProcess";
-import type { ConceptCaseMode } from "./engine/metadataPipeline";
 
 const LOG_LIMIT = 50;
 
+/** Checkpoint 11: the vault/plugin path triple every path-resolution helper needs -- previously `pathResolver.ts`'s own type, now defined here directly since that module (Python interpreter/script/config resolution) no longer exists. */
+interface RuntimeContext {
+  vaultRoot: string;
+  configDir: string;
+  pluginDir: string;
+}
+
 /** Checkpoint 10B: the current TypeScript engine pipeline (chunking/embedding/metadata) version this vault's engine is composed under -- bumped only if this cutover's own pipeline shape changes, never tied to the retired Python pipeline's own versioning. */
 const PRODUCTION_PIPELINE_VERSION = 1;
-/** Same bound `devShadowIntegration.ts` uses for `config.json` -- well above any real config file's size but far below anything that would make an unbounded read a concern. */
-const PRODUCTION_CONFIG_MAX_BYTES = 1 * 1024 * 1024;
-const PRODUCTION_DEFAULT_MINIMUM_WORDS = 30;
-const PRODUCTION_DEFAULT_LLM_MAX_TOKENS = 1024;
-const PRODUCTION_DEFAULT_TAG_LIMIT = 6;
-const PRODUCTION_DEFAULT_CONCEPT_LIMIT = 4;
-const PRODUCTION_DEFAULT_CONCEPT_MAX_WORDS = 4;
-const PRODUCTION_DEFAULT_TAG_MIN_LEN = 2;
-const PRODUCTION_DEFAULT_TAG_MAX_WORDS = 3;
-const PRODUCTION_DEFAULT_CHUNK_TARGET_TOKENS = 300;
-const PRODUCTION_DEFAULT_CHUNK_OVERLAP_TOKENS = 40;
-/** Mirrors `python/mindmap.py`'s own `related_*` config defaults (see `build_runtime_context`) -- see `ProductionEngineOptions.relatedSelectionConfig`. */
-const PRODUCTION_DEFAULT_RELATED_LIMIT = 8;
-const PRODUCTION_DEFAULT_RELATED_OVERREACH = 2;
-const PRODUCTION_DEFAULT_RELATED_CREATIVE = 2;
-const PRODUCTION_DEFAULT_RELATED_CREATIVE_MIN = 0.45;
-const PRODUCTION_DEFAULT_RELATED_CREATIVE_MAX = 0.7;
-const PRODUCTION_DEFAULT_RELATED_CANDIDATE_LIMIT = 40;
-const PRODUCTION_DEFAULT_RELATED_MIN_SCORE = 0;
 
 /**
  * Best-effort, explicitly-documented fallback for a handful of common
  * Ollama embedding models -- `MigrationRunner` requires an explicit,
  * bounded positive integer `dimension` before it will ever start a run
- * (see its own `beginFreshRun` guard), and this vault's `config.json` has
- * no such field today. A vault running an unlisted custom embedding model
- * can still override it explicitly via an `embed_dimension` integer field
- * in `config.json` (`toProductionRuntimeConfig` reads it); absent both,
- * `embeddingDimension` stays `undefined` and migration surfaces a closed
+ * (see its own `beginFreshRun` guard). A vault running an unlisted custom
+ * embedding model can still override it explicitly via the
+ * `embedDimension` plugin setting; absent both, `embeddingDimension`
+ * stays `undefined` and migration surfaces a closed
  * `MIGRATION_NOT_STARTABLE` guidance message rather than guessing.
  */
 const KNOWN_OLLAMA_EMBEDDING_DIMENSIONS: Readonly<Record<string, number>> = {
@@ -161,112 +123,6 @@ function resolveKnownEmbeddingDimension(model: string, explicitOverride: number 
   return KNOWN_OLLAMA_EMBEDDING_DIMENSIONS[model];
 }
 
-interface ProductionRuntimeConfig {
-  minimumWords: number;
-  embedProvider?: string;
-  embedBaseUrl?: string;
-  embedModel?: string;
-  embedDimension?: number;
-  /** Ollama-only contract (item 7): the local-metadata provider production ever wires is `"ollama"`, never `"openai_compatible"`. */
-  llmProvider?: string;
-  llmBaseUrl?: string;
-  llmModel?: string;
-  llmMaxTokens: number;
-  tagLimit: number;
-  conceptLimit: number;
-  conceptMaxWords: number;
-  conceptCaseMode: ConceptCaseMode;
-  allowFreeTags: boolean;
-  tagMinLen: number;
-  tagMaxWords: number;
-  chunkTargetTokens: number;
-  chunkOverlapTokens: number;
-  relatedLimit: number;
-  relatedOverreach: number;
-  relatedCreative: number;
-  relatedCreativeMin: number;
-  relatedCreativeMax: number;
-  relatedCandidateLimit: number;
-  relatedMinScore: number;
-  appleAnnotationDbPath?: string;
-  appleLibraryDbPath?: string;
-}
-
-function toPositiveInt(value: unknown, fallback: number): number {
-  const parsed = Number.parseInt(coerceConfigString(value, String(fallback)), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function toNonNegativeInt(value: unknown, fallback: number): number {
-  const parsed = Number.parseInt(coerceConfigString(value, String(fallback)), 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
-}
-
-function toFiniteNumber(value: unknown, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-/** Derives the narrow production runtime config this composition needs from a freshly-read raw `config.json` object -- mirrors `devShadowIntegration.ts`'s identical `toDevRuntimeConfig`, extended with the metadata-pipeline/chunk fields production actually wires (dev shadow never writes notes, so it never needed them). */
-function toProductionRuntimeConfig(raw: Record<string, unknown> | null): ProductionRuntimeConfig {
-  if (!raw) {
-    return {
-      minimumWords: PRODUCTION_DEFAULT_MINIMUM_WORDS,
-      llmMaxTokens: PRODUCTION_DEFAULT_LLM_MAX_TOKENS,
-      tagLimit: PRODUCTION_DEFAULT_TAG_LIMIT,
-      conceptLimit: PRODUCTION_DEFAULT_CONCEPT_LIMIT,
-      conceptMaxWords: PRODUCTION_DEFAULT_CONCEPT_MAX_WORDS,
-      conceptCaseMode: "lower",
-      allowFreeTags: true,
-      tagMinLen: PRODUCTION_DEFAULT_TAG_MIN_LEN,
-      tagMaxWords: PRODUCTION_DEFAULT_TAG_MAX_WORDS,
-      chunkTargetTokens: PRODUCTION_DEFAULT_CHUNK_TARGET_TOKENS,
-      chunkOverlapTokens: PRODUCTION_DEFAULT_CHUNK_OVERLAP_TOKENS,
-      relatedLimit: PRODUCTION_DEFAULT_RELATED_LIMIT,
-      relatedOverreach: PRODUCTION_DEFAULT_RELATED_OVERREACH,
-      relatedCreative: PRODUCTION_DEFAULT_RELATED_CREATIVE,
-      relatedCreativeMin: PRODUCTION_DEFAULT_RELATED_CREATIVE_MIN,
-      relatedCreativeMax: PRODUCTION_DEFAULT_RELATED_CREATIVE_MAX,
-      relatedCandidateLimit: PRODUCTION_DEFAULT_RELATED_CANDIDATE_LIMIT,
-      relatedMinScore: PRODUCTION_DEFAULT_RELATED_MIN_SCORE,
-    };
-  }
-  const minimumWordsCandidate = Number(raw.min_note_words ?? PRODUCTION_DEFAULT_MINIMUM_WORDS);
-  const conceptCase = raw.concept_case === "title" || raw.concept_case === "none" ? raw.concept_case : "lower";
-  const appleBooks = typeof raw.apple_books === "object" && raw.apple_books !== null && !Array.isArray(raw.apple_books) ? (raw.apple_books as Record<string, unknown>) : {};
-  const annotationDbPath = coerceConfigString(appleBooks.annotation_database_path, "").trim();
-  const libraryDbPath = coerceConfigString(appleBooks.library_database_path, "").trim();
-  const embedDimension = Number.isInteger(raw.embed_dimension) && (raw.embed_dimension as number) > 0 ? (raw.embed_dimension as number) : undefined;
-  return {
-    minimumWords: Number.isFinite(minimumWordsCandidate) && minimumWordsCandidate >= 0 ? minimumWordsCandidate : PRODUCTION_DEFAULT_MINIMUM_WORDS,
-    embedProvider: typeof raw.embed_provider === "string" ? raw.embed_provider : undefined,
-    embedBaseUrl: typeof raw.embed_base_url === "string" ? raw.embed_base_url : undefined,
-    embedModel: typeof raw.embed_model === "string" ? raw.embed_model : undefined,
-    embedDimension,
-    llmProvider: typeof raw.llm_provider === "string" ? raw.llm_provider : undefined,
-    llmBaseUrl: typeof raw.llm_base_url === "string" ? raw.llm_base_url : undefined,
-    llmModel: typeof raw.llm_model === "string" ? raw.llm_model : undefined,
-    llmMaxTokens: toPositiveInt(raw.llm_max_tokens, PRODUCTION_DEFAULT_LLM_MAX_TOKENS),
-    tagLimit: toPositiveInt(raw.tag_limit, PRODUCTION_DEFAULT_TAG_LIMIT),
-    conceptLimit: toPositiveInt(raw.concept_limit, PRODUCTION_DEFAULT_CONCEPT_LIMIT),
-    conceptMaxWords: toPositiveInt(raw.concept_max_words, PRODUCTION_DEFAULT_CONCEPT_MAX_WORDS),
-    conceptCaseMode: conceptCase,
-    allowFreeTags: raw.allow_free_tags !== false,
-    tagMinLen: toPositiveInt(raw.min_tag_length, PRODUCTION_DEFAULT_TAG_MIN_LEN),
-    tagMaxWords: toPositiveInt(raw.tag_max_words, PRODUCTION_DEFAULT_TAG_MAX_WORDS),
-    chunkTargetTokens: toPositiveInt(raw.chunk_target_tokens, PRODUCTION_DEFAULT_CHUNK_TARGET_TOKENS),
-    chunkOverlapTokens: toPositiveInt(raw.chunk_overlap_tokens, PRODUCTION_DEFAULT_CHUNK_OVERLAP_TOKENS),
-    relatedLimit: toPositiveInt(raw.related_limit, PRODUCTION_DEFAULT_RELATED_LIMIT),
-    relatedOverreach: toNonNegativeInt(raw.related_overreach, PRODUCTION_DEFAULT_RELATED_OVERREACH),
-    relatedCreative: toNonNegativeInt(raw.related_creative, PRODUCTION_DEFAULT_RELATED_CREATIVE),
-    relatedCreativeMin: toFiniteNumber(raw.related_creative_min, PRODUCTION_DEFAULT_RELATED_CREATIVE_MIN),
-    relatedCreativeMax: toFiniteNumber(raw.related_creative_max, PRODUCTION_DEFAULT_RELATED_CREATIVE_MAX),
-    relatedCandidateLimit: toPositiveInt(raw.related_candidate_limit, PRODUCTION_DEFAULT_RELATED_CANDIDATE_LIMIT),
-    relatedMinScore: toFiniteNumber(raw.related_min_score, PRODUCTION_DEFAULT_RELATED_MIN_SCORE),
-    appleAnnotationDbPath: annotationDbPath.length > 0 ? annotationDbPath : undefined,
-    appleLibraryDbPath: libraryDbPath.length > 0 ? libraryDbPath : undefined,
-  };
-}
 
 /** Checkpoint 10B LAUNCHAGENT: maps `BackgroundScheduler`'s own closed `BackgroundReconcileStatus` onto the existing coarse `LaunchAgentHealth` UI union -- a purely mechanical rename, never a behavior change to the status-bar surface itself. */
 function mapBackgroundReconcileStatusToHealth(status: import("./scheduling/backgroundScheduler").BackgroundReconcileStatus): LaunchAgentHealth {
@@ -287,13 +143,6 @@ function mapBackgroundReconcileStatusToHealth(status: import("./scheduling/backg
     default:
       return "waiting";
   }
-}
-
-function splitLogLines(text: string): string[] {
-  return text
-    .split(/\r?\n/)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
 }
 
 type RunTrigger = "manual" | "scheduled" | "reading";
@@ -318,7 +167,8 @@ interface DiagnosticsState extends DiagnosticsSummaryState {
 export default class MindmapPlugin extends Plugin {
   settings: MindmapSettings = DEFAULT_SETTINGS;
 
-  private currentProcess: ChildProcess | null = null;
+  /** Checkpoint 11: never populated anymore -- `runMindmap` submits jobs to the TypeScript `ProductionEngine`, never spawns a subprocess. Kept as an always-null busy flag so the "Mindmap is already running" guards elsewhere stay structurally intact for a future async-run-in-flight signal. */
+  private currentProcess: { kill(): void } | null = null;
   private schedulerTimer: unknown = null;
   private launchAgentManagedThisSession = false;
   private launchAgentSyncId = 0;
@@ -349,8 +199,6 @@ export default class MindmapPlugin extends Plugin {
   private webResearchActivity: "off" | "ready" | "deriving" | "searching" | "writing" | "error" = "off";
   private webResearchLastError: string | null = null;
   private webResearchPromise: Promise<ResearchFileResult> | null = null;
-  private activeReaderChild: ChildProcess | null = null;
-  private semanticEnvironment: MindmapSemanticEnvironment | null = null;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
   private focusLookupOnNextRender = false;
@@ -359,54 +207,33 @@ export default class MindmapPlugin extends Plugin {
     lastRunAt: null,
     result: null,
   };
-  private runtimeCoordinator: RuntimeReadinessCoordinator | null = null;
-  private runtimeReadyKicked = false;
-  /**
-   * The Checkpoint 9 TypeScript engine/shadow coordinator, resolved through
-   * `virtual:mindmap-dev-shadow` (a real implementation for a dev build, a
-   * zero-import no-op stub for a production build -- see
-   * `src/engine/devShadowIntegration.ts`/`devShadowStub.ts`). Constructed
-   * lazily -- only the first time the development-only shadow command
-   * actually runs, never during ordinary `onload()`. The integration owns
-   * and disposes its own `MindmapEngine`; this plugin holds no production
-   * `mindmapEngine` property. Production commands/writes stay entirely on
-   * the Python path this checkpoint; nothing here is wired into
-   * `registerMindmapCommands` or any other production entry point.
-   */
-  private diagOverlay: DevShadowIntegration | null = null;
 
   /**
-   * Checkpoint 10B: the ONE production, write-capable TypeScript engine
-   * this plugin now owns for real -- composed once in `onload()` (never
-   * lazily, unlike the dev-only `diagOverlay` above) with real Obsidian
-   * `Vault`/`Workspace`/`TFile`/`TFolder`, a real `NodeOwnedFs` confined to
-   * `<pluginDir>/data/production-engine` (a namespace the Python-era
-   * `data/state.json`/Chroma DB never touches -- see this field's own
-   * lifecycle in `startProductionEngine()`), and this vault's current
-   * Ollama-only embedding/local-metadata config read from the SAME
-   * `config.json` the Python runtime already reads. `null` only when
-   * `getResolvedRuntime()` itself is not valid (e.g. a non-desktop
-   * filesystem adapter) -- Standard Mode (manual note editing, settings)
-   * stays fully usable regardless.
+   * Checkpoint 11: the ONE production, write-capable TypeScript engine this
+   * desktop-only plugin owns -- composed once in `onload()` with real
+   * Obsidian `Vault`/`Workspace`/`TFile`/`TFolder`, a real `NodeOwnedFs`
+   * confined to `<pluginDir>/data/production-engine`, and this vault's
+   * current Ollama-only embedding/local-metadata config read entirely from
+   * plugin settings (never a Python `config.json`). `ProductionEngine` is
+   * mandatory: `null` only when the desktop filesystem adapter itself is
+   * unavailable, or construction/`start()` failed (see
+   * `productionEngineFailed`) -- there is no Python fallback for either
+   * case anymore.
    */
   productionEngine: ProductionEngine | null = null;
   /**
    * `true` only when `startProductionEngine()` actually ATTEMPTED to
-   * construct/start a `ProductionEngine` (i.e. `buildProductionEngineOptions()`
-   * returned real options) and that attempt threw -- distinct from
-   * `productionEngine === null` on a genuinely non-desktop filesystem
-   * adapter, where construction was never attempted at all and the
-   * existing Python fallback remains the intentional behavior. Every
-   * command that would otherwise silently fall back to a Python/semantic-
-   * worker subprocess checks this FIRST and fails closed with a static
-   * Notice instead when it is `true` -- a construction/start failure must
-   * never be observed by the user as "quietly running Python again."
+   * construct/start a `ProductionEngine` and that attempt threw -- distinct
+   * from `productionEngine === null` on a genuinely non-desktop filesystem
+   * adapter, where construction was never attempted at all. Every command
+   * that depends on the engine fails closed with a static Notice/error
+   * either way; this flag exists only to give the failure case a more
+   * specific message pointing at the logged start() failure.
    */
   private productionEngineFailed = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
-    await this.ensureBundledRuntime();
 
     this.statusBarEl = this.addStatusBarItem();
     configureStatusBarElement(this.statusBarEl, (event) => this.openStatusMenu(event));
@@ -434,45 +261,25 @@ export default class MindmapPlugin extends Plugin {
       (message) => this.appendLog(message),
       () => this.updateStatusBar(),
     );
-    this.semanticEnvironment = new MindmapSemanticEnvironment(
-      () => this.getResolvedRuntime(),
-      (message) => this.appendLog(message),
-      () => this.updateStatusBar(),
-    );
-
     registerMindmapCommands(this);
-    if (__MINDMAP_DEV_BUILD__) {
-      this.addCommand({
-        id: "mindmap-dev-run-shadow-diagnostics",
-        name: "Development: Run TypeScript shadow diagnostics (read-only)",
-        callback: () => { void this.getOrCreateDiagOverlay().run(); },
-      });
-    }
     this.syncScheduler();
     registerVaultRefreshEvents(this.app.vault, (event) => this.registerEvent(event), (reason, paths) => {
       this.pendingScanService?.requestRefresh(reason, paths);
     });
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => { void this.refreshActiveNoteEligibility(); }));
+    await this.migrateLegacyConfigOnce();
     await this.startProductionEngine();
     void this.pendingScanService.warm().then(() => this.updateStatusBar());
-    await this.startRuntimeCoordinator();
     if (this.settings.readingMode === "reading") {
       void this.readingModeController.start();
     }
   }
 
   onunload(): void {
-    if (__MINDMAP_DEV_BUILD__) {
-      this.diagOverlay?.dispose();
-    }
     void this.productionEngine?.dispose();
     this.productionEngine = null;
-    this.runtimeCoordinator?.dispose();
-    this.activeReaderChild?.kill();
-    this.activeReaderChild = null;
     this.pendingScanService?.dispose();
     void this.readingModeController?.dispose();
-    void this.semanticEnvironment?.shutdown();
     this.stopScheduler("Plugin unloaded. Internal scheduler stopped.");
     if (this.currentProcess) {
       this.appendLog("Stopping active Mindmap run because the plugin is unloading.");
@@ -509,158 +316,20 @@ export default class MindmapPlugin extends Plugin {
     this.pendingScanService?.requestRefresh("settings updated");
   }
 
-  getResolvedRuntime(): ResolvedRuntime {
-    return resolveRuntime(this.settings, this.getRuntimeContext());
-  }
-
-  /**
-   * True whenever the runtime is known to require setup, and also before
-   * discovery has even started (the coordinator is constructed only partway
-   * through onload()). The safe default while unknown is "blocked": nothing
-   * gated on this may run ahead of the discovery result it depends on.
-   */
+  /** Checkpoint 11: there is no Python runtime to set up anymore -- always unblocked. Kept as a named check (rather than deleted outright) since several call sites still gate on it for readability/future use. */
   private isRuntimeSetupBlocking(): boolean {
-    return this.runtimeCoordinator?.getState().blocking ?? true;
+    return false;
   }
 
-  getRuntimeSetupState(): CoordinatorState | null {
-    return this.runtimeCoordinator?.getState() ?? null;
-  }
-
-  /** Live runtime-setup state updates, including cancellable in-progress phases. Callers must invoke the returned unsubscribe on teardown. */
-  subscribeRuntimeSetupState(listener: (state: CoordinatorState) => void): () => void {
-    return this.runtimeCoordinator?.subscribe(listener) ?? (() => {});
-  }
-
-  async startRuntimeSetup(): Promise<void> {
-    const state = this.runtimeCoordinator?.getState();
-    if (!state?.canSetup) return;
-    await this.runtimeCoordinator?.beginSetup();
-  }
-
-  retryRuntimeSetup(): Promise<void> {
-    return this.startRuntimeSetup();
-  }
-
-  cancelRuntimeSetup(): void {
-    this.runtimeCoordinator?.cancel();
-  }
-
-  /** Opens the official Python macOS download page in the user's default browser. */
-  openPythonRuntimeDownloadPage(): void {
-    window.open(PYTHON_MACOS_DOWNLOAD_URL, "_blank");
-  }
-
-  private async confirmRuntimeSetup(): Promise<boolean> {
-    return await confirmMindmapRun(this.app, RUNTIME_SETUP_CONFIRMATION_COPY);
-  }
-
-  private async startRuntimeCoordinator(): Promise<void> {
-    const context = this.getRuntimeContext();
-    const runtimeDir = getPluginRuntimeDir(context);
-    const runtime = this.getResolvedRuntime();
-
-    let requirementsFileContents = "";
-    try {
-      requirementsFileContents = await fs.promises.readFile(path.join(runtimeDir, "requirements.txt"), "utf8");
-    } catch (error) {
-      this.appendLog(`[runtime] Could not read bundled requirements.txt: ${error instanceof Error ? error.message : "unknown error"}`);
-    }
-
-    const invoke = createNodeProcessInvoker();
-    const verifyPreflight = buildRuntimePreflightVerifier({
-      scriptPath: runtime.scriptPath,
-      configPath: runtime.configPath,
-      invoke,
-    });
-
-    this.runtimeCoordinator = new RuntimeReadinessCoordinator({
-      platform: process.platform,
-      pythonCommandSetting: this.settings.pythonCommand,
-      homeDir: os.homedir(),
-      pathEnv: process.env.PATH ?? "",
-      arch: os.arch() === "arm64" ? "arm64" : "x64",
-      appSupportRoot: getDefaultAppSupportRoot(os.homedir()),
-      requirementsFileContents,
-      requirementsFilePath: path.join(runtimeDir, "requirements.txt"),
-      scriptPath: runtime.scriptPath,
-      configPath: runtime.configPath,
-      discoveryFs: createNodeDiscoveryFs(),
-      invoke,
-      setupFs: createNodeSetupFs(),
-      spawner: createNodeSetupSpawner(),
-      confirm: () => this.confirmRuntimeSetup(),
-      persist: async (interpreterPath) => {
-        this.settings.pythonCommand = interpreterPath;
-        await this.saveSettings();
-      },
-      verifyPreflight,
-      onStateChange: (state) => {
-        this.updateStatusBar();
-        if (shouldTriggerRuntimeReadyKickoff(state.phase, this.runtimeReadyKicked)) {
-          this.runtimeReadyKicked = true;
-          // The scheduler/LaunchAgent branches syncScheduler() gates on
-          // isRuntimeSetupBlocking() were skipped every time this coordinator
-          // reported blocking:true (including via persist()'s own saveSettings()
-          // call mid-install, which runs before this phase flips to ready) — so
-          // they must be re-evaluated now that blocking has actually cleared.
-          this.syncScheduler();
-          void this.runPreflight("startup");
-          if (this.settings.liveSemanticLookupEnabled) {
-            void this.startSemanticEnvironment(false);
-          }
-        }
-      },
-      log: (line) => this.appendLog(line),
-    });
-
-    await this.runtimeCoordinator.startDiscovery();
-  }
-
-  getSemanticStatus(): SemanticEnvironmentStatus {
-    return this.semanticEnvironment?.getStatus() ?? {
-      state: "off",
-      message: "Semantic environment is off.",
-      health: null,
-    };
-  }
-
-  /**
-   * Checkpoint 10B FINAL AUDIT: starting the Python semantic worker is a
-   * production-reachable command ("Start mindmap semantic environment").
-   * Whenever a TypeScript `ProductionEngine` is available for this vault,
-   * `queryLiveRelated`/`queryLookupRelated` already prefer it and never
-   * consult `semanticEnvironment` at all -- starting the Python worker in
-   * that case would only ever run an unused subprocess. This command is
-   * therefore a TS-engine no-op (an informational Notice, never a spawn)
-   * whenever `productionEngine` exists; it starts the Python worker ONLY
-   * as the non-desktop-adapter fallback path.
-   */
+  /** Checkpoint 11: the semantic environment command is now a pure TS-engine no-op -- there is no Python worker to start anymore. */
   async startSemanticEnvironment(showNotice: boolean): Promise<void> {
-    if (this.productionEngine) {
-      if (showNotice) {
-        new Notice("The Mindmap TypeScript engine already handles semantic search in this vault.", 8000);
-      }
-      return;
-    }
-    if (this.productionEngineFailed) {
-      if (showNotice) {
-        new Notice("The Mindmap TypeScript engine failed to start for this vault. Semantic search is unavailable.", 8000);
-      }
-      return;
-    }
-    if (!this.semanticEnvironment) {
-      return;
-    }
-    if (this.isRuntimeSetupBlocking()) {
-      if (showNotice) {
-        new Notice("Mindmap runtime setup is required before the semantic environment can start.", 8000);
-      }
-      return;
-    }
-    const status = await this.semanticEnvironment.start("current");
     if (showNotice) {
-      new Notice(status.message, 8000);
+      new Notice(
+        this.productionEngine
+          ? "The Mindmap TypeScript engine already handles semantic search in this vault."
+          : "The Mindmap TypeScript engine is not available for this vault. Semantic search is unavailable.",
+        8000,
+      );
     }
   }
 
@@ -669,54 +338,34 @@ export default class MindmapPlugin extends Plugin {
     return related.map((item) => ({ path: item.path, score: item.score, kind: item.kind }));
   }
 
-  /**
-   * Checkpoint 10B SIDEBAR: the TypeScript `ProductionEngine` is the ONLY
-   * backend for live/lookup related queries whenever one is available for
-   * this vault -- the Python `semanticWorkerClient`/`semanticEnvironment`
-   * path below is used ONLY as a fallback for a vault with no production
-   * engine composed (e.g. a non-desktop filesystem adapter). Neither path
-   * is ever consulted for the other: once `productionEngine` exists,
-   * `semanticEnvironment` is never started/queried from here.
-   */
+  /** Checkpoint 11: the TypeScript `ProductionEngine` is the ONLY backend for live/lookup related queries -- there is no Python semantic worker fallback anymore. An unavailable engine fails closed with a thrown error, which the sidebar UI already renders as an error state. */
   async queryLiveRelated(path: string): Promise<LiveRelatedResponse> {
     if (!this.settings.liveSemanticLookupEnabled) {
       throw new Error("Live semantic lookup is disabled.");
     }
-    if (this.productionEngine) {
-      const result = await this.productionEngine.queryLiveRelated(path, this.settings.liveSemanticEnsureActiveNoteIndexed);
-      return {
-        path: result.path,
-        hash: result.sourceHash,
-        indexed: result.indexed,
-        stale: result.stale,
-        index_result: null,
-        related: MindmapPlugin.toLiveRelatedResults(result.related),
-      };
+    if (!this.productionEngine) {
+      throw new Error("The Mindmap TypeScript engine is not available for this vault.");
     }
-    if (this.productionEngineFailed) {
-      throw new Error("The Mindmap TypeScript engine failed to start for this vault.");
-    }
-    if (!this.semanticEnvironment) {
-      throw new Error("Semantic environment is not available.");
-    }
-    return this.semanticEnvironment.queryRelated(path, this.settings.liveSemanticEnsureActiveNoteIndexed);
+    const result = await this.productionEngine.queryLiveRelated(path, this.settings.liveSemanticEnsureActiveNoteIndexed);
+    return {
+      path: result.path,
+      hash: result.sourceHash,
+      indexed: result.indexed,
+      stale: result.stale,
+      index_result: null,
+      related: MindmapPlugin.toLiveRelatedResults(result.related),
+    };
   }
 
   async queryLookupRelated(query: string, limit?: number): Promise<LookupRelatedResponse> {
     if (!this.settings.liveSemanticLookupEnabled) {
       throw new Error("Live semantic lookup is disabled.");
     }
-    if (this.productionEngine) {
-      const related = await this.productionEngine.queryLookupRelated(query, limit ?? PRODUCTION_DEFAULT_RELATED_LIMIT);
-      return { query, related: MindmapPlugin.toLiveRelatedResults(related) };
+    if (!this.productionEngine) {
+      throw new Error("The Mindmap TypeScript engine is not available for this vault.");
     }
-    if (this.productionEngineFailed) {
-      throw new Error("The Mindmap TypeScript engine failed to start for this vault.");
-    }
-    if (!this.semanticEnvironment) {
-      throw new Error("Semantic environment is not available.");
-    }
-    return this.semanticEnvironment.queryText(query, limit);
+    const related = await this.productionEngine.queryLookupRelated(query, limit ?? this.settings.relatedLimit);
+    return { query, related: MindmapPlugin.toLiveRelatedResults(related) };
   }
 
   getSchedulerConfig(): SchedulerConfig {
@@ -1045,7 +694,7 @@ export default class MindmapPlugin extends Plugin {
     this.updateStatusBar();
     try {
       const { credential, model } = await this.getWebResearchPrerequisites();
-      const vault = createObsidianVaultApi(this.app.vault);
+      const vault = createObsidianVaultApi(this.app.vault, TFile);
       const note = vault.get(file.path);
       if (!note) throw new WebResearchError("NOTE_MISSING", "The active note is unavailable.");
 
@@ -1116,19 +765,13 @@ export default class MindmapPlugin extends Plugin {
     }
   }
 
+  /** Checkpoint 11: the local research model is the SAME Ollama-only provider setting the TypeScript engine's metadata inference uses (`this.settings.llmBaseUrl`/`llmModel`) -- no Python `config.json` is ever read here. */
   private async getWebResearchPrerequisites(): Promise<{ credential: string; model: ReturnType<typeof createConfiguredLocalResearchModel> }> {
     const credential = await getExaCredential({ allowDevelopmentOverride: false });
-    const config = JSON.parse(await fs.promises.readFile(this.getResolvedRuntime().configPath, "utf8")) as Record<string, unknown>;
-    const provider = config.llm_provider === "ollama" ? "ollama" : "openai_compatible";
-    const chatTemplateKwargs = config.llm_chat_template_kwargs && typeof config.llm_chat_template_kwargs === "object" && !Array.isArray(config.llm_chat_template_kwargs)
-      ? config.llm_chat_template_kwargs as Record<string, unknown>
-      : undefined;
     const model = createConfiguredLocalResearchModel({
-      provider,
-      baseUrl: coerceConfigString(config.llm_base_url, coerceConfigString(config.ollama_base_url, "")),
-      model: coerceConfigString(config.llm_model, ""),
-      ...(resolveLocalModelApiKey(config, process.env) ? { apiKey: resolveLocalModelApiKey(config, process.env) } : {}),
-      ...(chatTemplateKwargs ? { chatTemplateKwargs } : {}),
+      provider: "ollama",
+      baseUrl: this.settings.llmBaseUrl.trim(),
+      model: this.settings.llmModel.trim(),
       temperature: 0.2,
     }, requestUrlFetch);
     return { credential, model };
@@ -1253,8 +896,7 @@ export default class MindmapPlugin extends Plugin {
   }
 
   getScopeSetupStatus(): ScopeSetupStatus {
-    const runtime = this.getResolvedRuntime();
-    return resolveScopeSetupStatus(runtime, runtime.valid && this.canManageConfig(runtime));
+    return resolveScopeSetupStatus(this.settings);
   }
 
   getVaultFolderOptions(): VaultFolderOption[] {
@@ -1265,47 +907,32 @@ export default class MindmapPlugin extends Plugin {
     return listVaultFolderOptions(folderPaths, this.app.vault.configDir);
   }
 
-  saveScopeSetup(selection: ScopeSelection): void {
-    const runtime = this.getResolvedRuntime();
-    const status = this.getScopeSetupStatus();
-    if (!runtime.valid || !status.canManage || !status.configPath) {
-      throw new Error(status.guidance);
-    }
-
-    const configPath = writeScopeSetup(status, selection);
-    this.appendLog(`[setup] Updated scope folders in ${configPath}`);
+  async saveScopeSetup(selection: ScopeSelection): Promise<void> {
+    writeScopeSetup(this.settings, selection);
+    await this.saveSettings();
+    this.appendLog("[setup] Updated scope folders in plugin settings");
     this.pendingScanService?.requestRefresh("scope setup updated");
+    await this.startProductionEngine();
     this.updateStatusBar();
   }
 
   getLlmProviderConfigStatus(): LlmProviderConfigStatus {
-    const runtime = this.getResolvedRuntime();
-    return resolveLlmProviderConfigStatus(runtime, runtime.valid && this.canManageConfig(runtime));
+    return resolveLlmProviderConfigStatus(this.settings);
   }
 
-  saveLlmProviderConfig(providerConfig: LlmProviderConfig): void {
-    const status = this.getLlmProviderConfigStatus();
-    if (!status.canManage || !status.configPath) {
-      throw new Error(status.guidance);
-    }
-
-    const configPath = writeLlmProviderConfig(status, providerConfig);
-    this.appendLog(`[setup] Updated LLM provider config in ${configPath}`);
+  async saveLlmProviderConfig(patch: Partial<Pick<LlmProviderConfigStatus, "baseUrl" | "model" | "maxTokens">>): Promise<void> {
+    writeLlmProviderConfig(this.settings, patch);
+    await this.saveSettings();
+    this.appendLog("[setup] Updated Ollama metadata provider config in plugin settings");
+    await this.startProductionEngine();
   }
 
   /** One compact, path-free readiness summary for the settings Overview row. */
   getOverviewState(): OverviewState {
-    const runtime = this.getResolvedRuntime();
-    const runtimeSetup = this.getRuntimeSetupState();
     const scope = this.getScopeSetupStatus();
-    const provider = this.getLlmProviderConfigStatus();
     return buildOverviewState({
-      runtimeValid: runtime.valid,
-      runtimeSetup: runtimeSetup
-        ? { phase: runtimeSetup.phase, message: runtimeSetup.message, canSetup: runtimeSetup.canSetup, canCancel: runtimeSetup.canCancel }
-        : null,
-      scopeCanManage: scope.canManage,
-      providerCanManage: provider.canManage,
+      productionEngineAvailable: this.productionEngine !== null,
+      scopeComplete: scope.complete,
       preflightOk: this.diagnosticsState.result?.ok ?? null,
     });
   }
@@ -1325,30 +952,16 @@ export default class MindmapPlugin extends Plugin {
    * explicit "Copy diagnostics" click.
    */
   async copyDiagnostics(): Promise<void> {
-    const runtime = this.getResolvedRuntime();
     const provider = this.getLlmProviderConfigStatus();
     const report = buildDiagnosticsReport({
       generatedAt: new Date().toISOString(),
-      runtime: {
-        command: runtime.command.command,
-        args: runtime.command.args,
-        scriptPath: runtime.scriptPath,
-        configPath: runtime.configPath,
-        valid: runtime.valid,
-        trustLevel: runtime.trust.level,
-        trustInterpreter: runtime.trust.interpreter,
-        trustScript: runtime.trust.script,
-        trustConfig: runtime.trust.config,
-        messages: runtime.messages.map((message) => ({ level: message.level, message: message.message })),
-      },
+      engine: { available: this.productionEngine !== null },
       provider: {
-        canManage: provider.canManage,
-        provider: provider.provider,
-        baseUrl: provider.baseUrl,
-        model: provider.model,
-        hasApiKey: Boolean(provider.apiKey),
-        maxTokens: provider.maxTokens,
-        enableThinking: provider.enableThinking,
+        embedBaseUrl: this.settings.embedBaseUrl,
+        embedModel: this.settings.embedModel,
+        llmBaseUrl: provider.baseUrl,
+        llmModel: provider.model,
+        llmMaxTokens: provider.maxTokens,
       },
       preflight: {
         inProgress: this.diagnosticsState.inProgress,
@@ -1376,10 +989,9 @@ export default class MindmapPlugin extends Plugin {
   }
 
   showStatusSummary(): void {
-    const runtime = this.getResolvedRuntime();
     const state = buildMindmapStatusBarState(this, this.getStatusBarInternalState());
     new Notice(buildStatusSummary({
-      ready: runtime.valid && state.scopeReady && state.preflightOk !== false,
+      ready: this.productionEngine !== null && state.scopeReady && state.preflightOk !== false,
       pendingAvailable: state.pendingAvailable,
       currentPending: state.currentPending,
       allPending: state.allPending,
@@ -1388,16 +1000,6 @@ export default class MindmapPlugin extends Plugin {
       schedulerMode: state.schedulerMode,
       schedulerDetails: state.schedulerDetails,
     }), 8000);
-  }
-
-  buildRuntimeCommand(extraArgs: string[] = []): { command: string; args: string[]; cwd: string } {
-    assertAllowedPluginArgs(extraArgs, this.app.vault.configDir);
-    const runtime = this.getResolvedRuntime();
-    return {
-      command: runtime.command.command,
-      args: [...runtime.command.args, ...extraArgs],
-      cwd: runtime.command.cwd,
-    };
   }
 
   async setSchedulerMode(mode: SchedulerMode): Promise<void> {
@@ -1463,171 +1065,35 @@ export default class MindmapPlugin extends Plugin {
     return result;
   }
 
+  /** Checkpoint 11: `ProductionEngine` is mandatory on this desktop-only plugin -- there is no Python subprocess fallback anymore. An unavailable engine (construction failure, or the desktop filesystem adapter itself missing) fails closed with one fixed result, never a spawn. */
   async runPreflight(trigger: "manual" | "startup"): Promise<PreflightResult> {
     if (this.productionEngine) {
       return await this.runProductionPreflight(trigger, this.productionEngine);
     }
-    if (this.productionEngineFailed) {
-      const summary = "The Mindmap TypeScript engine failed to start for this vault. Preflight is unavailable.";
-      const result: PreflightResult = {
-        ok: false,
-        summary,
-        checks: [
-          {
-            code: "PRODUCTION_ENGINE_FAILED",
-            label: "Mindmap TypeScript engine",
-            status: "error",
-            message: summary,
-            guidance: "Check the Mindmap log for the [production-engine] start() failure, then restart Obsidian.",
-          },
-        ],
-        rawStdout: "",
-        rawStderr: "",
-        exitCode: 1,
-      };
-      this.diagnosticsState.result = result;
-      this.diagnosticsState.lastRunAt = Date.now();
-      this.appendLog(`[preflight] ${summary}`);
-      if (trigger === "manual") {
-        new Notice(summary, 10000);
-      }
-      this.updateStatusBar();
-      return result;
-    }
-    if (this.isRuntimeSetupBlocking()) {
-      // Never spawn the legacy pythonCommand (often a bare "python3" that
-      // discovery already knows is missing/incompatible) while setup is
-      // pending: return one fixed setup-required result instead.
-      const runtimeMessage = this.runtimeCoordinator?.getState().message ?? "Checking for a compatible Mindmap runtime.";
-      const summary = `Mindmap runtime setup is required before preflight can run. ${runtimeMessage}`;
-      const result: PreflightResult = {
-        ok: false,
-        summary,
-        checks: [
-          {
-            code: "RUNTIME_SETUP_REQUIRED",
-            label: "Mindmap runtime",
-            status: "error",
-            message: summary,
-            guidance: "Finish Mindmap runtime setup in Settings, then run preflight again.",
-          },
-        ],
-        rawStdout: "",
-        rawStderr: "",
-        exitCode: 1,
-      };
-      this.diagnosticsState.result = result;
-      this.diagnosticsState.lastRunAt = Date.now();
-      this.appendLog(`[preflight] ${summary}`);
-      if (trigger === "manual") {
-        new Notice(summary, 10000);
-      }
-      this.updateStatusBar();
-      return result;
-    }
-
-    const runtime = this.getResolvedRuntime();
-    if (!runtime.valid) {
-      const error = runtime.messages.find((message) => message.level === "error");
-      const result: PreflightResult = {
-        ok: false,
-        summary: error?.message ?? "Mindmap runtime is not ready.",
-        checks: [
-          {
-            code: "RUNTIME_PATH_INVALID",
-            label: "Runtime paths",
-            status: "error",
-            message: error?.message ?? "Mindmap runtime is not ready.",
-            guidance: "Fix the configured paths or reset them to the bundled defaults before running preflight.",
-          },
-        ],
-        rawStdout: "",
-        rawStderr: "",
-        exitCode: 1,
-      };
-      this.diagnosticsState.result = result;
-      this.diagnosticsState.lastRunAt = Date.now();
-      this.appendLog(`[preflight] ${result.summary}`);
-      if (trigger === "manual") {
-        new Notice(formatPreflightNotice(result), 12000);
-      }
-      this.updateStatusBar();
-      return result;
-    }
-
-    let command: { command: string; args: string[]; cwd: string };
-    try {
-      command = this.buildRuntimeCommand(["--preflight"]);
-    } catch (error) {
-      const result: PreflightResult = {
-        ok: false,
-        summary: error instanceof Error ? error.message : "Blocked unexpected preflight arguments.",
-        checks: [
-          {
-            code: "PREFLIGHT_ARGUMENTS_BLOCKED",
-            label: "Preflight execution",
-            status: "error",
-            message: error instanceof Error ? error.message : "Blocked unexpected preflight arguments.",
-            guidance: "Use only plugin-managed Mindmap commands.",
-          },
-        ],
-        rawStdout: "",
-        rawStderr: "",
-        exitCode: 1,
-      };
-      this.diagnosticsState.result = result;
-      this.diagnosticsState.lastRunAt = Date.now();
-      this.appendLog(`[preflight] ${result.summary}`);
-      if (trigger === "manual") {
-        new Notice(formatPreflightNotice(result), 12000);
-      }
-      this.updateStatusBar();
-      return result;
-    }
-
-    this.diagnosticsState.inProgress = true;
-    this.updateStatusBar();
-    this.appendLog(`[preflight] Starting ${formatCommandPreview(runtime, ["--preflight"])}`);
-
-    const result = await new Promise<PreflightResult>((resolve) => {
-      let stdout = "";
-      let stderr = "";
-      const child = spawn(command.command, command.args, {
-        cwd: command.cwd,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-
-      child.stdout.on("data", (chunk: unknown) => {
-        stdout += String(chunk);
-      });
-
-      child.stderr.on("data", (chunk: unknown) => {
-        const text = String(chunk);
-        stderr += text;
-        for (const line of splitLogLines(text)) {
-          this.appendLog(`[preflight][stderr] ${line}`);
-        }
-      });
-
-      child.on("error", (error) => {
-        resolve(buildSpawnFailureResult(error, command.command));
-      });
-
-      child.on("close", (code) => {
-        resolve(parsePreflightOutput(stdout, stderr, code ?? 1));
-      });
-    });
-
-    this.diagnosticsState.inProgress = false;
-    this.diagnosticsState.lastRunAt = Date.now();
+    const summary = "The Mindmap TypeScript engine is not available for this vault. Preflight is unavailable.";
+    const result: PreflightResult = {
+      ok: false,
+      summary,
+      checks: [
+        {
+          code: "PRODUCTION_ENGINE_UNAVAILABLE",
+          label: "Mindmap TypeScript engine",
+          status: "error",
+          message: summary,
+          guidance: "Check the Mindmap log for a [production-engine] start() failure, then restart Obsidian.",
+        },
+      ],
+      rawStdout: "",
+      rawStderr: "",
+      exitCode: 1,
+    };
     this.diagnosticsState.result = result;
-    this.appendLog(`[preflight] ${result.summary}`);
-    this.updateStatusBar();
-
-    if (trigger === "manual" || !result.ok) {
-      new Notice(formatPreflightNotice(result), 12000);
+    this.diagnosticsState.lastRunAt = Date.now();
+    this.appendLog(`[preflight] ${summary}`);
+    if (trigger === "manual") {
+      new Notice(summary, 10000);
     }
-
+    this.updateStatusBar();
     return result;
   }
 
@@ -1882,28 +1348,6 @@ export default class MindmapPlugin extends Plugin {
     this.scheduleNextTick(Date.now());
   }
 
-  private updateRunStatusFromLine(line: string): void {
-    if (!this.currentProcess) {
-      return;
-    }
-
-    let status: string | null = null;
-    if (line.includes("[omlx] Started server for this run")) {
-      status = "Mindmap: starting oMLX";
-    } else if (line.includes("[omlx] Server ready")) {
-      status = "Mindmap: oMLX ready";
-    } else if (line.includes("[omlx] Server already running")) {
-      status = "Mindmap: oMLX already running";
-    } else if (line.includes("[omlx] Stopping server started by this run")) {
-      status = "Mindmap: stopping oMLX";
-    }
-
-    if (status) {
-      this.activeRunStatus = status;
-      this.updateStatusBar();
-    }
-  }
-
   async runActiveNote(): Promise<void> {
     await this.refreshActiveNoteEligibility();
     if (!this.activeNoteEligibility.eligible || !this.activeNoteEligibility.path) {
@@ -1937,7 +1381,7 @@ export default class MindmapPlugin extends Plugin {
       readFingerprint: () => this.readAppleBooksFingerprint(),
       importPayload: async (payload) => {
         const result = await importAppleBooksAnnotations(payload, {
-          vault: createObsidianVaultApi(this.app.vault),
+          vault: createObsidianVaultApi(this.app.vault, TFile),
           state,
         });
         return {
@@ -1970,13 +1414,13 @@ export default class MindmapPlugin extends Plugin {
               if (!text) {
                 return await persistAutomaticResearchOutcome({
                   outcome: { ok: false, code: "RESEARCH_INPUT_EMPTY", message: "Automatic research note is empty." },
-                  updateStatus: async (status) => await updateAppleAnnotationResearchStatus(createObsidianVaultApi(this.app.vault), state, item.annotationId, status),
+                  updateStatus: async (status) => await updateAppleAnnotationResearchStatus(createObsidianVaultApi(this.app.vault, TFile), state, item.annotationId, status),
                 });
               }
               const outcome = await this.researchFile(file, text, false, "automatic");
               return await persistAutomaticResearchOutcome({
                 outcome,
-                updateStatus: async (status) => await updateAppleAnnotationResearchStatus(createObsidianVaultApi(this.app.vault), state, item.annotationId, status),
+                updateStatus: async (status) => await updateAppleAnnotationResearchStatus(createObsidianVaultApi(this.app.vault, TFile), state, item.annotationId, status),
               });
             },
           });
@@ -2047,24 +1491,6 @@ export default class MindmapPlugin extends Plugin {
   }
 
   /**
-   * The Apple Books reader is stdlib-only, so it only needs a real Python
-   * executable — never the full chromadb/ruamel.yaml package set. Prefer
-   * checkpoint-1's discovered interpreter (verified executable, supported
-   * version) over the settings' raw pythonCommand default, since a blank
-   * "python3" may not exist or may resolve to an incompatible interpreter
-   * even while discovery already found a good one. An explicit custom
-   * pythonCommand (coordinator phase "not-applicable") always wins, as does
-   * any state before the coordinator has produced an interpreter at all.
-   */
-  private getAppleBooksInterpreterCommand(): string {
-    const coordinatorState = this.runtimeCoordinator?.getState();
-    if (coordinatorState && coordinatorState.phase !== "not-applicable" && coordinatorState.interpreterPath) {
-      return coordinatorState.interpreterPath;
-    }
-    return this.getResolvedRuntime().command.command;
-  }
-
-  /**
    * Checkpoint 10B item 6: reads Apple Books annotations through the real
    * TypeScript `AppleBooksSqliteReader` this vault's `ProductionEngine`
    * already composes (fixed `/usr/bin/sqlite3`, no shell -- see
@@ -2083,16 +1509,12 @@ export default class MindmapPlugin extends Plugin {
   }
 
   private async readAppleBooksFingerprint(): Promise<string> {
-    const runtime = this.getResolvedRuntime();
-    if (!runtime.valid) {
-      throw new Error("Mindmap runtime is not ready for Apple Books watching.");
-    }
-    let config: Record<string, unknown> = {};
-    try {
-      config = JSON.parse(await fs.promises.readFile(runtime.configPath, "utf8")) as Record<string, unknown>;
-    } catch {
-      // The reader will provide the actionable config diagnostic during sync.
-    }
+    const config: Record<string, unknown> = {
+      apple_books: {
+        annotation_database_path: this.settings.appleAnnotationDbPath,
+        library_database_path: this.settings.appleLibraryDbPath,
+      },
+    };
     const candidates = await discoverAppleBooksDatabasePaths({
       config,
       homeDirectory: os.homedir(),
@@ -2112,17 +1534,6 @@ export default class MindmapPlugin extends Plugin {
     return fingerprints.join("|");
   }
 
-  private async runReaderProcess(command: string, args: string[], cwd: string): Promise<unknown> {
-    if (this.activeReaderChild) throw new Error("Apple Books reader is already running.");
-    const started = startAppleBooksReaderProcess({
-      spawn: () => spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] }),
-    });
-    this.activeReaderChild = started.child as ChildProcess;
-    try { return await started.promise; } finally {
-      if (this.activeReaderChild === started.child) this.activeReaderChild = null;
-    }
-  }
-
   /**
    * Checkpoint 10B item 2: the actual TypeScript-engine run path for
    * `"current"`/`"all"`/`"note"` scopes. Standard Mode (this whole method's
@@ -2135,6 +1546,19 @@ export default class MindmapPlugin extends Plugin {
   private async runMindmapViaProductionEngine(trigger: RunTrigger, scope: RunScope, notePath?: string): Promise<boolean> {
     const engine = this.productionEngine;
     if (!engine) return false;
+    if (trigger === "manual" && (scope === "refreshAll" || scope === "metadataAll" || scope === "rebuildAll")) {
+      const profile = getRunProfile(scope);
+      if (profile.confirmation) {
+        const confirmed = await confirmMindmapRun(this.app, profile.confirmation);
+        if (!confirmed) {
+          const message = `Mindmap ${profile.label} run cancelled.`;
+          this.schedulerState.lastMessage = message;
+          this.appendLog(message);
+          this.updateStatusBar();
+          return false;
+        }
+      }
+    }
     if (["deriving", "searching", "writing"].includes(this.webResearchActivity)) {
       const message = "Web Research is using the local model. Mindmap run skipped.";
       this.appendLog(message);
@@ -2209,174 +1633,12 @@ export default class MindmapPlugin extends Plugin {
     if (this.productionEngine) {
       return await this.runMindmapViaProductionEngine(trigger, scope, notePath);
     }
-    if (this.productionEngineFailed) {
-      const message = `Mindmap ${trigger} run skipped: the TypeScript engine failed to start for this vault.`;
-      this.schedulerState.lastMessage = message;
-      this.appendLog(message);
-      if (trigger === "manual") new Notice(message, 12000);
-      this.updateStatusBar();
-      return false;
-    }
-    if (this.isRuntimeSetupBlocking()) {
-      const runtimeMessage = this.runtimeCoordinator?.getState().message ?? "Checking for a compatible Mindmap runtime.";
-      const message = `Mindmap ${trigger} run skipped: runtime setup is required. ${runtimeMessage}`;
-      this.schedulerState.lastMessage = message;
-      this.appendLog(message);
-      if (trigger === "manual") {
-        new Notice(message, 12000);
-      }
-      this.updateStatusBar();
-      return false;
-    }
-    if (["deriving", "searching", "writing"].includes(this.webResearchActivity)) {
-      const message = "Web Research is using the local model. Mindmap run skipped.";
-      this.appendLog(message);
-      if (trigger === "manual") new Notice(message, 8000);
-      this.updateStatusBar();
-      return false;
-    }
-    if (this.currentProcess) {
-      const message = "Mindmap is already running. Skipping the new request.";
-      this.appendLog(message);
-      if (trigger === "manual") {
-        new Notice(message, 8000);
-      }
-      return false;
-    }
-
-    const runtime = this.getResolvedRuntime();
-    if (!runtime.valid) {
-      const error = runtime.messages.find((message) => message.level === "error");
-      const message = `Mindmap ${trigger} run skipped: ${error?.message ?? "runtime is not ready"}`;
-      this.schedulerState.lastMessage = message;
-      this.appendLog(message);
-      new Notice(message, 12000);
-      this.updateStatusBar();
-      return false;
-    }
-
-    const scopeSetup = this.getScopeSetupStatus();
-    if (!scopeSetup.complete) {
-      const message = `Mindmap ${trigger} run skipped: ${scopeSetup.guidance}`;
-      this.schedulerState.lastMessage = message;
-      this.appendLog(message);
-      new Notice(message, 12000);
-      this.updateStatusBar();
-      return false;
-    }
-
-    let command: { command: string; args: string[]; cwd: string };
-    let profile: RunProfile;
-    try {
-      profile = getRunProfile(scope, notePath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "An individual note path is required.";
-      this.appendLog(message);
-      new Notice(message, 8000);
-      return false;
-    }
-
-    if (trigger === "manual" && profile.confirmation) {
-      const confirmed = await confirmMindmapRun(this.app, profile.confirmation);
-      if (!confirmed) {
-        const message = `Mindmap ${profile.label} run cancelled.`;
-        this.schedulerState.lastMessage = message;
-        this.appendLog(message);
-        this.updateStatusBar();
-        return false;
-      }
-    }
-
-    if (this.currentProcess) {
-      const message = "Mindmap is already running. Skipping the new request.";
-      this.appendLog(message);
-      if (trigger === "manual") {
-        new Notice(message, 8000);
-      }
-      this.updateStatusBar();
-      return false;
-    }
-
-    try {
-      command = this.buildRuntimeCommand(profile.args);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Blocked unexpected subprocess arguments.";
-      this.schedulerState.lastMessage = message;
-      this.appendLog(message);
-      new Notice(message, 12000);
-      this.updateStatusBar();
-      return false;
-    }
-
-    const preview = formatCommandPreview(runtime, profile.args);
-    this.appendLog(`Starting ${trigger} ${profile.label} run: ${preview}`);
-    if (trigger === "manual") {
-      new Notice(`Mindmap run started (${profile.label}). ${preview}`, 8000);
-    }
-
-    return await new Promise<boolean>((resolve) => {
-      const child = spawn(command.command, command.args, {
-        cwd: command.cwd,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      this.currentProcess = child;
-      this.activeRunStatus = `Mindmap: ${profile.label}`;
-      this.schedulerState.lastTrigger = trigger;
-      this.schedulerState.lastMessage = `Running ${profile.label} via ${trigger} trigger.`;
-      this.updateStatusBar();
-
-      const stdoutLines: string[] = [];
-      const stderrLines: string[] = [];
-
-      child.stdout.on("data", (chunk: unknown) => {
-        for (const line of splitLogLines(String(chunk))) {
-          stdoutLines.push(line);
-          this.appendLog(`[stdout] ${line}`);
-          this.updateRunStatusFromLine(line);
-        }
-      });
-
-      child.stderr.on("data", (chunk: unknown) => {
-        for (const line of splitLogLines(String(chunk))) {
-          stderrLines.push(line);
-          this.appendLog(`[stderr] ${line}`);
-          this.updateRunStatusFromLine(line);
-        }
-      });
-
-      child.on("error", (error) => {
-        const message = `Mindmap ${trigger} ${profile.label} run failed to start: ${error.message}`;
-        this.currentProcess = null;
-        this.activeRunStatus = null;
-        this.schedulerState.lastRunAt = Date.now();
-        this.schedulerState.lastExitCode = -1;
-        this.schedulerState.lastMessage = message;
-        this.appendLog(message);
-        if (trigger === "manual") {
-          new Notice(message, 12000);
-        }
-        this.updateStatusBar();
-        resolve(false);
-      });
-
-      child.on("close", (code) => {
-        this.currentProcess = null;
-        this.activeRunStatus = null;
-        this.schedulerState.lastRunAt = Date.now();
-        this.schedulerState.lastExitCode = code;
-        const failureContext = stderrLines[stderrLines.length - 1] ?? stdoutLines[stdoutLines.length - 1];
-        this.schedulerState.lastMessage = code === 0
-          ? `Last ${trigger} ${profile.label} run finished successfully.`
-          : `Last ${trigger} ${profile.label} run exited with code ${code}.${failureContext ? ` ${failureContext}` : ""}`;
-        this.appendLog(this.schedulerState.lastMessage);
-        if (code !== 0 || trigger === "manual") {
-          new Notice(this.schedulerState.lastMessage, 10000);
-        }
-        this.pendingScanService?.requestRefresh("run completed");
-        this.updateStatusBar();
-        resolve(code === 0);
-      });
-    });
+    const message = `Mindmap ${trigger} run skipped: the TypeScript engine is not available for this vault.`;
+    this.schedulerState.lastMessage = message;
+    this.appendLog(message);
+    if (trigger === "manual") new Notice(message, 12000);
+    this.updateStatusBar();
+    return false;
   }
 
   private appendLog(message: string): void {
@@ -2414,73 +1676,63 @@ export default class MindmapPlugin extends Plugin {
     };
   }
 
-  private async ensureBundledRuntime(): Promise<void> {
-    const runtimeDir = getPluginRuntimeDir(this.getRuntimeContext());
-    const result = await ensureBundledRuntimeAssets(
-      runtimeDir,
-      BUNDLED_RUNTIME_ASSETS,
-      {
-        existsSync: fs.existsSync,
-        mkdir: async (targetPath, options) => {
-          await fs.promises.mkdir(targetPath, options);
-        },
-        writeFile: (targetPath, content, encoding) => fs.promises.writeFile(targetPath, content, encoding),
-      },
-    );
-
-    this.appendLog(`[runtime] ${result.message}`);
-    if (!result.ok) {
-      new Notice(result.message, 12000);
-      return;
-    }
-
-    const configMigration = await migrateLegacyPluginVaultRoot(path.join(runtimeDir, "config.json"), this.app.vault.configDir, {
-      existsSync: fs.existsSync,
-      readFile: (targetPath, encoding) => fs.promises.readFile(targetPath, encoding),
-      writeFile: (targetPath, content, encoding) => fs.promises.writeFile(targetPath, content, encoding),
-    });
-    if (configMigration.message) {
-      this.appendLog(`[runtime] ${configMigration.message}`);
-      new Notice(configMigration.message, 12000);
-    }
-  }
-
-  private canManageConfig(runtime: ResolvedRuntime): boolean {
-    const runtimeDir = getPluginRuntimeDir(this.getRuntimeContext());
-    return path.normalize(runtime.configPath).startsWith(path.normalize(runtimeDir));
-  }
-
   /**
-   * Reads the SAME `config.json` the Python runtime reads (bounded,
-   * fail-soft -- `null` on anything missing/oversized/malformed, mirroring
-   * `devShadowIntegration.ts`'s own `readBoundedJsonConfig`, never a raw
-   * parse error escaping to a caller).
+   * Checkpoint 11: a ONE-TIME, best-effort migration from a legacy Python
+   * `config.json` (if this vault was previously running the retired
+   * Python-powered plugin) into `this.settings` -- provider/model/base URL,
+   * scope folders, and Apple Books database overrides only, exactly once.
+   * Gated on `settings.legacyConfigMigrated`, which is set `true` whether a
+   * legacy config was found or not, so this NEVER runs again and NEVER
+   * reads a Python config file as part of ordinary operation afterward. A
+   * fresh install (no legacy config present) is a normal, silent no-op.
    */
-  private readBoundedRuntimeConfig(configPath: string): Record<string, unknown> | null {
+  private async migrateLegacyConfigOnce(): Promise<void> {
+    if (this.settings.legacyConfigMigrated) return;
     try {
-      const stat = fs.statSync(configPath);
-      if (stat.size > PRODUCTION_CONFIG_MAX_BYTES) return null;
-      const parsed: unknown = JSON.parse(fs.readFileSync(configPath, "utf8"));
-      return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-    } catch {
-      return null;
+      const context = this.getRuntimeContext();
+      const legacyConfigPath = path.join(context.pluginDir, "python", "config.json");
+      const raw = await fs.promises.readFile(legacyConfigPath, "utf8").catch(() => null);
+      if (raw !== null) {
+        const config = JSON.parse(raw) as Record<string, unknown>;
+        const str = (value: unknown): string | undefined => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+        const currentPaths = Array.isArray(config.notes_paths_current) ? config.notes_paths_current.filter((v): v is string => typeof v === "string") : undefined;
+        const allPaths = Array.isArray(config.notes_paths_all) ? config.notes_paths_all.filter((v): v is string => typeof v === "string") : undefined;
+
+        this.settings.embedBaseUrl = str(config.embed_base_url) ?? str(config.ollama_base_url) ?? this.settings.embedBaseUrl;
+        this.settings.embedModel = str(config.embed_model) ?? this.settings.embedModel;
+        this.settings.llmBaseUrl = config.llm_provider === "ollama" ? (str(config.llm_base_url) ?? this.settings.llmBaseUrl) : this.settings.llmBaseUrl;
+        this.settings.llmModel = config.llm_provider === "ollama" ? (str(config.llm_model) ?? this.settings.llmModel) : this.settings.llmModel;
+        if (currentPaths && currentPaths.length > 0) this.settings.scopeCurrentPaths = currentPaths;
+        if (allPaths && allPaths.length > 0) this.settings.scopeAllPaths = allPaths;
+        const appleBooks = typeof config.apple_books === "object" && config.apple_books !== null && !Array.isArray(config.apple_books) ? config.apple_books as Record<string, unknown> : {};
+        this.settings.appleAnnotationDbPath = str(appleBooks.annotation_database_path) ?? this.settings.appleAnnotationDbPath;
+        this.settings.appleLibraryDbPath = str(appleBooks.library_database_path) ?? this.settings.appleLibraryDbPath;
+
+        this.appendLog("[migration] Imported legacy config.json values into plugin settings (scope, provider, Apple Books overrides).");
+      }
+    } catch (error) {
+      this.appendLog(`[migration] Legacy config.json migration skipped: ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      this.settings.legacyConfigMigrated = true;
+      await this.saveSettings();
     }
   }
 
   /**
-   * Checkpoint 10B item 1: composes the real `ProductionEngineOptions` this
-   * vault's `ProductionEngine` is constructed with -- real Obsidian
+   * Checkpoint 11: composes the real `ProductionEngineOptions` this vault's
+   * `ProductionEngine` is constructed with -- real Obsidian
    * `Vault`/`Workspace`/`TFile`/`TFolder`, a `NodeOwnedFs` confined to
    * `<pluginDir>/data/production-engine`, this vault's current Ollama-only
-   * embedding config and (Ollama-only, never `openai_compatible`) local
-   * metadata config, explicit Apple Books config/home, and the bounded
-   * readiness probes every capability above is checked against. Returns
-   * `null` only when the desktop filesystem adapter itself is unavailable
-   * (`getRuntimeContext()` throws) -- every other missing/invalid piece of
-   * config degrades a single capability (embedding/metadata/Apple Books)
-   * to `null`/an "unconfigured" probe rather than blocking construction:
-   * Standard Mode must stay usable on a fresh install with no config.json
-   * written yet.
+   * embedding config and Ollama-only local metadata config, explicit Apple
+   * Books config/home, and the bounded readiness probes every capability
+   * above is checked against. Every field comes from `this.settings` (TS
+   * plugin data) plus vault/plugin paths -- no Python `config.json` is ever
+   * read here. Returns `null` only when the desktop filesystem adapter
+   * itself is unavailable (`getRuntimeContext()` throws); every other
+   * missing/blank setting degrades a single capability (embedding/metadata)
+   * to `null`/an "unconfigured" probe rather than blocking construction, so
+   * Standard Mode stays usable on a fresh install with no provider
+   * configured yet.
    */
   private buildProductionEngineOptions(): ProductionEngineOptions | null {
     let context: RuntimeContext;
@@ -2489,37 +1741,31 @@ export default class MindmapPlugin extends Plugin {
     } catch {
       return null;
     }
-    const runtime = this.getResolvedRuntime();
-    const rawConfig = runtime.valid ? this.readBoundedRuntimeConfig(runtime.configPath) : null;
-    const cfg = toProductionRuntimeConfig(rawConfig);
-    const scope = runtime.valid ? this.readProductionScopeFolders(runtime.configPath) : { currentPaths: [], allPaths: [] };
+    const settings = this.settings;
 
-    const embeddingProvider = cfg.embedProvider === "ollama" && cfg.embedBaseUrl && cfg.embedModel
-      ? new OllamaEmbeddingProvider({ baseUrl: cfg.embedBaseUrl, model: cfg.embedModel }, { fetchImpl: requestUrlFetch, sleep: createWindowSleep() })
+    const embeddingProvider = settings.embedBaseUrl.trim() && settings.embedModel.trim()
+      ? new OllamaEmbeddingProvider({ baseUrl: settings.embedBaseUrl.trim(), model: settings.embedModel.trim() }, { fetchImpl: requestUrlFetch, sleep: createWindowSleep() })
       : null;
-    const embeddingModel = embeddingProvider ? (cfg.embedModel ?? null) : null;
-    const embeddingDimension = embeddingModel ? resolveKnownEmbeddingDimension(embeddingModel, cfg.embedDimension) : undefined;
+    const embeddingModel = embeddingProvider ? settings.embedModel.trim() : null;
+    const embeddingDimension = embeddingModel ? resolveKnownEmbeddingDimension(embeddingModel, settings.embedDimension > 0 ? settings.embedDimension : undefined) : undefined;
 
-    // Item 7: STRICT Ollama-only metadata inference -- an `openai_compatible` `llm_provider`
-    // (this vault's own current default, pointing at a local MLX server) is deliberately never
-    // wired here, mirroring `devShadowIntegration.ts`'s identical Ollama-only contract. A vault
-    // configured that way simply has no local metadata provider yet; `process-note` jobs stay
-    // composed but their pump never starts until the user points `llm_provider` at `"ollama"`.
-    const metadataProvider = cfg.llmProvider === "ollama" && cfg.llmBaseUrl
-      ? createOllamaMetadataProvider({ baseUrl: cfg.llmBaseUrl }, { fetchImpl: requestUrlFetch })
+    // Ollama-only local metadata inference -- see `MindmapSettings`'s own doc comment; there is no
+    // remote/OpenAI-compatible provider option in the TypeScript engine.
+    const metadataProvider = settings.llmBaseUrl.trim() && settings.llmModel.trim()
+      ? createOllamaMetadataProvider({ baseUrl: settings.llmBaseUrl.trim() }, { fetchImpl: requestUrlFetch })
       : null;
-    const metadataPipelineConfig = metadataProvider && cfg.llmModel
+    const metadataPipelineConfig = metadataProvider
       ? {
-        model: cfg.llmModel,
-        maxTokens: cfg.llmMaxTokens,
-        tagLimit: cfg.tagLimit,
-        conceptLimit: cfg.conceptLimit,
-        conceptMaxWords: cfg.conceptMaxWords,
-        conceptCaseMode: cfg.conceptCaseMode,
+        model: settings.llmModel.trim(),
+        maxTokens: settings.llmMaxTokens,
+        tagLimit: settings.tagLimit,
+        conceptLimit: settings.conceptLimit,
+        conceptMaxWords: settings.conceptMaxWords,
+        conceptCaseMode: settings.conceptCaseMode,
         controlledTags: [],
-        allowFreeTags: cfg.allowFreeTags,
-        tagMinLen: cfg.tagMinLen,
-        tagMaxWords: cfg.tagMaxWords,
+        allowFreeTags: settings.allowFreeTags,
+        tagMinLen: settings.tagMinLen,
+        tagMaxWords: settings.tagMaxWords,
         tagAliases: {},
       }
       : null;
@@ -2530,10 +1776,15 @@ export default class MindmapPlugin extends Plugin {
     if (embeddingProvider && embeddingModel) {
       probes.ollama = createOllamaEmbeddingReadinessProbe(embeddingProvider, { model: embeddingModel });
     }
-    if (metadataProvider && cfg.llmModel) {
-      probes.localMetadataProvider = createLocalMetadataReadinessProbe(metadataProvider, cfg.llmModel);
+    if (metadataProvider && settings.llmModel.trim()) {
+      probes.localMetadataProvider = createLocalMetadataReadinessProbe(metadataProvider, settings.llmModel.trim());
     }
-    const appleBooksConfig = rawConfig ?? {};
+    const appleBooksConfig: Record<string, unknown> = {
+      apple_books: {
+        annotation_database_path: settings.appleAnnotationDbPath,
+        library_database_path: settings.appleLibraryDbPath,
+      },
+    };
     const appleBooksReaderForProbe = new AppleBooksSqliteReader({
       sqliteProcess: createNodeSqliteProcess(),
       fs: createNodeAppleBooksFsAdapter(),
@@ -2565,21 +1816,21 @@ export default class MindmapPlugin extends Plugin {
       embeddingProvider,
       embeddingModel,
       embeddingDimension,
-      chunkOptions: { targetTokens: cfg.chunkTargetTokens, overlapTokens: cfg.chunkOverlapTokens },
+      chunkOptions: { targetTokens: settings.chunkTargetTokens, overlapTokens: settings.chunkOverlapTokens },
       relatedSelectionConfig: {
-        relatedLimit: cfg.relatedLimit,
-        overreachCount: cfg.relatedOverreach,
-        creativeCount: cfg.relatedCreative,
-        creativeMin: cfg.relatedCreativeMin,
-        creativeMax: cfg.relatedCreativeMax,
-        candidateLimit: cfg.relatedCandidateLimit,
-        minScore: cfg.relatedMinScore,
+        relatedLimit: settings.relatedLimit,
+        overreachCount: settings.relatedOverreach,
+        creativeCount: settings.relatedCreative,
+        creativeMin: settings.relatedCreativeMin,
+        creativeMax: settings.relatedCreativeMax,
+        candidateLimit: settings.relatedCandidateLimit,
+        minScore: settings.relatedMinScore,
       },
       metadataProvider,
       metadataPipelineConfig,
-      scopeFolders: scope.allPaths,
-      currentScopeFolders: scope.currentPaths,
-      minimumWords: cfg.minimumWords,
+      scopeFolders: settings.scopeAllPaths,
+      currentScopeFolders: settings.scopeCurrentPaths,
+      minimumWords: settings.minimumWords,
       configDir: this.app.vault.configDir,
       runtimeFolder: context.pluginDir.startsWith(context.vaultRoot)
         ? path.posix.join(context.configDir, "plugins", this.manifest.id)
@@ -2588,8 +1839,8 @@ export default class MindmapPlugin extends Plugin {
       appleBooks: {
         config: appleBooksConfig,
         homeDirectory: os.homedir(),
-        annotationDbPath: cfg.appleAnnotationDbPath,
-        libraryDbPath: cfg.appleLibraryDbPath,
+        annotationDbPath: settings.appleAnnotationDbPath.trim() || undefined,
+        libraryDbPath: settings.appleLibraryDbPath.trim() || undefined,
       },
       probes,
       onFault: (fault) => {
@@ -2601,14 +1852,6 @@ export default class MindmapPlugin extends Plugin {
   /** Checkpoint 10B LAUNCHAGENT: a stable, bounded lowercase-alphanumeric token (`BackgroundScheduler`'s own `installationId` contract) derived from this vault's absolute root path -- stable across restarts/renames of the PLUGIN, but intentionally changes if the VAULT itself is moved/renamed (a moved vault is a genuinely different filesystem location for `/usr/bin/open` to target). Never a display name. */
   private getBackgroundSchedulerInstallationId(context: RuntimeContext): string {
     return createHash("sha256").update(context.vaultRoot).digest("hex").slice(0, 32);
-  }
-
-  private readProductionScopeFolders(configPath: string): ScopeSelection {
-    try {
-      return readScopeSelection(fs.readFileSync(configPath, "utf8"));
-    } catch {
-      return { currentPaths: [], allPaths: [] };
-    }
   }
 
   /**
@@ -2627,6 +1870,11 @@ export default class MindmapPlugin extends Plugin {
    * as "quietly running Python again."
    */
   private async startProductionEngine(): Promise<void> {
+    if (this.productionEngine) {
+      await this.productionEngine.dispose();
+      this.productionEngine = null;
+    }
+    this.productionEngineFailed = false;
     const options = this.buildProductionEngineOptions();
     if (!options) return;
     try {
@@ -2719,21 +1967,6 @@ export default class MindmapPlugin extends Plugin {
    * disposes its own engine; this method never touches engine internals
    * directly.
    */
-  private getOrCreateDiagOverlay(): DevShadowIntegration {
-    if (this.diagOverlay) return this.diagOverlay;
-    this.diagOverlay = createDevShadowIntegration({
-      pluginDir: this.getRuntimeContext().pluginDir,
-      vault: this.app.vault,
-      registerInterval: (callback, intervalMs) => this.registerInterval(window.setInterval(callback, intervalMs)),
-      appendLog: (message) => this.appendLog(message),
-      notice: (message, durationMs) => { new Notice(message, durationMs); },
-      getResolvedRuntime: () => this.getResolvedRuntime(),
-      canManageConfig: (runtime) => this.canManageConfig(runtime),
-      fetchImpl: requestUrlFetch,
-    });
-    return this.diagOverlay;
-  }
-
 }
 
 type ResearchFileResult =

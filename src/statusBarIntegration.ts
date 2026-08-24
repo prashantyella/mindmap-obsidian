@@ -19,12 +19,8 @@ function formatMigrationMessage(messageCode: string): string {
 }
 
 export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: StatusBarInternalState): StatusBarMenuState {
-  const runtimeSetupState = plugin.getRuntimeSetupState();
   const migrationStatus = plugin.getCachedProductionMigrationStatus();
   return buildStatusBarMenuState({
-    runtimeSetup: runtimeSetupState
-      ? { phase: runtimeSetupState.phase, message: runtimeSetupState.message, canSetup: runtimeSetupState.canSetup, canCancel: runtimeSetupState.canCancel, blocking: runtimeSetupState.blocking }
-      : undefined,
     migration: migrationStatus
       ? {
         phase: migrationStatus.phase,
@@ -47,7 +43,7 @@ export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: Stat
     schedulerDetails: internal.schedulerDetails,
     schedulerEnabled: plugin.settings.schedulerMode === "launchAgent" && process.platform === "darwin",
     weeklyEnabled: plugin.settings.launchAgentWeeklyEnabled,
-    semanticState: plugin.getSemanticStatus().state,
+    semanticState: plugin.productionEngine !== null ? "ready" : "off",
     activeNote: plugin.getActiveNoteEligibility(),
     readingMode: plugin.getReadingHealth().mode,
     readingActivity: plugin.getReadingHealth().activity,
@@ -90,9 +86,6 @@ export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMe
     researchAndReprocessActiveNote: async () => { await plugin.researchActiveNote(true); },
     toggleAutomaticReadingResearch: async () => { await plugin.toggleAutomaticReadingResearch(); },
     retryAutomaticResearch: async () => { await plugin.retryAutomaticResearch(); },
-    startRuntimeSetup: async () => { await plugin.startRuntimeSetup(); },
-    cancelRuntimeSetup: () => { plugin.cancelRuntimeSetup(); },
-    openPythonDownload: () => { plugin.openPythonRuntimeDownloadPage(); },
     startMigration: async () => { await plugin.startProductionMigration(); },
     retryMigration: async () => { await plugin.retryProductionMigration(); },
     cancelMigration: async () => { await plugin.cancelProductionMigration(); },

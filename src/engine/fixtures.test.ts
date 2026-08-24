@@ -2,11 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const FIXTURES_DIR = path.join(REPO_ROOT, "tests", "fixtures", "engine");
-const PYTHON_ORACLE_FILE = path.join(REPO_ROOT, "python", "mindmap.py");
 
 const EXPECTED_FIXTURE_FILES = [
   "frontmatter.json",
@@ -51,27 +49,23 @@ void test("every required Checkpoint 1 fixture file exists and captures at least
   }
 });
 
-void test("every fixture records provenance identifying the exact python/mindmap.py oracle it was captured against", () => {
+/**
+ * Checkpoint 11: `python/mindmap.py` and `tools/parity/generate_fixtures.py`
+ * are deleted along with the rest of the shipped/runtime Python surface --
+ * these fixtures are now a frozen, deterministic historical corpus, never
+ * regenerated or hash-verified against a live oracle file. This test only
+ * checks the recorded provenance SHAPE (still useful as a record of how the
+ * corpus was originally captured), never that the named oracle file exists
+ * or matches current bytes.
+ */
+void test("every fixture records a well-shaped historical provenance record", () => {
   for (const fileName of EXPECTED_FIXTURE_FILES) {
     const fixture = loadFixture(fileName);
     assert.ok(fixture.provenance, `${fileName} is missing a "provenance" field`);
     assert.equal(fixture.provenance.fixtureSchemaVersion, 1, `${fileName} provenance.fixtureSchemaVersion mismatch`);
-    assert.equal(fixture.provenance.pythonOracleFile, "python/mindmap.py", `${fileName} provenance.pythonOracleFile mismatch`);
-    assert.equal(fixture.provenance.generator, "tools/parity/generate_fixtures.py", `${fileName} provenance.generator mismatch`);
+    assert.equal(typeof fixture.provenance.pythonOracleFile, "string");
+    assert.equal(typeof fixture.provenance.generator, "string");
     assert.match(fixture.provenance.pythonOracleSha256, /^[0-9a-f]{64}$/, `${fileName} provenance.pythonOracleSha256 is not a 64-character hex hash`);
-  }
-});
-
-void test("every fixture's recorded pythonOracleSha256 matches the current python/mindmap.py bytes (catches stale, unregenerated fixtures)", () => {
-  // Reads and hashes the oracle file's bytes with node:crypto — this never executes Python.
-  const actualHash = createHash("sha256").update(fs.readFileSync(PYTHON_ORACLE_FILE)).digest("hex");
-  for (const fileName of EXPECTED_FIXTURE_FILES) {
-    const fixture = loadFixture(fileName);
-    assert.equal(
-      fixture.provenance.pythonOracleSha256,
-      actualHash,
-      `${fileName} was generated against a different python/mindmap.py than the one currently in the repo; regenerate the engine fixture corpus via the parity generator script`,
-    );
   }
 });
 

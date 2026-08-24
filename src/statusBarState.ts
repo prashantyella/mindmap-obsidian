@@ -11,14 +11,6 @@ export interface StatusBarSchedulerDetail {
   lastSuccessfulRunAt: number | null;
 }
 
-export interface StatusBarRuntimeSetupState {
-  phase: string;
-  message: string;
-  canSetup: boolean;
-  canCancel: boolean;
-  blocking: boolean;
-}
-
 /** Checkpoint 10B item 3: the TypeScript engine's migration status, surfaced through the SAME existing status bar menu (never a new UI surface) -- `undefined` when the production engine itself is unavailable. */
 export interface StatusBarMigrationState {
   phase: string;
@@ -31,7 +23,6 @@ export interface StatusBarMigrationState {
 }
 
 export interface StatusBarMenuState {
-  runtimeSetup?: StatusBarRuntimeSetupState;
   migration?: StatusBarMigrationState;
   pendingAvailable: boolean;
   currentPending: number;
@@ -64,7 +55,6 @@ export interface StatusBarMenuState {
 }
 
 export interface StatusBarStateInput {
-  runtimeSetup?: StatusBarRuntimeSetupState;
   migration?: StatusBarMigrationState;
   pending: {
     available: boolean;
@@ -138,7 +128,6 @@ export function buildStatusBarMenuState(input: StatusBarStateInput): StatusBarMe
     lastSuccessfulRunAt: details.get(label)?.lastSuccessfulRunAt ?? null,
   });
   return {
-    runtimeSetup: input.runtimeSetup,
     migration: input.migration,
     pendingAvailable: input.pending.available,
     currentPending: input.pending.current.total,
@@ -193,9 +182,6 @@ export interface StatusBarMenuActions {
   researchAndReprocessActiveNote(): void | Promise<void>;
   toggleAutomaticReadingResearch(): void | Promise<void>;
   retryAutomaticResearch(): void | Promise<void>;
-  startRuntimeSetup(): void | Promise<void>;
-  cancelRuntimeSetup(): void | Promise<void>;
-  openPythonDownload(): void | Promise<void>;
   startMigration(): void | Promise<void>;
   retryMigration(): void | Promise<void>;
   cancelMigration(): void | Promise<void>;
@@ -214,19 +200,14 @@ export interface StatusBarPresentation {
 
 const ACTIONABLE_HEALTH = new Set<LaunchAgentHealth>(["overdue", "failing"]);
 
-const RUNTIME_SETUP_ACTIONABLE_PHASES = new Set(["setup-required", "unavailable", "failed"]);
-const RUNTIME_SETUP_BUSY_PHASES = new Set(["discovering", "confirming", "creating", "installing", "verifying"]);
-
 export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBarPresentation {
   const schedulerActionable = state.schedulerHealth !== null && ACTIONABLE_HEALTH.has(state.schedulerHealth);
   const readingActionable = state.readingMode === "reading" && (state.readingActivity === "error" || Boolean(state.readingError));
   const automaticPaused = state.webResearchMode === "automatic-reading" && state.automaticResearchPauseReason !== null;
   const webResearchActionable = state.webResearchActivity === "error" || Boolean(state.webResearchError) || automaticPaused;
   const researchBusy = ["deriving", "searching", "writing"].includes(state.webResearchActivity);
-  const runtimeSetupActionable = state.runtimeSetup !== undefined && RUNTIME_SETUP_ACTIONABLE_PHASES.has(state.runtimeSetup.phase);
-  const runtimeSetupBusy = state.runtimeSetup !== undefined && RUNTIME_SETUP_BUSY_PHASES.has(state.runtimeSetup.phase);
-  const busy = state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy || runtimeSetupBusy;
-  const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable || webResearchActionable || runtimeSetupActionable;
+  const busy = state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy;
+  const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable || webResearchActionable;
   const label = state.readingMode === "reading"
     ? state.readingActivity === "syncing" || state.readingActivity === "processing"
       ? `Reading · ${state.readingActivity}`
@@ -240,13 +221,7 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
       : state.pendingAvailable
         ? `Mindmap · ${state.currentPending}`
         : "Mindmap · —";
-  const attention = runtimeSetupActionable
-    ? state.runtimeSetup!.phase === "unavailable"
-      ? "Python not found"
-      : state.runtimeSetup!.phase === "failed"
-        ? "runtime setup failed"
-        : "runtime setup required"
-    : state.preflightOk === false
+  const attention = state.preflightOk === false
     ? "preflight failed"
     : !state.scopeReady
       ? "scope setup required"
@@ -289,18 +264,16 @@ export interface StatusBarMenuItemDescriptor {
 }
 
 /**
- * At most one row: the highest-priority recoverable issue that isn't
- * already covered by the runtime-setup block (which takes precedence and
- * gets its own richer, multi-row treatment below). Healthy states never
- * add a row here.
+ * At most one row: the highest-priority recoverable issue. Healthy states
+ * never add a row here.
  */
-function buildTopRecoveryRow(state: StatusBarMenuState, blocking: boolean): StatusBarMenuItemDescriptor | null {
+function buildTopRecoveryRow(state: StatusBarMenuState): StatusBarMenuItemDescriptor | null {
   if (state.preflightOk === false) {
     return {
-      title: "Run preflight (failed)" + (blocking ? " (runtime setup required)" : ""),
+      title: "Run preflight (failed)",
       icon: "triangle-alert",
       action: "runPreflight",
-      disabled: blocking,
+      disabled: false,
     };
   }
   const readingActionable = state.readingMode === "reading" && (state.readingActivity === "error" || Boolean(state.readingError));
@@ -329,8 +302,6 @@ function buildTopRecoveryRow(state: StatusBarMenuState, blocking: boolean): Stat
 }
 
 export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMenuItemDescriptor[] {
-  const blocking = state.runtimeSetup?.blocking ?? false;
-  const setupRequiredSuffix = " (runtime setup required)";
   const researchBusy = ["deriving", "searching", "writing"].includes(state.webResearchActivity);
   const automaticActive = state.webResearchMode === "automatic-reading";
   const automaticTransientPause = automaticActive && state.automaticResearchPauseReason !== null && state.automaticResearchPauseReason !== "daily-limit";
@@ -341,34 +312,8 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       : state.readingMode !== "reading"
         ? "Automatic research is waiting for Reading Mode."
         : null;
-  const runtimeSetup = state.runtimeSetup;
-  // Healthy runtime ("ready") and inapplicable runtime never add a row here;
-  // every other phase (setup-required/unavailable/failed/cancelled/busy)
-  // keeps its existing richer, multi-row treatment.
-  const runtimeSetupShown = runtimeSetup !== undefined && runtimeSetup.phase !== "not-applicable" && runtimeSetup.phase !== "ready";
-  const runtimeSetupItems: StatusBarMenuItemDescriptor[] = runtimeSetupShown && runtimeSetup
-    ? [
-      { title: "Runtime setup", label: true },
-      {
-        title: `Runtime: ${runtimeSetup.message}`,
-        icon: RUNTIME_SETUP_BUSY_PHASES.has(runtimeSetup.phase) ? "loader-circle" : "triangle-alert",
-        disabled: true,
-      },
-      ...(runtimeSetup.canCancel ? [{ title: "Cancel runtime setup", icon: "x" as IconName, action: "cancelRuntimeSetup" as const }] : []),
-      ...(runtimeSetup.canSetup ? [{
-        title: runtimeSetup.phase === "failed" || runtimeSetup.phase === "cancelled" ? "Retry Mindmap runtime setup" : "Set up Mindmap runtime",
-        icon: "download" as IconName,
-        action: "startRuntimeSetup" as const,
-      }] : []),
-      ...(runtimeSetup.phase === "unavailable" ? [{
-        title: "Open official Python download page",
-        icon: "external-link" as IconName,
-        action: "openPythonDownload" as const,
-      }] : []),
-    ]
-    : [];
 
-  const topRecoveryRow = runtimeSetupShown ? null : buildTopRecoveryRow(state, blocking);
+  const topRecoveryRow = buildTopRecoveryRow(state);
 
   // Item 3 (Checkpoint 10B): shown only once a migration record actually exists for this vault
   // (`state.migration` is `undefined` when the production engine itself is unavailable). A
@@ -386,7 +331,6 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     : [];
 
   const items: StatusBarMenuItemDescriptor[] = [
-    ...runtimeSetupItems,
     ...migrationItems,
     ...(topRecoveryRow ? [topRecoveryRow] : []),
     { title: "Mode", label: true },
@@ -406,31 +350,31 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     },
     { title: "Run", label: true },
     ...(state.activeNote.eligible ? [{
-      title: (state.running ? "Run active note (Mindmap is already running.)" : "Run Mindmap for active note") + (blocking ? setupRequiredSuffix : ""),
+      title: state.running ? "Run active note (Mindmap is already running.)" : "Run Mindmap for active note",
       icon: "file-play" as IconName,
-      disabled: state.running || researchBusy || !state.scopeReady || blocking,
+      disabled: state.running || researchBusy || !state.scopeReady,
       action: state.running ? undefined : "runActiveNote" as const,
     }] : []),
     {
-      title: (state.running ? `Run current scope${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope") + (blocking ? setupRequiredSuffix : ""),
+      title: state.running ? `Run current scope${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope",
       icon: state.running ? "loader-circle" : "play",
-      disabled: state.running || researchBusy || !state.scopeReady || blocking,
+      disabled: state.running || researchBusy || !state.scopeReady,
       action: state.running ? undefined : "runCurrent",
     },
     ...(state.pendingAvailable && state.allPending > 0 ? [{
-      title: `Process pending notes (${state.allPending})` + (blocking ? setupRequiredSuffix : ""),
+      title: `Process pending notes (${state.allPending})`,
       icon: "list-checks" as IconName,
-      disabled: state.running || researchBusy || !state.scopeReady || blocking,
+      disabled: state.running || researchBusy || !state.scopeReady,
       action: "runAll" as const,
     }] : []),
     ...(state.readingMode === "reading" ? [
       { title: "Reading", label: true },
       { title: "Sync Reading now", icon: "refresh-cw" as IconName, action: "syncReadingMode" as const, disabled: state.readingActivity === "syncing" || state.readingActivity === "processing" },
       ...(state.readingPending > 0 ? [{
-        title: blocking ? "Process Reading backlog (runtime setup required)" : `Process Reading backlog (${state.readingPending})`,
+        title: `Process Reading backlog (${state.readingPending})`,
         icon: "list-checks" as IconName,
         action: "processReadingBacklog" as const,
-        disabled: state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy || blocking,
+        disabled: state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy,
       }] : []),
     ] : []),
     { title: "Research", label: true },
@@ -442,12 +386,11 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       action: automaticActive ? undefined : "toggleWebResearchMode",
     },
     {
-      title: "Automatic for Reading" + (!automaticActive && blocking ? setupRequiredSuffix : ""),
+      title: "Automatic for Reading",
       icon: "sparkles",
       checked: automaticActive,
       action: "toggleAutomaticReadingResearch",
-      // Pausing (already active -> off) is always allowed; only *starting* automatic work is gated on runtime readiness.
-      disabled: researchBusy || (!automaticActive && (state.readingMode !== "reading" || blocking)),
+      disabled: researchBusy || (!automaticActive && state.readingMode !== "reading"),
     },
     // Automatic-mode pauses/errors are only ever represented here, never
     // repeated in the top recovery row, so an actionable automatic issue
@@ -457,7 +400,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       { title: `Automatic research: ${state.automaticResearchAttempted}/10 today · max 5/sync`, disabled: true },
       ...(automaticPausedCopy ? [{ title: automaticPausedCopy, icon: "triangle-alert" as IconName, disabled: true }] : []),
       ...(state.automaticResearchLastError ? [{ title: `Automatic research: ${state.automaticResearchLastError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
-      ...(automaticTransientPause ? [{ title: `Retry automatic research${blocking ? setupRequiredSuffix : ""}`, icon: "refresh-cw" as IconName, action: "retryAutomaticResearch" as const, disabled: researchBusy || state.readingMode !== "reading" || blocking }] : []),
+      ...(automaticTransientPause ? [{ title: "Retry automatic research", icon: "refresh-cw" as IconName, action: "retryAutomaticResearch" as const, disabled: researchBusy || state.readingMode !== "reading" }] : []),
     ] : []),
     { title: "Navigation", label: true },
     { title: "Open Mindmap", icon: "orbit", action: "openMindmap" },

@@ -80,6 +80,20 @@ void test("NodeOwnedFs mkdir is idempotent and creates missing parents", async (
   }
 });
 
+void test("NodeOwnedFs creates a fresh owned root beneath an existing trusted parent", async () => {
+  const parent = await makeTempRoot();
+  const root = path.join(parent, "plugin-data", "production-engine");
+  try {
+    const adapter = new NodeOwnedFs(root);
+    const jobs = path.join(root, "jobs");
+    await adapter.mkdir(jobs);
+    await adapter.writeFile(path.join(jobs, "queue.json"), "{}");
+    assert.equal(await adapter.readFile(path.join(jobs, "queue.json")), "{}");
+  } finally {
+    await fs.promises.rm(parent, { recursive: true, force: true });
+  }
+});
+
 void test("NodeOwnedFs rmdir rejects a non-empty directory and succeeds once emptied", async () => {
   const root = await makeTempRoot();
   try {

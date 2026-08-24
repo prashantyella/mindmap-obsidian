@@ -1,8 +1,8 @@
 {
   "name": "mindmap-ai",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "Standalone Obsidian plugin repo for the Mindmap Python-powered workflow.",
+  "description": "Standalone Obsidian plugin repo for the Mindmap TypeScript-powered workflow.",
   "license": "MIT",
   "scripts": {
     "build": "node esbuild.config.mjs production",
