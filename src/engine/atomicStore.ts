@@ -36,16 +36,17 @@ export interface AtomicStoreOptions<T> {
 }
 
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
-const TEMP_PREFIX = ".atomic-tmp-";
+/** Exported so a sibling atomic primitive for a different payload shape (e.g. `AtomicBinaryStore`, for raw bytes rather than JSON) can use the exact same temp-file naming convention -- `cleanupStaleTempFiles`-style sweeps and fault-injection tests then never need to know which primitive produced a given leftover temp file. */
+export const TEMP_PREFIX = ".atomic-tmp-";
 
-function joinRelative(root: string, relativePath: string): string {
+export function joinRelative(root: string, relativePath: string): string {
   const normalizedRoot = root.replace(/\/+$/, "");
   const normalizedRelative = relativePath.replace(/^\/+/, "");
   return `${normalizedRoot}/${normalizedRelative}`;
 }
 
 /** Splits a validated, already-normalized (`/`-separated) relative path into its directory portion (`""` when there is none) and final basename. */
-function splitDirAndBase(relativePath: string): { dir: string; base: string } {
+export function splitDirAndBase(relativePath: string): { dir: string; base: string } {
   const normalized = relativePath.replace(/\\/g, "/");
   const index = normalized.lastIndexOf("/");
   if (index === -1) return { dir: "", base: normalized };
@@ -53,7 +54,7 @@ function splitDirAndBase(relativePath: string): { dir: string; base: string } {
 }
 
 /** Rejects any relative path that would resolve outside `root` -- no `..` segment, no absolute/drive-letter/UNC form, no NUL/control byte. */
-function validateOwnedRelativePath(relativePath: string, root: string, context: string): void {
+export function validateOwnedRelativePath(relativePath: string, root: string, context: string): void {
   if (relativePath.trim() === "") {
     throw new EngineError("STORE_PATH_INVALID", `${context} path must not be empty.`, { root });
   }

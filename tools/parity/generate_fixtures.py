@@ -196,6 +196,20 @@ def normalization_fixture():
         "case_mode": "title",
         "output": mindmap.normalize_concepts(concepts_input, limit=3, max_words=4, case_mode="title"),
     })
+    # `str.title()` resets its capitalize/lowercase state on ANY non-cased
+    # character (hyphen, apostrophe, underscore, digit), not just
+    # whitespace -- this case is chosen to make that hyphen/apostrophe/
+    # digit-boundary behavior visible so a TypeScript reimplementation that
+    # only capitalizes after whitespace cannot pass it.
+    title_case_input = ["state-of-the-art system", "o'brien's theory", "3d-printing basics", "well_known concept"]
+    cases.append({
+        "name": "normalize_concepts title case matches Python str.title() word-boundary rules (hyphen/apostrophe/digit, not whitespace-only)",
+        "input": title_case_input,
+        "limit": 10,
+        "max_words": 10,
+        "case_mode": "title",
+        "output": mindmap.normalize_concepts(title_case_input, limit=10, max_words=10, case_mode="title"),
+    })
     tags_input = ["machinelearning", "ml", "unrelatedtag"]
     controlled = ["machine-learning", "artificial-intelligence"]
     cases.append({

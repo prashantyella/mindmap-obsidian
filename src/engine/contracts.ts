@@ -188,6 +188,10 @@ function assertIsoTimestamp(value: unknown, field: string, contractName: string)
  * and a `"path"` identity rejects an `appleAnnotationId` field outright
  * rather than ignoring it.
  */
+export function parseNoteIdentityV1(value: unknown, contractName = "NoteIdentityV1"): NoteIdentityV1 {
+  return parseNoteIdentity(value, contractName);
+}
+
 function parseNoteIdentity(value: unknown, contractName: string): NoteIdentityV1 {
   const label = `${contractName}.identity`;
   assertPlainObject(value, label);
@@ -497,12 +501,20 @@ function canonicalJobTargetValue(target: JobTargetV1): Record<string, unknown> {
 }
 
 /**
- * Deterministic idempotency key covering the full canonical target: same
- * trigger + kind + target (note identity, scope id, or global) + pipeline
- * version + (for note jobs) source hash + embedding model always coalesce
- * to the same key, so duplicate manual/Reading/scheduled/startup triggers
- * for identical work collapse into one queue entry -- including duplicate
- * scope/global jobs, which a note-identity-only key could never express.
+ * Deterministic idempotency key covering the full canonical WORK identity:
+ * kind + target (note identity, scope id, or global) + pipeline version +
+ * (for note jobs) source hash + embedding model always coalesce to the same
+ * key -- including duplicate scope/global jobs, which a note-identity-only
+ * key could never express.
+ *
+ * `trigger` is deliberately EXCLUDED from this key: it is provenance (what
+ * caused the job to be enqueued), not work identity. A manual submit, a
+ * Reading-triggered submit, a scheduled tick, and a startup catch-up job
+ * that all describe the exact same unit of work (same kind/target/pipeline
+ * version/source hash/embedding model) MUST coalesce into the same queue
+ * entry regardless of which origin asked for it first -- only the first
+ * trigger observed is kept, as provenance, on the resulting job. See
+ * `JobEngine.submit` / `JobStore.appendOrCoalesce`.
  *
  * The input is a fixed-shape JSON object with explicit named fields
  * (`JSON.stringify` on an object literal serializes its own keys in a
@@ -512,7 +524,6 @@ function canonicalJobTargetValue(target: JobTargetV1): Record<string, unknown> {
  * the rest) can forge a collision by injecting a would-be separator.
  */
 export function computeJobIdempotencyKey(
-  trigger: JobTrigger,
   kind: JobKind,
   target: JobTargetV1,
   pipelineVersion: number,
@@ -520,7 +531,6 @@ export function computeJobIdempotencyKey(
   embeddingModel?: string,
 ): string {
   const canonical = {
-    trigger,
     kind,
     target: canonicalJobTargetValue(target),
     pipelineVersion,
@@ -612,7 +622,7 @@ export function parseQueueJobV1(value: unknown): QueueJobV1 {
   assertIsoTimestamp(value.createdAt, "createdAt", contractName);
   assertIsoTimestamp(value.updatedAt, "updatedAt", contractName);
 
-  const expectedKey = computeJobIdempotencyKey(trigger, kind, target, value.pipelineVersion, sourceHash, embeddingModel);
+  const expectedKey = computeJobIdempotencyKey(kind, target, value.pipelineVersion, sourceHash, embeddingModel);
   if (idempotencyKey !== expectedKey) {
     throw new EngineError("CONTRACT_SHAPE_INVALID", `${contractName}.idempotencyKey does not match its derived value.`, { contractName });
   }

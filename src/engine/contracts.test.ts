@@ -284,38 +284,43 @@ const NOTE_TARGET: JobTargetV1 = { schemaVersion: 1, kind: "note", identity: sta
 const SCOPE_TARGET: JobTargetV1 = { schemaVersion: 1, kind: "scope", scopeId: "reading" };
 const GLOBAL_TARGET: JobTargetV1 = { schemaVersion: 1, kind: "global" };
 
-void test("computeJobIdempotencyKey is deterministic and distinguishes trigger/kind/target/pipelineVersion/hash/model", () => {
-  const key1 = computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 1, HASH_A, "model-a");
-  const key2 = computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 1, HASH_A, "model-a");
+void test("computeJobIdempotencyKey is deterministic and distinguishes kind/target/pipelineVersion/hash/model, but NOT trigger", () => {
+  const key1 = computeJobIdempotencyKey("process-note", NOTE_TARGET, 1, HASH_A, "model-a");
+  const key2 = computeJobIdempotencyKey("process-note", NOTE_TARGET, 1, HASH_A, "model-a");
   assert.equal(key1, key2);
 
-  const otherTrigger = computeJobIdempotencyKey("scheduled", "process-note", NOTE_TARGET, 1, HASH_A, "model-a");
-  const otherTarget = computeJobIdempotencyKey("manual", "process-note", { schemaVersion: 1, kind: "note", identity: stableNoteIdentity(canonicalizePath("Notes/Other.md")) }, 1, HASH_A, "model-a");
-  const otherHash = computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 1, HASH_B, "model-a");
-  const otherModel = computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 1, HASH_A, "model-b");
-  const otherVersion = computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 2, HASH_A, "model-a");
-  const scopeJob = computeJobIdempotencyKey("reading", "reading-sync", SCOPE_TARGET, 1);
-  const globalJob = computeJobIdempotencyKey("manual", "rebuild-index", GLOBAL_TARGET, 1);
-  const distinctKeys = new Set([key1, otherTrigger, otherTarget, otherHash, otherModel, otherVersion, scopeJob, globalJob]);
-  assert.equal(distinctKeys.size, 8);
+  const otherTarget = computeJobIdempotencyKey("process-note", { schemaVersion: 1, kind: "note", identity: stableNoteIdentity(canonicalizePath("Notes/Other.md")) }, 1, HASH_A, "model-a");
+  const otherHash = computeJobIdempotencyKey("process-note", NOTE_TARGET, 1, HASH_B, "model-a");
+  const otherModel = computeJobIdempotencyKey("process-note", NOTE_TARGET, 1, HASH_A, "model-b");
+  const otherVersion = computeJobIdempotencyKey("process-note", NOTE_TARGET, 2, HASH_A, "model-a");
+  const scopeJob = computeJobIdempotencyKey("reading-sync", SCOPE_TARGET, 1);
+  const globalJob = computeJobIdempotencyKey("rebuild-index", GLOBAL_TARGET, 1);
+  const distinctKeys = new Set([key1, otherTarget, otherHash, otherModel, otherVersion, scopeJob, globalJob]);
+  assert.equal(distinctKeys.size, 7);
 
-  const scopeSync = computeJobIdempotencyKey("manual", "reading-sync", SCOPE_TARGET, 1);
-  const scopeRefresh = computeJobIdempotencyKey("manual", "scope-refresh", SCOPE_TARGET, 1);
-  assert.notEqual(scopeSync, scopeRefresh, "computeJobIdempotencyKey must distinguish kind even when trigger/target/pipelineVersion match");
+  // Trigger is provenance only, never part of work identity: every trigger that can legally
+  // produce this exact kind/target/version/hash/model combination must coalesce to the same key.
+  assert.equal(computeJobIdempotencyKey("process-note", NOTE_TARGET, 1, HASH_A, "model-a"), key1);
+
+  // scopeJob/globalJob above differ in target kind too, so they don't isolate "kind" alone;
+  // this pins kind as distinguishing even when trigger/target/pipelineVersion all match.
+  const scopeSync = computeJobIdempotencyKey("reading-sync", SCOPE_TARGET, 1);
+  const scopeRefresh = computeJobIdempotencyKey("scope-refresh", SCOPE_TARGET, 1);
+  assert.notEqual(scopeSync, scopeRefresh, "computeJobIdempotencyKey must distinguish kind even when target/pipelineVersion match");
 });
 
 void test("computeJobIdempotencyKey distinguishes two different scope ids and note-vs-scope targets with the same trailing text", () => {
-  const scopeA = computeJobIdempotencyKey("reading", "reading-sync", { schemaVersion: 1, kind: "scope", scopeId: "reading" }, 1);
-  const scopeB = computeJobIdempotencyKey("reading", "reading-sync", { schemaVersion: 1, kind: "scope", scopeId: "reading-two" }, 1);
+  const scopeA = computeJobIdempotencyKey("reading-sync", { schemaVersion: 1, kind: "scope", scopeId: "reading" }, 1);
+  const scopeB = computeJobIdempotencyKey("reading-sync", { schemaVersion: 1, kind: "scope", scopeId: "reading-two" }, 1);
   assert.notEqual(scopeA, scopeB);
 
   const noteTarget: JobTargetV1 = { schemaVersion: 1, kind: "note", identity: stableNoteIdentity(canonicalizePath("reading")) };
-  const notePathKey = computeJobIdempotencyKey("manual", "process-note", noteTarget, 1, HASH_A, "model-a");
-  assert.notEqual(notePathKey, computeJobIdempotencyKey("manual", "process-note", { schemaVersion: 1, kind: "note", identity: stableNoteIdentity(canonicalizePath("Notes/Example.md")) }, 1, HASH_A, "model-a"));
+  const notePathKey = computeJobIdempotencyKey("process-note", noteTarget, 1, HASH_A, "model-a");
+  assert.notEqual(notePathKey, computeJobIdempotencyKey("process-note", { schemaVersion: 1, kind: "note", identity: stableNoteIdentity(canonicalizePath("Notes/Example.md")) }, 1, HASH_A, "model-a"));
 });
 
 function validNoteJob(): Record<string, unknown> {
-  const idempotencyKey = computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 1, HASH_A, "model-a");
+  const idempotencyKey = computeJobIdempotencyKey("process-note", NOTE_TARGET, 1, HASH_A, "model-a");
   return {
     schemaVersion: 1,
     jobId: "job-1",
@@ -339,7 +344,7 @@ void test("parseQueueJobV1 accepts a well-formed process-note job whose idempote
 });
 
 void test("parseQueueJobV1 accepts a well-formed scope job with no sourceHash/embeddingModel", () => {
-  const idempotencyKey = computeJobIdempotencyKey("reading", "reading-sync", SCOPE_TARGET, 1);
+  const idempotencyKey = computeJobIdempotencyKey("reading-sync", SCOPE_TARGET, 1);
   const parsed = parseQueueJobV1({
     schemaVersion: 1,
     jobId: "job-2",
@@ -358,7 +363,7 @@ void test("parseQueueJobV1 accepts a well-formed scope job with no sourceHash/em
 });
 
 void test("parseQueueJobV1 accepts a well-formed global job", () => {
-  const idempotencyKey = computeJobIdempotencyKey("manual", "rebuild-index", GLOBAL_TARGET, 1);
+  const idempotencyKey = computeJobIdempotencyKey("rebuild-index", GLOBAL_TARGET, 1);
   const parsed = parseQueueJobV1({
     schemaVersion: 1,
     jobId: "job-3",
@@ -389,7 +394,7 @@ void test("parseQueueJobV1 rejects process-note paired with a scope or global ta
 });
 
 void test("parseQueueJobV1 rejects rebuild-index/reading-sync paired with a note target", () => {
-  const idempotencyKey = computeJobIdempotencyKey("manual", "rebuild-index", NOTE_TARGET, 1);
+  const idempotencyKey = computeJobIdempotencyKey("rebuild-index", NOTE_TARGET, 1);
   const rebuildWithNoteTarget = {
     schemaVersion: 1,
     jobId: "job-4",
@@ -413,7 +418,7 @@ void test("parseQueueJobV1 rejects a process-note job missing sourceHash/embeddi
 });
 
 void test("parseQueueJobV1 rejects a non-process-note job carrying sourceHash/embeddingModel", () => {
-  const idempotencyKey = computeJobIdempotencyKey("reading", "reading-sync", SCOPE_TARGET, 1);
+  const idempotencyKey = computeJobIdempotencyKey("reading-sync", SCOPE_TARGET, 1);
   const value = {
     schemaVersion: 1,
     jobId: "job-5",
@@ -432,7 +437,7 @@ void test("parseQueueJobV1 rejects a non-process-note job carrying sourceHash/em
 
 void test("parseQueueJobV1 rejects a non-positive or fractional pipelineVersion", () => {
   assert.throws(
-    () => parseQueueJobV1({ ...validNoteJob(), pipelineVersion: 0, idempotencyKey: computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 0, HASH_A, "model-a") }),
+    () => parseQueueJobV1({ ...validNoteJob(), pipelineVersion: 0, idempotencyKey: computeJobIdempotencyKey("process-note", NOTE_TARGET, 0, HASH_A, "model-a") }),
     (error: unknown) => isEngineError(error) && error.code === "CONTRACT_SHAPE_INVALID",
   );
   assert.throws(
@@ -502,7 +507,7 @@ void test("JobTrigger no longer accepts \"rebuild\"/\"migration\": those are job
 });
 
 void test("parseQueueJobV1 accepts the \"startup\" trigger for the at-most-one catch-up job", () => {
-  const idempotencyKey = computeJobIdempotencyKey("startup", "process-note", NOTE_TARGET, 1, HASH_A, "model-a");
+  const idempotencyKey = computeJobIdempotencyKey("process-note", NOTE_TARGET, 1, HASH_A, "model-a");
   const parsed = parseQueueJobV1({ ...validNoteJob(), trigger: "startup", idempotencyKey });
   assert.equal(parsed.trigger, "startup");
 });
@@ -526,7 +531,7 @@ void test("JOB_KIND_PHASES keeps the note-only pipeline phases exclusive to proc
 
 void test("parseQueueJobV1 accepts a reading-sync job resuming from its import/enqueue phases", () => {
   for (const phase of ["discover", "import", "enqueue", "complete"] as const) {
-    const idempotencyKey = computeJobIdempotencyKey("reading", "reading-sync", SCOPE_TARGET, 1);
+    const idempotencyKey = computeJobIdempotencyKey("reading-sync", SCOPE_TARGET, 1);
     const parsed = parseQueueJobV1({
       schemaVersion: 1,
       jobId: "job-reading-phase",
@@ -545,7 +550,7 @@ void test("parseQueueJobV1 accepts a reading-sync job resuming from its import/e
 
 void test("parseQueueJobV1 accepts a rebuild-index job resuming from its build/verify/activate-generation phases", () => {
   for (const phase of ["discover", "build-generation", "verify-generation", "activate-generation", "complete"] as const) {
-    const idempotencyKey = computeJobIdempotencyKey("manual", "rebuild-index", GLOBAL_TARGET, 1);
+    const idempotencyKey = computeJobIdempotencyKey("rebuild-index", GLOBAL_TARGET, 1);
     const parsed = parseQueueJobV1({
       schemaVersion: 1,
       jobId: "job-rebuild-phase",
@@ -577,7 +582,7 @@ void test("JOB_TRIGGER_KINDS restricts the reading trigger away from rebuild-ind
 });
 
 void test("parseQueueJobV1 rejects a scheduled trigger producing migrate-index", () => {
-  const idempotencyKey = computeJobIdempotencyKey("scheduled", "migrate-index", GLOBAL_TARGET, 1);
+  const idempotencyKey = computeJobIdempotencyKey("migrate-index", GLOBAL_TARGET, 1);
   assert.throws(
     () => parseQueueJobV1({
       schemaVersion: 1,
@@ -596,7 +601,7 @@ void test("parseQueueJobV1 rejects a scheduled trigger producing migrate-index",
 });
 
 void test("parseQueueJobV1 rejects a reading trigger producing rebuild-index", () => {
-  const idempotencyKey = computeJobIdempotencyKey("reading", "rebuild-index", GLOBAL_TARGET, 1);
+  const idempotencyKey = computeJobIdempotencyKey("rebuild-index", GLOBAL_TARGET, 1);
   assert.throws(
     () => parseQueueJobV1({
       schemaVersion: 1,
@@ -615,7 +620,7 @@ void test("parseQueueJobV1 rejects a reading trigger producing rebuild-index", (
 });
 
 void test("parseQueueJobV1 accepts a manual trigger producing migrate-index (an explicit legitimate flow)", () => {
-  const idempotencyKey = computeJobIdempotencyKey("manual", "migrate-index", GLOBAL_TARGET, 1);
+  const idempotencyKey = computeJobIdempotencyKey("migrate-index", GLOBAL_TARGET, 1);
   const parsed = parseQueueJobV1({
     schemaVersion: 1,
     jobId: "job-valid-migration",
@@ -632,7 +637,7 @@ void test("parseQueueJobV1 accepts a manual trigger producing migrate-index (an 
 });
 
 void test("parseQueueJobV1 accepts a scheduled trigger producing rebuild-index (a legitimate weekly-rebuild flow)", () => {
-  const idempotencyKey = computeJobIdempotencyKey("scheduled", "rebuild-index", GLOBAL_TARGET, 1);
+  const idempotencyKey = computeJobIdempotencyKey("rebuild-index", GLOBAL_TARGET, 1);
   const parsed = parseQueueJobV1({
     schemaVersion: 1,
     jobId: "job-valid-scheduled-rebuild",
@@ -649,7 +654,7 @@ void test("parseQueueJobV1 accepts a scheduled trigger producing rebuild-index (
 });
 
 void test("parseQueueJobV1 rejects a scope/global-kind job carrying a note-pipeline phase like write-note or extract-metadata", () => {
-  const idempotencyKeyForWriteNote = computeJobIdempotencyKey("reading", "reading-sync", SCOPE_TARGET, 1);
+  const idempotencyKeyForWriteNote = computeJobIdempotencyKey("reading-sync", SCOPE_TARGET, 1);
   assert.throws(
     () => parseQueueJobV1({
       schemaVersion: 1,
@@ -666,7 +671,7 @@ void test("parseQueueJobV1 rejects a scope/global-kind job carrying a note-pipel
     (error: unknown) => isEngineError(error) && error.code === "CONTRACT_SHAPE_INVALID",
   );
 
-  const idempotencyKeyForExtractMetadata = computeJobIdempotencyKey("manual", "rebuild-index", GLOBAL_TARGET, 1);
+  const idempotencyKeyForExtractMetadata = computeJobIdempotencyKey("rebuild-index", GLOBAL_TARGET, 1);
   assert.throws(
     () => parseQueueJobV1({
       schemaVersion: 1,
@@ -686,7 +691,7 @@ void test("parseQueueJobV1 rejects a scope/global-kind job carrying a note-pipel
 
 void test("parseQueueJobV1 accepts process-note jobs at every phase in its own pipeline", () => {
   for (const phase of JOB_KIND_PHASES["process-note"]) {
-    const idempotencyKey = computeJobIdempotencyKey("manual", "process-note", NOTE_TARGET, 1, HASH_A, "model-a");
+    const idempotencyKey = computeJobIdempotencyKey("process-note", NOTE_TARGET, 1, HASH_A, "model-a");
     const parsed = parseQueueJobV1({ ...validNoteJob(), phase, idempotencyKey });
     assert.equal(parsed.phase, phase);
   }
@@ -697,8 +702,8 @@ void test("computeJobIdempotencyKey cannot be forged by injecting a would-be sep
   // differently-shaped target. The structured JSON serialization used here rejects control
   // characters in scopeId outright (via assertIdentifier), and even a printable near-miss like
   // this one does not collide because JSON string-escapes every field independently.
-  const keyA = computeJobIdempotencyKey("reading", "reading-sync", { schemaVersion: 1, kind: "scope", scopeId: "reading" }, 1);
-  const keyB = computeJobIdempotencyKey("reading", "reading-sync", { schemaVersion: 1, kind: "scope", scopeId: "reading\",\"extra\":\"x" }, 1);
+  const keyA = computeJobIdempotencyKey("reading-sync", { schemaVersion: 1, kind: "scope", scopeId: "reading" }, 1);
+  const keyB = computeJobIdempotencyKey("reading-sync", { schemaVersion: 1, kind: "scope", scopeId: "reading\",\"extra\":\"x" }, 1);
   assert.notEqual(keyA, keyB);
 });
 
