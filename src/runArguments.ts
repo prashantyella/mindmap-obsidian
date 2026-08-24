@@ -32,15 +32,27 @@ const NOTE_INCOMPATIBLE_FLAGS = new Set([
   "--limit",
 ]);
 
-export function assertSafeNoteArgument(value: string): void {
-  const normalized = value.replace(/\\/g, "/");
-  if (!value.trim() || normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("//")) {
+/**
+ * `configDir` is the real, possibly-user-renamed Obsidian configuration
+ * folder (Vault#configDir), threaded in by every call site that has
+ * plugin/app context. It is required (not optional/defaulted) so a caller
+ * can never silently skip this check by omission.
+ */
+export function assertSafeNoteArgument(value: string, configDir: string): void {
+  const raw = value.replace(/\\/g, "/");
+  if (!value.trim() || raw.startsWith("/") || /^[A-Za-z]:\//.test(raw) || raw.startsWith("//")) {
     throw new Error("Blocked unsafe individual note path: paths must be vault-relative.");
   }
-  if (normalized.split("/").includes("..")) {
+  if (raw.split("/").includes("..")) {
     throw new Error("Blocked unsafe individual note path: traversal is not allowed.");
   }
-  if (normalized.split("/").includes(".obsidian")) {
+  // Collapse "." segments (e.g. a leading "./") before the runtime-internals
+  // and extension checks below, so "./.obsidian/plugins/..." is recognized
+  // as the same target as ".obsidian/plugins/..." -- matching how
+  // src/individualNote.ts's normalizePath treats a leading "./".
+  const normalized = raw.split("/").filter((segment) => segment !== "" && segment !== ".").join("/");
+  const normalizedConfigDir = configDir.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (normalizedConfigDir && (normalized === normalizedConfigDir || normalized.startsWith(`${normalizedConfigDir}/`))) {
     throw new Error("Blocked unsafe individual note path: plugin/runtime internals are not notes.");
   }
   if (!normalized.toLowerCase().endsWith(".md")) {
@@ -48,7 +60,7 @@ export function assertSafeNoteArgument(value: string): void {
   }
 }
 
-export function assertAllowedPluginArgs(args: string[]): void {
+export function assertAllowedPluginArgs(args: string[], configDir: string): void {
   let noteSeen = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -61,7 +73,7 @@ export function assertAllowedPluginArgs(args: string[]): void {
       if (!value || (!inline && value.startsWith("--"))) {
         throw new Error("Blocked unexpected Mindmap CLI argument: --note requires one path value.");
       }
-      assertSafeNoteArgument(value);
+      assertSafeNoteArgument(value, configDir);
       noteSeen = true;
       if (!inline) index += 1;
       continue;

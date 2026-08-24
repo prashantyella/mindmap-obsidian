@@ -16,7 +16,10 @@ export function isTerminalAutomaticResearchCode(code: string): boolean {
 
 export async function persistAutomaticResearchOutcome(options: {
   outcome: AutomaticResearchOutcome;
-  updateStatus(status: "complete" | "retryable" | "unresearchable"): Promise<"updated" | "state-pending" | false>;
+  // Property-typed (not method-shorthand) so passing options.updateStatus by
+  // reference below is a plain function value with no `this` binding to
+  // lose, avoiding a @typescript-eslint/unbound-method false positive.
+  updateStatus: (status: "complete" | "retryable" | "unresearchable") => Promise<"updated" | "state-pending" | false>;
 }): Promise<true> {
   if (options.outcome.ok) {
     return await commitAutomaticResearchAttempt({ runResearch: async () => true, updateStatus: options.updateStatus });

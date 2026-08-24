@@ -117,8 +117,8 @@ export interface SetupTimer {
 // global timers are wrapped rather than passed as bare object properties.
 function createDefaultTimer(): SetupTimer {
   return {
-    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+    clearTimeout: (handle) => window.clearTimeout(handle as ReturnType<typeof window.setTimeout>),
   };
 }
 

@@ -101,6 +101,11 @@ void test("open mindmap command docks into the existing right sidebar tab group"
   assert.equal(methodSource.includes("detachLeavesOfType(MINDMAP_VIEW_TYPE)"), true);
   assert.equal(methodSource.includes("split: true"), false);
   assert.equal(methodSource.includes("split: false"), true);
+  // openMindmapLookup awaits openMindmapView() expecting the leaf to be
+  // fully revealed on completion; voiding revealLeaf here would silently
+  // break that completion guarantee for every caller.
+  assert.equal(methodSource.includes("await this.app.workspace.revealLeaf(leaf)"), true);
+  assert.equal(methodSource.includes("void this.app.workspace.revealLeaf(leaf)"), false);
 });
 
 void test("workspace view exposes lookup, pin, and score affordances", () => {

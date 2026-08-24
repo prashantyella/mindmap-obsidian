@@ -1,4 +1,4 @@
-# Mindmap for Obsidian
+# Mindmap AI
 
 Mindmap is a desktop-only Obsidian plugin that runs a local Python workflow to:
 - summarize notes
@@ -9,7 +9,7 @@ Mindmap is a desktop-only Obsidian plugin that runs a local Python workflow to:
 
 ## Requirements
 
-- Obsidian Desktop `1.5.12+`
+- Obsidian Desktop `1.7.2+`
 - macOS, for the automated Python runtime setup below (Windows/Linux use an advanced manual interpreter path instead — see Advanced Runtime Overrides)
 - Ollama running locally at `http://localhost:11434`
 - oMLX with `Qwen3.5-9B-MLX-4bit` for metadata extraction

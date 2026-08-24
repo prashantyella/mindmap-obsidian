@@ -40,15 +40,10 @@ export function renderStatusBarElement(element: HTMLElement, state: StatusBarMen
   element.classList.toggle("is-actionable", presentation.actionable);
   element.replaceChildren();
 
-  const icon = document.createElement("span");
-  icon.className = "mindmap-status-icon";
-  icon.setAttribute("aria-hidden", "true");
+  const icon = element.createSpan({ cls: "mindmap-status-icon", attr: { "aria-hidden": "true" } });
   setIcon(icon, presentation.icon);
-  element.appendChild(icon);
 
-  const label = document.createElement("span");
-  label.textContent = presentation.label;
-  element.appendChild(label);
+  element.createSpan({ text: presentation.label });
   element.setAttribute("aria-label", presentation.ariaLabel);
   element.title = presentation.title;
   return presentation;
@@ -84,8 +79,10 @@ function addMenuItem(menu: Menu, descriptor: StatusBarMenuItemDescriptor, action
           void actions.openMindmap();
         } else if (action === "openSettings") {
           actions.openSettings();
-        } else if (action === "toggleReadingMode") {
-          void actions.toggleReadingMode();
+        } else if (action === "selectStandardMode") {
+          void actions.selectStandardMode();
+        } else if (action === "selectReadingMode") {
+          void actions.selectReadingMode();
         } else if (action === "syncReadingMode") {
           void actions.syncReadingMode();
         } else if (action === "processReadingBacklog") {

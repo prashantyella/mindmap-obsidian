@@ -169,7 +169,8 @@ export interface StatusBarMenuActions {
   openNote(path: string): void | Promise<void>;
   openMindmap(): void | Promise<void>;
   openSettings(): void;
-  toggleReadingMode(): void | Promise<void>;
+  selectStandardMode(): void | Promise<void>;
+  selectReadingMode(): void | Promise<void>;
   syncReadingMode(): void | Promise<void>;
   processReadingBacklog(): void | Promise<void>;
   toggleWebResearchMode(): void | Promise<void>;
@@ -195,10 +196,6 @@ export interface StatusBarPresentation {
 }
 
 const ACTIONABLE_HEALTH = new Set<LaunchAgentHealth>(["overdue", "failing"]);
-
-function healthLabel(health: LaunchAgentHealth): string {
-  return health[0].toUpperCase() + health.slice(1);
-}
 
 const RUNTIME_SETUP_ACTIONABLE_PHASES = new Set(["setup-required", "unavailable", "failed"]);
 const RUNTIME_SETUP_BUSY_PHASES = new Set(["discovering", "confirming", "creating", "installing", "verifying"]);
@@ -274,6 +271,46 @@ export interface StatusBarMenuItemDescriptor {
   label?: boolean;
 }
 
+/**
+ * At most one row: the highest-priority recoverable issue that isn't
+ * already covered by the runtime-setup block (which takes precedence and
+ * gets its own richer, multi-row treatment below). Healthy states never
+ * add a row here.
+ */
+function buildTopRecoveryRow(state: StatusBarMenuState, blocking: boolean): StatusBarMenuItemDescriptor | null {
+  if (state.preflightOk === false) {
+    return {
+      title: "Run preflight (failed)" + (blocking ? " (runtime setup required)" : ""),
+      icon: "triangle-alert",
+      action: "runPreflight",
+      disabled: blocking,
+    };
+  }
+  const readingActionable = state.readingMode === "reading" && (state.readingActivity === "error" || Boolean(state.readingError));
+  if (readingActionable) {
+    const readingBusy = state.readingActivity === "syncing" || state.readingActivity === "processing";
+    return {
+      title: `Reading error: ${state.readingError ?? state.readingActivity}`,
+      icon: "triangle-alert",
+      action: readingBusy ? undefined : "syncReadingMode",
+      disabled: readingBusy,
+    };
+  }
+  // Automatic-mode pauses/errors are represented entirely within the
+  // Research group (usage/pause/retry); the top row only ever speaks for
+  // manual or off Web Research, so the two never say the same thing twice.
+  const manualWebResearchActionable = state.webResearchMode !== "automatic-reading"
+    && (state.webResearchActivity === "error" || Boolean(state.webResearchError));
+  if (manualWebResearchActionable) {
+    const title = state.webResearchError ? `Web Research error: ${state.webResearchError}` : `Web Research: ${state.webResearchActivity}`;
+    return { title, icon: "triangle-alert", action: "openSettings" };
+  }
+  if (state.schedulerHealth !== null && ACTIONABLE_HEALTH.has(state.schedulerHealth)) {
+    return { title: `Scheduler ${state.schedulerHealth}`, icon: "triangle-alert", action: "openSettings" };
+  }
+  return null;
+}
+
 export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMenuItemDescriptor[] {
   const blocking = state.runtimeSetup?.blocking ?? false;
   const setupRequiredSuffix = " (runtime setup required)";
@@ -287,13 +324,19 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
       : state.readingMode !== "reading"
         ? "Automatic research is waiting for Reading Mode."
         : null;
-  const automaticError = state.automaticResearchLastError ?? state.webResearchError;
-  const modeLabel = state.webResearchMode === "automatic-reading" ? "Automatic for Reading" : state.webResearchMode === "manual" ? "Manual" : "Off";
   const runtimeSetup = state.runtimeSetup;
-  const runtimeSetupItems: StatusBarMenuItemDescriptor[] = runtimeSetup && runtimeSetup.phase !== "not-applicable"
+  // Healthy runtime ("ready") and inapplicable runtime never add a row here;
+  // every other phase (setup-required/unavailable/failed/cancelled/busy)
+  // keeps its existing richer, multi-row treatment.
+  const runtimeSetupShown = runtimeSetup !== undefined && runtimeSetup.phase !== "not-applicable" && runtimeSetup.phase !== "ready";
+  const runtimeSetupItems: StatusBarMenuItemDescriptor[] = runtimeSetupShown && runtimeSetup
     ? [
       { title: "Runtime setup", label: true },
-      { title: `Runtime: ${runtimeSetup.message}`, icon: runtimeSetup.phase === "ready" ? "check" as IconName : "triangle-alert" as IconName, disabled: true },
+      {
+        title: `Runtime: ${runtimeSetup.message}`,
+        icon: RUNTIME_SETUP_BUSY_PHASES.has(runtimeSetup.phase) ? "loader-circle" : "triangle-alert",
+        disabled: true,
+      },
       ...(runtimeSetup.canCancel ? [{ title: "Cancel runtime setup", icon: "x" as IconName, action: "cancelRuntimeSetup" as const }] : []),
       ...(runtimeSetup.canSetup ? [{
         title: runtimeSetup.phase === "failed" || runtimeSetup.phase === "cancelled" ? "Retry Mindmap runtime setup" : "Set up Mindmap runtime",
@@ -308,100 +351,82 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     ]
     : [];
 
+  const topRecoveryRow = runtimeSetupShown ? null : buildTopRecoveryRow(state, blocking);
+
   const items: StatusBarMenuItemDescriptor[] = [
     ...runtimeSetupItems,
+    ...(topRecoveryRow ? [topRecoveryRow] : []),
     { title: "Mode", label: true },
-    { title: "Standard Mode", icon: "orbit", checked: state.readingMode === "standard", disabled: state.readingMode === "standard" },
-    { title: "Reading Mode (experimental)", icon: "book-open", checked: state.readingMode === "reading", action: "toggleReadingMode" },
-    { title: "Queue", label: true },
     {
-      title: (state.running
-        ? "Run active note (Mindmap is already running.)"
-        : state.activeNote.eligible
-        ? "Run Mindmap for active note"
-        : `Run active note (${state.activeNote.reason})`) + (blocking ? setupRequiredSuffix : ""),
-      icon: "file-play",
-      disabled: state.running || researchBusy || !state.scopeReady || !state.activeNote.eligible || blocking,
-      action: state.running || !state.activeNote.eligible ? undefined : "runActiveNote",
+      title: "Standard Mode",
+      icon: "orbit",
+      checked: state.readingMode === "standard",
+      disabled: state.readingMode === "standard",
+      action: state.readingMode === "standard" ? undefined : "selectStandardMode",
     },
     {
-      title: (state.running ? `Run active${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope") + (blocking ? setupRequiredSuffix : ""),
+      title: "Reading Mode (experimental)",
+      icon: "book-open",
+      checked: state.readingMode === "reading",
+      disabled: state.readingMode === "reading",
+      action: state.readingMode === "reading" ? undefined : "selectReadingMode",
+    },
+    { title: "Run", label: true },
+    ...(state.activeNote.eligible ? [{
+      title: (state.running ? "Run active note (Mindmap is already running.)" : "Run Mindmap for active note") + (blocking ? setupRequiredSuffix : ""),
+      icon: "file-play" as IconName,
+      disabled: state.running || researchBusy || !state.scopeReady || blocking,
+      action: state.running ? undefined : "runActiveNote" as const,
+    }] : []),
+    {
+      title: (state.running ? `Run current scope${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope") + (blocking ? setupRequiredSuffix : ""),
       icon: state.running ? "loader-circle" : "play",
       disabled: state.running || researchBusy || !state.scopeReady || blocking,
       action: state.running ? undefined : "runCurrent",
     },
-    {
-      title: (state.pendingAvailable ? `Process all pending notes (${state.allPending})` : "Process all pending notes (unavailable)") + (blocking ? setupRequiredSuffix : ""),
-      icon: "list-checks",
-      disabled: state.running || researchBusy || !state.scopeReady || !state.pendingAvailable || state.allPending === 0 || blocking,
-      action: "runAll",
-    },
-    {
-      title: state.pendingAvailable ? `Current scope: ${state.currentPending} pending` : "Pending scan unavailable",
-      disabled: true,
-    },
-    ...state.pendingPaths.flatMap((path) => [
-      { title: `Process ${path}${blocking ? setupRequiredSuffix : ""}`, icon: "file-play" as IconName, path, disabled: state.running || researchBusy || !state.scopeReady || blocking, action: "processPendingNote" as const },
-      { title: `Open ${path}`, icon: "file-text" as IconName, path, action: "openNote" as const },
-    ]),
-    { title: "Reading", label: true },
-    state.readingMode === "reading"
-      ? { title: `Reading Mode: ${state.readingActivity}`, icon: "book-open", disabled: true }
-      : { title: "Reading Mode is off (experimental)", icon: "book-open", disabled: true },
+    ...(state.pendingAvailable && state.allPending > 0 ? [{
+      title: `Process pending notes (${state.allPending})` + (blocking ? setupRequiredSuffix : ""),
+      icon: "list-checks" as IconName,
+      disabled: state.running || researchBusy || !state.scopeReady || blocking,
+      action: "runAll" as const,
+    }] : []),
     ...(state.readingMode === "reading" ? [
-      { title: "Sync Reading Mode now", icon: "refresh-cw" as IconName, action: "syncReadingMode" as const, disabled: state.readingActivity === "syncing" || state.readingActivity === "processing" },
-      {
+      { title: "Reading", label: true },
+      { title: "Sync Reading now", icon: "refresh-cw" as IconName, action: "syncReadingMode" as const, disabled: state.readingActivity === "syncing" || state.readingActivity === "processing" },
+      ...(state.readingPending > 0 ? [{
         title: blocking ? "Process Reading backlog (runtime setup required)" : `Process Reading backlog (${state.readingPending})`,
         icon: "list-checks" as IconName,
         action: "processReadingBacklog" as const,
-        disabled: state.readingPending === 0 || state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy || blocking,
-      },
-      { title: `Reading pending: ${state.readingPending}`, disabled: true },
-      { title: `Reading unresearchable: ${state.readingUnresearchable}`, disabled: true },
-      { title: state.readingLastSyncAt ? `Reading last sync: ${state.readingLastSyncAt}` : "Reading has not synced yet", disabled: true },
-      ...(state.readingError ? [{ title: `Reading error: ${state.readingError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
+        disabled: state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy || blocking,
+      }] : []),
     ] : []),
-    { title: "Web Research", label: true },
-    { title: `Research mode: ${modeLabel}`, icon: "globe-2", disabled: true },
-    automaticActive
-      ? { title: "Manual research is included with Automatic for Reading", icon: "check" as IconName, disabled: true }
-      : { title: "Use Manual research", icon: "globe-2", checked: state.webResearchMode === "manual", action: "toggleWebResearchMode", disabled: researchBusy },
+    { title: "Research", label: true },
     {
-      title: (automaticActive ? "Pause Automatic for Reading" : "Enable Automatic for Reading") + (!automaticActive && blocking ? setupRequiredSuffix : ""),
-      icon: "sparkles" as IconName,
+      title: "Manual research",
+      icon: "globe-2",
+      checked: state.webResearchMode === "manual" || automaticActive,
+      disabled: researchBusy || automaticActive,
+      action: automaticActive ? undefined : "toggleWebResearchMode",
+    },
+    {
+      title: "Automatic for Reading" + (!automaticActive && blocking ? setupRequiredSuffix : ""),
+      icon: "sparkles",
       checked: automaticActive,
       action: "toggleAutomaticReadingResearch",
       // Pausing (already active -> off) is always allowed; only *starting* automatic work is gated on runtime readiness.
       disabled: researchBusy || (!automaticActive && (state.readingMode !== "reading" || blocking)),
     },
-    ...(automaticActive ? [
+    // Automatic-mode pauses/errors are only ever represented here, never
+    // repeated in the top recovery row, so an actionable automatic issue
+    // (a pause reason, or a plain activity error/lastError) must all route
+    // through this one gate.
+    ...(automaticActive && (automaticPausedCopy !== null || state.webResearchActivity === "error" || Boolean(state.automaticResearchLastError)) ? [
       { title: `Automatic research: ${state.automaticResearchAttempted}/10 today · max 5/sync`, disabled: true },
-      ...(automaticPausedCopy ? [{ title: automaticPausedCopy, icon: state.automaticResearchPauseReason ? "triangle-alert" as IconName : "clock-3" as IconName, disabled: true }] : []),
-      ...(automaticError ? [{ title: `Automatic research: ${automaticError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
-      ...(state.automaticResearchLastErrorAt ? [{ title: `Automatic research last error: ${state.automaticResearchLastErrorAt}`, disabled: true }] : []),
+      ...(automaticPausedCopy ? [{ title: automaticPausedCopy, icon: "triangle-alert" as IconName, disabled: true }] : []),
+      ...(state.automaticResearchLastError ? [{ title: `Automatic research: ${state.automaticResearchLastError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
       ...(automaticTransientPause ? [{ title: `Retry automatic research${blocking ? setupRequiredSuffix : ""}`, icon: "refresh-cw" as IconName, action: "retryAutomaticResearch" as const, disabled: researchBusy || state.readingMode !== "reading" || blocking }] : []),
     ] : []),
-    ...(state.webResearchMode !== "off" ? [
-      { title: "Research selected text", icon: "search" as IconName, action: "researchSelectedText" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
-      { title: "Research active note", icon: "file-search" as IconName, action: "researchActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) },
-      { title: `Research and reprocess active note${blocking ? setupRequiredSuffix : ""}`, icon: "sparkles" as IconName, action: "researchAndReprocessActiveNote" as const, disabled: state.running || ["deriving", "searching", "writing"].includes(state.webResearchActivity) || blocking },
-      ...(state.webResearchMode === "manual" && researchBusy ? [{ title: `Research: ${state.webResearchActivity}`, disabled: true }] : []),
-      ...(state.webResearchMode === "manual" && state.webResearchError ? [{ title: `Research error: ${state.webResearchError}`, icon: "triangle-alert" as IconName, disabled: true }] : []),
-    ] : [{ title: state.webResearchError ? `Web Research error: ${state.webResearchError}` : "Web Research is not enabled", icon: state.webResearchError ? "triangle-alert" as IconName : "globe-2" as IconName, disabled: true }]),
-    { title: "Health", label: true },
-    {
-      title: (state.preflightInProgress ? "Preflight is running" : state.preflightOk === false ? "Run preflight (failed)" : "Run preflight checks") + (blocking ? setupRequiredSuffix : ""),
-      icon: state.preflightOk === false ? "triangle-alert" : "shield-check",
-      disabled: state.preflightInProgress || blocking,
-      action: "runPreflight",
-    },
-    { title: `Scheduler: ${state.schedulerMode}`, disabled: true },
-    ...state.schedulerDetails.map((detail) => ({
-      title: `${detail.label}: ${healthLabel(detail.health)}`,
-      icon: ACTIONABLE_HEALTH.has(detail.health) ? "triangle-alert" as IconName : "clock-3" as IconName,
-      disabled: true,
-    })),
-    { title: `Semantic environment: ${state.semanticState}`, disabled: true },
+    { title: "Navigation", label: true },
     { title: "Open Mindmap", icon: "orbit", action: "openMindmap" },
     { title: "Open settings", icon: "settings", action: "openSettings" },
   ];

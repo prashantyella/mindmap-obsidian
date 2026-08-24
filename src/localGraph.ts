@@ -44,5 +44,5 @@ export function isMindmapLocalGraphLeaf(
   const state = leaf.getViewState().state;
   return typeof state === "object"
     && state !== null
-    && (state as Record<string, unknown>).pluginId === pluginId;
+    && state.pluginId === pluginId;
 }

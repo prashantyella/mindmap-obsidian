@@ -1,6 +1,6 @@
 {
   "name": "mindmap-ai",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Standalone Obsidian plugin repo for the Mindmap Python-powered workflow.",
   "license": "MIT",
@@ -8,9 +8,10 @@
     "build": "node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
     "lint": "eslint .",
+    "lint:obsidian": "eslint --config eslint.obsidian.config.mjs src",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test $(find src -name '*.test.ts' -print)",
-    "check": "npm run lint && npm run typecheck && npm test && npm run build && npm run validate",
+    "test": "tsx --import ./scripts/test-setup.mjs --test $(find src -name '*.test.ts' -print)",
+    "check": "npm run lint && npm run lint:obsidian && npm run typecheck && npm test && npm run build && npm run validate",
     "validate": "node scripts/validate-release.mjs",
     "release:prepare": "npm run build && npm run validate && node scripts/prepare-release.mjs"
   },
@@ -19,6 +20,7 @@
     "@types/node": "^24.6.1",
     "esbuild": "^0.25.10",
     "eslint": "^10.3.0",
+    "eslint-plugin-obsidianmd": "0.4.1",
     "globals": "^17.6.0",
     "obsidian": "latest",
     "tsx": "^4.20.6",
@@ -26,6 +28,7 @@
     "typescript-eslint": "^8.59.3"
   },
   "dependencies": {
-    "motion": "^12.38.0"
+    "motion": "^12.38.0",
+    "yaml": "2.9.0"
   }
 }

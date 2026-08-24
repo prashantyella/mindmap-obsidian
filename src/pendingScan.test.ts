@@ -184,3 +184,52 @@ void test("PendingIndex applies the eight-word Apple Books threshold", async () 
   assert.deepEqual(snapshot.all.items, ["Notes/annotation.md"]);
   assert.equal(snapshot.all.total, 1);
 });
+
+void test("Reading annotations and generated book indexes under the managed root are excluded from ordinary counts even when vault root scope is configured", async () => {
+  const index = new PendingIndex();
+  const config = {
+    currentPaths: ["."],
+    allPaths: ["."],
+    heading: "## Mindmap",
+    minWords: 0,
+    statePath: "/vault/state.json",
+  };
+
+  const snapshot = await index.refresh({
+    config,
+    stateHashes: {},
+    files: [
+      {
+        relpath: "Books/Apple Books/Author/Book/Annotations/one.md",
+        mtimeMs: 1,
+        read: () => Promise.resolve("---\ntype: apple-books-annotation\n---\none two three four five six seven eight"),
+      },
+      {
+        relpath: "Books/Apple Books/Author/Book/Index.md",
+        mtimeMs: 1,
+        read: () => Promise.resolve(
+          "<!-- mindmap:apple-books-index:start -->\n## Apple Books Annotations\n<!-- mindmap:apple-books-index:end -->\n",
+        ),
+      },
+      {
+        relpath: "Books/Ordinary Series/Book/Index.md",
+        mtimeMs: 1,
+        read: () => Promise.resolve("An unrelated ordinary Index note with plenty of its own words in it."),
+      },
+      {
+        relpath: "Books/Apple Books/Author/Other Book/Index.md",
+        mtimeMs: 1,
+        read: () => Promise.resolve("A user-authored Index note at the same location, without managed markers."),
+      },
+    ],
+    dirtyPaths: new Set<string>(),
+    forceFull: true,
+    now: 1,
+  });
+
+  assert.deepEqual(
+    new Set(snapshot.current.items),
+    new Set(["Books/Ordinary Series/Book/Index.md", "Books/Apple Books/Author/Other Book/Index.md"]),
+  );
+  assert.equal(snapshot.current.total, 2);
+});

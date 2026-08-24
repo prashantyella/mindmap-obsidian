@@ -1,0 +1,40 @@
+{
+  "provenance": {
+    "fixtureSchemaVersion": 1,
+    "pythonOracleFile": "python/mindmap.py",
+    "pythonOracleSha256": "ba73eaaaf19960bb95c66022286882fa7d6104d568179c503cc1c10298da7e1c",
+    "generator": "tools/parity/generate_fixtures.py"
+  },
+  "cases": [
+    {
+      "name": "strip_related_section removes legacy heading block",
+      "input": "Body content.\n\n## Mindmap\n- [[Notes/Old]]\n",
+      "heading": "## Mindmap",
+      "output": "Body content.\n",
+      "contains_managed": true
+    },
+    {
+      "name": "strip_related_section removes callout block",
+      "input": "Body content.\n\n---\n\n> [!mindmap]- Mindmap\n> - <span class=\"mindmap-link is-core\">[[Notes/A|A]]</span>\n",
+      "heading": "## Mindmap",
+      "output": "Body content.\n\n---\n",
+      "contains_managed": true
+    },
+    {
+      "name": "update_related_section renders a fresh callout block",
+      "input": "Body content.\n",
+      "heading": "## Mindmap",
+      "links": [
+        [
+          "Notes/A.md",
+          "core"
+        ],
+        [
+          "Notes/B.md",
+          "overreach"
+        ]
+      ],
+      "output": "Body content.\n\n---\n\n> [!mindmap]- Mindmap\n> - <span class=\"mindmap-link is-core\">[[Notes/A.md|A]]</span>\n> - <span class=\"mindmap-link is-overreach\">[[Notes/B.md|B]]</span>\n"
+    }
+  ]
+}

@@ -3,7 +3,7 @@ import type MindmapPlugin from "./main";
 export function registerMindmapCommands(plugin: MindmapPlugin): void {
   plugin.addCommand({
     id: "mindmap-open-view",
-    name: "Open Mindmap",
+    name: "Open mindmap",
     callback: () => {
       void plugin.openMindmapView();
     },
@@ -15,7 +15,7 @@ export function registerMindmapCommands(plugin: MindmapPlugin): void {
 
   plugin.addCommand({
     id: "mindmap-open-lookup",
-    name: "Open Mindmap lookup",
+    name: "Open mindmap lookup",
     callback: () => {
       void plugin.openMindmapLookup();
     },
@@ -31,7 +31,7 @@ export function registerMindmapCommands(plugin: MindmapPlugin): void {
 
   plugin.addCommand({
     id: "mindmap-run-active-note",
-    name: "Run Mindmap for active note",
+    name: "Run mindmap for active note",
     callback: () => {
       void plugin.runActiveNote();
     },
@@ -79,7 +79,7 @@ export function registerMindmapCommands(plugin: MindmapPlugin): void {
 
   plugin.addCommand({
     id: "mindmap-enable-launchagent-scheduler",
-    name: "Enable mindmap LaunchAgent scheduler",
+    name: "Enable mindmap launchagent scheduler",
     callback: () => {
       void plugin.setSchedulerMode("launchAgent");
     },
@@ -111,7 +111,7 @@ export function registerMindmapCommands(plugin: MindmapPlugin): void {
 
   plugin.addCommand({
     id: "mindmap-start-semantic-environment",
-    name: "Start Mindmap semantic environment",
+    name: "Start mindmap semantic environment",
     callback: () => {
       void plugin.startSemanticEnvironment(true);
     },

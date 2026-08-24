@@ -16,7 +16,13 @@ export interface FetchLike {
 }
 
 export class ExaResearchProvider implements ResearchProvider {
-  constructor(private readonly apiKey: string, private readonly fetchImpl: FetchLike = fetch) {}
+  // No default: production callers must pass an explicit implementation
+  // (requestUrlFetch from obsidianRequestUrlFetch.ts), since a bare global
+  // `fetch` reference here is exactly what the official Obsidian plugin
+  // guidelines flag (no-restricted-globals) -- this keeps the seam
+  // provider-neutral and testable with a fake, without this module ever
+  // needing to import "obsidian" itself.
+  constructor(private readonly apiKey: string, private readonly fetchImpl: FetchLike) {}
 
   async search(queries: string[]): Promise<ResearchSource[]> {
     const requested = queries.map((query) => query.trim().slice(0, 240)).filter(Boolean).slice(0, MAX_RESEARCH_QUERIES);
@@ -28,7 +34,7 @@ export class ExaResearchProvider implements ResearchProvider {
 
   private async searchOne(query: string, numResults: number): Promise<ResearchSource[]> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), EXA_TIMEOUT_MS);
+    const timeout = window.setTimeout(() => controller.abort(), EXA_TIMEOUT_MS);
     try {
       const response = await this.fetchImpl(EXA_SEARCH_URL, {
         method: "POST",
@@ -58,7 +64,7 @@ export class ExaResearchProvider implements ResearchProvider {
       }
       throw new WebResearchError("EXA_NETWORK", "Web Research provider network request failed.");
     } finally {
-      clearTimeout(timeout);
+      window.clearTimeout(timeout);
     }
   }
 }

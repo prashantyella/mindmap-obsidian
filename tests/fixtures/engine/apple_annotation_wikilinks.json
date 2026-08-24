@@ -1,0 +1,36 @@
+{
+  "provenance": {
+    "fixtureSchemaVersion": 1,
+    "pythonOracleFile": "python/mindmap.py",
+    "pythonOracleSha256": "ba73eaaaf19960bb95c66022286882fa7d6104d568179c503cc1c10298da7e1c",
+    "generator": "tools/parity/generate_fixtures.py"
+  },
+  "cases": [
+    {
+      "name": "apple_annotation_concept_wikilinks sanitizes and dedupes",
+      "input": [
+        "Valid Concept",
+        "Valid Concept",
+        "  ",
+        "Bad/Slash\\Chars"
+      ],
+      "output": [
+        "[[Valid Concept]]",
+        "[[Concept]]",
+        "[[Bad-Slash-Chars]]"
+      ]
+    },
+    {
+      "name": "apple_annotation_related_wikilinks rejects unsafe targets and dedupes",
+      "input": [
+        "Notes/Valid.md",
+        "../Traversal.md",
+        "Notes/Valid.md",
+        "not-markdown.txt"
+      ],
+      "output": [
+        "[[Notes/Valid|Valid]]"
+      ]
+    }
+  ]
+}

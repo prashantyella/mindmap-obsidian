@@ -35,6 +35,10 @@ except ModuleNotFoundError as exc:
 
 DEPENDENCY_INSTALL_ARGS = "-m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt"
 READING_NOTES_ROOT = "Books/Apple Books"
+READING_ANNOTATIONS_FOLDER = "Annotations"
+READING_INDEX_FILENAME = "Index.md"
+READING_INDEX_START = "<!-- mindmap:apple-books-index:start -->"
+READING_INDEX_END = "<!-- mindmap:apple-books-index:end -->"
 
 
 @dataclass
@@ -240,31 +244,99 @@ def is_under_reading_root(relpath: str) -> bool:
     return relpath == READING_NOTES_ROOT or relpath.startswith(f"{READING_NOTES_ROOT}/")
 
 
-def compute_removed_paths(state_paths: Iterable[str], current_paths: set, notes_paths: List[str]) -> List[str]:
+def is_reading_index_relpath(relpath: str) -> bool:
+    """Structural shape only: `Books/Apple Books/<author>/<book>/Index.md`.
+    Distinguishes generated book indexes from annotation notes (which live
+    one level deeper, under an `Annotations` folder) by path shape alone,
+    which is enough for state/vector row cleanup even when the file no
+    longer exists to have its markers checked."""
+    if not is_under_reading_root(relpath):
+        return False
+    rest = relpath[len(READING_NOTES_ROOT):].lstrip("/")
+    parts = rest.split("/")
+    return len(parts) == 3 and parts[2] == READING_INDEX_FILENAME
+
+
+def is_reading_annotation_relpath(relpath: str) -> bool:
+    """Structural shape only: `Books/Apple Books/<author>/<book>/Annotations/<note>.md`.
+    Used to protect state/vector rows so cleanup only ever preserves actual
+    annotation rows, not every non-index note that happens to live under the
+    Reading root (e.g. an ordinary book note dropped directly in a book
+    folder)."""
+    if not is_under_reading_root(relpath):
+        return False
+    rest = relpath[len(READING_NOTES_ROOT):].lstrip("/")
+    parts = rest.split("/")
+    return len(parts) == 4 and parts[2] == READING_ANNOTATIONS_FOLDER
+
+
+def _has_complete_managed_index_markers(text: str) -> bool:
+    """A complete managed marker pair: exactly one start marker, exactly one
+    end marker, start before end. Reversed order, duplicated markers, or an
+    orphan marker (only one of the pair) never count as a complete pair, so
+    a corrupted or hand-edited Index.md is treated as an ordinary note
+    rather than silently excluded from processing."""
+    start_index = text.find(READING_INDEX_START)
+    end_index = text.find(READING_INDEX_END)
+    if start_index == -1 or end_index == -1:
+        return False
+    if text.find(READING_INDEX_START, start_index + 1) != -1:
+        return False
+    if text.find(READING_INDEX_END, end_index + 1) != -1:
+        return False
+    return start_index < end_index
+
+
+def is_generated_reading_index(relpath: str, text: str) -> bool:
+    """A book index is only ever the plugin-managed artifact when it carries
+    the complete marker pair; an unrelated user note at the same structural
+    location (or with a missing/duplicated/reversed marker) remains an
+    ordinary note."""
+    return is_reading_index_relpath(relpath) and _has_complete_managed_index_markers(text)
+
+
+def compute_removed_paths(
+    state_paths: Iterable[str],
+    current_paths: set,
+    notes_paths: List[str],
+    reading_annotations_included: bool = False,
+) -> List[str]:
     """A run whose note universe does not cover the Reading root (weekly
     refresh/rebuild, --current, or a daily run without
-    --include-reading-pending) must not treat untouched Reading entries as
-    deleted just because this run didn't scan that folder.
+    --include-reading-pending), or one that covers the folder but
+    deliberately excludes Reading annotations from its scan (the normal
+    current/all/manual/weekly boundary), must not treat untouched Reading
+    annotation entries as deleted just because this run didn't scan them.
 
     This holds for --rebuild too: `rebuild_collections_preserving_reading`
     snapshots and restores any tracked Reading Chroma rows across the
     delete/recreate, so a Reading state hash surviving a non-Reading rebuild
     still describes vectors that are genuinely still present.
+
+    Only structurally-shaped annotation rows are protected. Generated book
+    indexes, and any other non-annotation note that happens to live under
+    the Reading root, are never protected here: they are never a legitimate
+    part of any run's note universe, so a stale row is always safe to prune
+    like any other removed note.
     """
-    scanning_reading_root = is_relpath_in_scope(READING_NOTES_ROOT, notes_paths)
-    return [
-        p for p in state_paths
-        if p not in current_paths and (scanning_reading_root or not is_under_reading_root(p))
-    ]
+    scanning_reading_root = is_relpath_in_scope(READING_NOTES_ROOT, notes_paths) and reading_annotations_included
+
+    def protected(p: str) -> bool:
+        return is_reading_annotation_relpath(p) and not scanning_reading_root
+
+    return [p for p in state_paths if p not in current_paths and not protected(p)]
 
 
-def reading_paths_excluded_from_rebuild_scan(state_paths: Iterable[str], notes_paths: List[str]) -> List[str]:
-    """The Reading rows a --rebuild run must preserve: previously-tracked
-    Reading paths that this run's note universe does not cover (so it will
-    not re-scan/re-tag/re-write them itself)."""
-    if is_relpath_in_scope(READING_NOTES_ROOT, notes_paths):
-        return []
-    return [p for p in state_paths if is_under_reading_root(p)]
+def reading_paths_excluded_from_rebuild_scan(state_paths: Iterable[str]) -> List[str]:
+    """The Reading annotation rows a --rebuild run must preserve.
+    --include-reading-pending (the only run profile that scans Reading
+    annotations) is mutually exclusive with --rebuild, so a rebuild never
+    re-scans/re-tags/re-writes annotations itself; every previously-tracked
+    annotation row must be preserved across the delete/recreate. Generated
+    index rows, and any other non-annotation note under the Reading root,
+    are excluded: they are never legitimately tracked, so a rebuild is free
+    to drop them like any other stale row."""
+    return [p for p in state_paths if is_reading_annotation_relpath(p)]
 
 
 def _snapshot_chroma_rows(rows: Dict) -> Optional[Dict]:
@@ -507,11 +579,20 @@ def validate_individual_note_target(
             guidance="Use one existing vault-relative Markdown path.",
             context={"path": target_text},
         )
+    try:
+        target_text_content = target.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        target_text_content = ""
+    if is_generated_reading_index(normalized_target, target_text_content):
+        return None, build_runtime_issue(
+            "error",
+            "NOTE_TARGET_GENERATED_INDEX",
+            "Generated Apple Books index notes cannot be processed individually.",
+            guidance="Select an annotation note or an ordinary note instead of a generated book index.",
+            context={"path": target_text},
+        )
     if outside_scope:
-        try:
-            frontmatter, _body = parse_frontmatter(target.read_text(encoding="utf-8", errors="ignore"))
-        except OSError:
-            frontmatter = {}
+        frontmatter, _body = parse_frontmatter(target_text_content)
         is_reading_annotation = under_reading_root and frontmatter.get("type") == "apple-books-annotation"
         if not is_reading_annotation:
             return None, build_runtime_issue(
@@ -1318,7 +1399,20 @@ def llm_extract(
     raise ValueError(f"Unsupported llm_provider: {provider}")
 
 
-def list_notes(vault_root: Path, notes_paths: List[str], min_words: int, related_heading: str) -> List[Note]:
+def list_notes(
+    vault_root: Path,
+    notes_paths: List[str],
+    min_words: int,
+    related_heading: str,
+    include_reading_annotations: bool = False,
+) -> List[Note]:
+    """The ordinary note universe for a run. Generated book indexes are
+    never included (they are never embedded, tagged, or processed).
+    Reading annotations under `Books/Apple Books` are excluded unless
+    `include_reading_annotations` is set (true only for
+    --include-reading-pending's daily maintenance profile), so normal
+    current/all/manual/weekly runs never implicitly consume Reading work
+    even when Books or the vault root is part of configured scope."""
     notes = []
     for notes_path in notes_paths:
         base = vault_root / notes_path
@@ -1330,7 +1424,12 @@ def list_notes(vault_root: Path, notes_paths: List[str], min_words: int, related
                 continue
             title = path.stem
             text = path.read_text(encoding="utf-8", errors="ignore")
+            if is_generated_reading_index(relpath, text):
+                continue
             fm, body = parse_frontmatter(text)
+            is_annotation = frontmatter_is_apple_annotation(fm)
+            if is_annotation and is_under_reading_root(relpath) and not include_reading_annotations:
+                continue
             body = strip_related_section(body, related_heading)
             if not note_meets_minimum(text, fm, min_words, body=body):
                 continue
@@ -1339,7 +1438,7 @@ def list_notes(vault_root: Path, notes_paths: List[str], min_words: int, related
                 relpath=relpath,
                 title=title,
                 body=body,
-                is_apple_annotation=frontmatter_is_apple_annotation(fm),
+                is_apple_annotation=is_annotation,
             ))
     return notes
 
@@ -2932,7 +3031,6 @@ def main():
     configured_min_words = config.get("min_note_words", 30)
     individual_target = None
     if args.note:
-        all_scope_notes = list_notes(vault_root, all_scope_paths, configured_min_words, mindmap_heading)
         individual_target, target_issue = validate_individual_note_target(vault_root, args.note, all_scope_paths)
         if target_issue:
             emit_stderr(
@@ -2949,9 +3047,24 @@ def main():
             print(str(exc), file=sys.stderr, flush=True)
             return 1
         notes = [target_note]
+        # Only an explicit Reading-annotation target pulls the Reading corpus
+        # into the related-candidate universe (preserving Reading-to-Reading
+        # linking); an ordinary explicit note must not implicitly widen
+        # candidates to include Reading annotations it was never scoped to.
+        target_is_reading_annotation = target_note.is_apple_annotation and is_under_reading_root(target_note.relpath)
+        candidate_scan_paths = all_scope_paths
+        if target_is_reading_annotation and not is_relpath_in_scope(READING_NOTES_ROOT, all_scope_paths):
+            candidate_scan_paths = [*all_scope_paths, READING_NOTES_ROOT]
+        all_scope_notes = list_notes(
+            vault_root, candidate_scan_paths, configured_min_words, mindmap_heading,
+            include_reading_annotations=target_is_reading_annotation,
+        )
         allowed_paths = {n.relpath for n in all_scope_notes}
     else:
-        notes = list_notes(vault_root, notes_paths, configured_min_words, mindmap_heading)
+        notes = list_notes(
+            vault_root, notes_paths, configured_min_words, mindmap_heading,
+            include_reading_annotations=args.include_reading_pending,
+        )
         allowed_paths = {n.relpath for n in notes}
         if args.limit:
             notes = notes[: args.limit]
@@ -3014,7 +3127,7 @@ def main():
     collection_metadata = {"hnsw:space": "cosine"}
 
     if args.rebuild:
-        tracked_reading_paths = reading_paths_excluded_from_rebuild_scan(state_files.keys(), notes_paths)
+        tracked_reading_paths = reading_paths_excluded_from_rebuild_scan(state_files.keys())
         try:
             chunks, notes_col = rebuild_collections_preserving_reading(
                 client, chunks_collection, notes_collection, tracked_reading_paths, collection_metadata,
@@ -3124,7 +3237,9 @@ def main():
 
     # Clean up removed notes
     current_paths = {n.relpath for n in notes}
-    removed_paths = [] if individual_target else compute_removed_paths(state_files.keys(), current_paths, notes_paths)
+    removed_paths = [] if individual_target else compute_removed_paths(
+        state_files.keys(), current_paths, notes_paths, reading_annotations_included=args.include_reading_pending,
+    )
     if removed_paths:
         for path in removed_paths:
             chunks.delete(where={"path": path})

@@ -5,7 +5,7 @@ import path from "node:path";
 import type { TFile, Vault } from "obsidian";
 
 import type { ResolvedRuntime, RuntimeContext } from "./pathResolver";
-import { isAppleBooksAnnotation, minimumWordsForNote, normalizedWordCount } from "./individualNote";
+import { isAppleBooksAnnotation, isManagedReadingArtifact, minimumWordsForNote, normalizedWordCount } from "./individualNote";
 
 const MAX_PENDING_ITEMS = 5;
 const DEFAULT_DEBOUNCE_MS = 500;
@@ -83,8 +83,8 @@ interface PendingServiceDeps {
   statMtime(targetPath: string): Promise<number | null>;
   log(message: string): void;
   now(): number;
-  setTimer(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
-  clearTimer(handle: ReturnType<typeof setTimeout>): void;
+  setTimer(callback: () => void, delayMs: number): unknown;
+  clearTimer(handle: unknown): void;
   onUpdated?(): void;
 }
 
@@ -284,6 +284,10 @@ export class PendingIndex {
 
       metrics.filesScanned += 1;
       const text = await file.read();
+      if (isManagedReadingArtifact(file.relpath, text)) {
+        this.entries.delete(file.relpath);
+        continue;
+      }
       const body = computeBodyHash(text, input.config.heading);
       const minimum = minimumWordsForNote(text, input.config.minWords);
       const noteWordCount = isAppleBooksAnnotation(text) ? body.normalizedWordCount : body.wordCount;
@@ -348,7 +352,7 @@ export class PendingIndex {
 }
 
 export class DebouncedRefreshController {
-  private handle: ReturnType<typeof setTimeout> | null = null;
+  private handle: unknown = null;
 
   constructor(
     private readonly setTimer: PendingServiceDeps["setTimer"],
@@ -524,7 +528,7 @@ export class PendingScanService {
       return { config: this.configCache.config, reloaded: false };
     }
 
-    const rawConfig = JSON.parse(await this.deps.readTextFile(configPath));
+    const rawConfig: unknown = JSON.parse(await this.deps.readTextFile(configPath));
     const config = parsePendingConfig(rawConfig, configPath, this.context);
     this.configCache = { mtimeMs, config };
     return { config, reloaded: true };
@@ -568,8 +572,8 @@ export function createPendingScanService(
     statMtime: defaultFsDeps.statMtime,
     log,
     now: () => Date.now(),
-    setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
-    clearTimer: (handle) => clearTimeout(handle),
+    setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+    clearTimer: (handle) => window.clearTimeout(handle as ReturnType<typeof window.setTimeout>),
     onUpdated,
   });
 }

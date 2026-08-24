@@ -36,6 +36,9 @@ jobs:
       - name: Lint JavaScript and TypeScript
         run: npm run lint
 
+      - name: Lint against official Obsidian plugin guidelines
+        run: npm run lint:obsidian
+
       - name: Typecheck
         run: npm run typecheck
 

@@ -584,3 +584,87 @@ test("mode persistence failure restores controller mode and reports an actionabl
   assert.equal(controller.getHealth().activity, "error");
   assert.match(controller.getHealth().lastError ?? "", /Could not persist Reading Mode/);
 });
+
+test("Standard persistence failure keeps controller in Reading, rearms the watcher, reports an actionable error, and a later successful disable still reaches Standard", async () => {
+  const clock = new FakeClock();
+  let shouldFail = true;
+  const setup = deps(clock, {
+    onModeChange: async (mode) => {
+      if (mode === "standard" && shouldFail) {
+        throw new Error("settings write failed");
+      }
+    },
+  });
+  const controller = new ReadingModeController(setup.options);
+
+  await controller.enable();
+  assert.equal(controller.getMode(), "reading");
+  const pollHandlesAfterEnable = clock.intervals.size;
+  assert.equal(pollHandlesAfterEnable, 1);
+
+  await controller.disable();
+
+  assert.equal(controller.getMode(), "reading");
+  assert.equal(controller.getHealth().mode, "reading");
+  assert.equal(controller.getHealth().activity, "error");
+  assert.match(controller.getHealth().lastError ?? "", /Could not persist Standard Mode/);
+  // The watcher is rearmed (not left stopped) since Reading Mode is still active.
+  assert.equal(clock.intervals.size, 1);
+
+  shouldFail = false;
+  await controller.disable();
+
+  assert.equal(controller.getMode(), "standard");
+  assert.equal(controller.getHealth().activity, "disabled");
+  assert.equal(controller.getHealth().lastError, null);
+  assert.equal(clock.intervals.size, 0);
+});
+
+test("selecting Standard while already Standard is a no-op: no persistence call, no health change", async () => {
+  const clock = new FakeClock();
+  let modeChangeCalls = 0;
+  let healthChanges = 0;
+  const setup = deps(clock, {
+    onModeChange: async () => { modeChangeCalls += 1; },
+    onHealthChange: () => { healthChanges += 1; },
+  });
+  const controller = new ReadingModeController(setup.options);
+
+  assert.equal(controller.getMode(), "standard");
+  await controller.disable();
+
+  assert.equal(controller.getMode(), "standard");
+  assert.equal(modeChangeCalls, 0);
+  assert.equal(healthChanges, 0);
+});
+
+test("selecting Reading while already Reading is a no-op and does not re-sync", async () => {
+  const clock = new FakeClock();
+  const setup = deps(clock);
+  const controller = new ReadingModeController(setup.options);
+
+  await controller.enable();
+  const importsAfterFirstEnable = setup.getImports();
+
+  const outcome = await controller.enable();
+
+  assert.deepEqual(outcome, { enabled: true, initialImport: false });
+  assert.equal(setup.getImports(), importsAfterFirstEnable);
+});
+
+test("Standard can be selected after Reading and disable is idempotent when repeated", async () => {
+  const clock = new FakeClock();
+  const setup = deps(clock);
+  const controller = new ReadingModeController(setup.options);
+
+  await controller.enable();
+  assert.equal(controller.getMode(), "reading");
+
+  await controller.disable();
+  assert.equal(controller.getMode(), "standard");
+  assert.equal(controller.getHealth().activity, "disabled");
+
+  await controller.disable();
+  assert.equal(controller.getMode(), "standard");
+  assert.equal(controller.getHealth().activity, "disabled");
+});

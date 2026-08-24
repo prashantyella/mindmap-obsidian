@@ -1,0 +1,40 @@
+{
+  "provenance": {
+    "fixtureSchemaVersion": 1,
+    "pythonOracleFile": "python/mindmap.py",
+    "pythonOracleSha256": "ba73eaaaf19960bb95c66022286882fa7d6104d568179c503cc1c10298da7e1c",
+    "generator": "tools/parity/generate_fixtures.py"
+  },
+  "cases": [
+    {
+      "name": "build_runtime_issue with guidance and context",
+      "level": "error",
+      "code": "NOTE_TARGET_MISSING",
+      "message": "Individual note not found: Notes/Missing.md",
+      "guidance": "Use one existing vault-relative Markdown path.",
+      "context": {
+        "path": "Notes/Missing.md"
+      },
+      "output": {
+        "level": "error",
+        "code": "NOTE_TARGET_MISSING",
+        "message": "Individual note not found: Notes/Missing.md",
+        "guidance": "Use one existing vault-relative Markdown path.",
+        "context": {
+          "path": "Notes/Missing.md"
+        }
+      }
+    },
+    {
+      "name": "build_runtime_issue without guidance/context",
+      "level": "warn",
+      "code": "PREVIEW_ENTRY_INVALID",
+      "message": "Skipping preview entry because it is not a JSON object.",
+      "output": {
+        "level": "warn",
+        "code": "PREVIEW_ENTRY_INVALID",
+        "message": "Skipping preview entry because it is not a JSON object."
+      }
+    }
+  ]
+}

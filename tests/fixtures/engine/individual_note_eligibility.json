@@ -1,0 +1,38 @@
+{
+  "provenance": {
+    "fixtureSchemaVersion": 1,
+    "pythonOracleFile": "python/mindmap.py",
+    "pythonOracleSha256": "ba73eaaaf19960bb95c66022286882fa7d6104d568179c503cc1c10298da7e1c",
+    "generator": "tools/parity/generate_fixtures.py"
+  },
+  "cases": [
+    {
+      "name": "ordinary note meets configured minimum word count",
+      "text": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word ",
+      "frontmatter": {
+        "type": "note"
+      },
+      "configured_minimum": 50,
+      "meets_minimum": true
+    },
+    {
+      "name": "ordinary note below configured minimum word count is ineligible",
+      "text": "too short",
+      "frontmatter": {
+        "type": "note"
+      },
+      "configured_minimum": 50,
+      "meets_minimum": false
+    },
+    {
+      "name": "Apple annotation note uses the fixed 8-word minimum regardless of configured minimum",
+      "text": "one two three four five six seven eight nine",
+      "frontmatter": {
+        "type": "apple-books-annotation"
+      },
+      "configured_minimum": 200,
+      "minimum_words_for_note": 8,
+      "meets_minimum": true
+    }
+  ]
+}

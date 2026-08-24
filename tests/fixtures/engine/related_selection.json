@@ -1,0 +1,96 @@
+{
+  "provenance": {
+    "fixtureSchemaVersion": 1,
+    "pythonOracleFile": "python/mindmap.py",
+    "pythonOracleSha256": "ba73eaaaf19960bb95c66022286882fa7d6104d568179c503cc1c10298da7e1c",
+    "generator": "tools/parity/generate_fixtures.py"
+  },
+  "cases": [
+    {
+      "name": "select_mindmap_links applies core/overreach/creative/fill tie-breaking",
+      "candidates": [
+        [
+          "Notes/A.md",
+          0.95
+        ],
+        [
+          "Notes/B.md",
+          0.9
+        ],
+        [
+          "Journal/C.md",
+          0.88
+        ],
+        [
+          "Notes/D.md",
+          0.6
+        ],
+        [
+          "Notes/E.md",
+          0.5
+        ],
+        [
+          "Journal/F.md",
+          0.3
+        ]
+      ],
+      "self_path": "Notes/Self.md",
+      "related_limit": 4,
+      "overreach_count": 1,
+      "creative_count": 1,
+      "creative_min": 0.45,
+      "creative_max": 0.65,
+      "output": [
+        [
+          "Notes/A.md",
+          "core"
+        ],
+        [
+          "Notes/B.md",
+          "core"
+        ],
+        [
+          "Journal/C.md",
+          "overreach"
+        ],
+        [
+          "Notes/D.md",
+          "creative"
+        ]
+      ]
+    },
+    {
+      "name": "select_mindmap_links excludes self and preserves input order on score ties",
+      "candidates": [
+        [
+          "Notes/X.md",
+          0.5
+        ],
+        [
+          "Notes/Y.md",
+          0.5
+        ],
+        [
+          "Notes/Self.md",
+          0.99
+        ]
+      ],
+      "self_path": "Notes/Self.md",
+      "related_limit": 2,
+      "overreach_count": 0,
+      "creative_count": 0,
+      "creative_min": 0.45,
+      "creative_max": 0.65,
+      "output": [
+        [
+          "Notes/X.md",
+          "core"
+        ],
+        [
+          "Notes/Y.md",
+          "core"
+        ]
+      ]
+    }
+  ]
+}

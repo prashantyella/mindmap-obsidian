@@ -8,6 +8,7 @@ import {
   isSafeReadingPath,
   parseReadingState,
   planAnnotationPaths,
+  READING_ROOT,
   sanitizePathComponent,
   validateAppleBooksReaderPayload,
   type AppleBooksAnnotation,
@@ -68,6 +69,12 @@ test("sanitizes Unicode, reserved, empty, and traversal-like path components", (
   assert.equal(isSafeReadingPath(path), true);
   assert.equal(path.includes(".."), false);
   assert.equal(path.includes(".obsidian"), false);
+});
+
+test("isSafeReadingPath rejects any hidden/dot-prefixed segment, not just the literal .obsidian default", () => {
+  // Vault#configDir is user-configurable; a custom config folder name must
+  // still be treated as unsafe, not just the literal ".obsidian" default.
+  assert.equal(isSafeReadingPath(`${READING_ROOT}/.custom-config/note.md`), false);
 });
 
 test("keeps stored paths stable and resolves occupied collisions deterministically", () => {
