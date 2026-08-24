@@ -162,13 +162,14 @@ void test("CHANGELOG.md documents the current release under its own version head
 });
 
 // ---------------------------------------------------------------------------
-// (7) esbuild must lower dynamic import() so readingVault.ts's
-// `await import("obsidian")` compiles to a deferred require("obsidian")
-// (the only form Obsidian's CommonJS plugin loader resolves), rather than
-// being preserved as a native dynamic import of a bare specifier.
+// (7) readingVault.ts must load "obsidian" through require, not a dynamic
+// import(): esbuild preserves a dynamic import() of an external bare
+// specifier verbatim in the CommonJS bundle, and Obsidian's CommonJS
+// plugin loader can't resolve that form for "obsidian".
 // ---------------------------------------------------------------------------
 
-void test("esbuild.config.mjs lowers dynamic import so external bare-specifier import(\"obsidian\") resolves through require", () => {
-  const config = readSource("esbuild.config.mjs");
-  assert.match(config, /supported:\s*\{\s*["']dynamic-import["']:\s*false\s*\}/);
+void test("readingVault.ts loads \"obsidian\" via require, never a dynamic import() that esbuild would preserve unresolved", () => {
+  const source = readSource("src/readingVault.ts");
+  assert.match(source, /require\(["']obsidian["']\)/);
+  assert.doesNotMatch(source, /\bimport\s*\(\s*["']obsidian["']\s*\)/);
 });

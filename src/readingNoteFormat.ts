@@ -241,13 +241,13 @@ function hasWikilinkDelimiter(value: string): boolean {
   return /[[\]|]/.test(value);
 }
 
-/** Reuses the general vault-relative Markdown path rules (not limited to Books/Apple Books), plus the extra checks a wikilink target needs. `configDir` rejects a target inside Obsidian's config folder when the caller has one available. */
-export function isSafeRelatedTarget(fullPath: string, configDir?: string): boolean {
-  return isSafeIndividualNotePath(fullPath, configDir) && !hasControlCharacter(fullPath) && !hasWikilinkDelimiter(fullPath);
+/** Reuses the general vault-relative Markdown path rules (not limited to Books/Apple Books), plus the extra checks a wikilink target needs. */
+export function isSafeRelatedTarget(fullPath: string): boolean {
+  return isSafeIndividualNotePath(fullPath) && !hasControlCharacter(fullPath) && !hasWikilinkDelimiter(fullPath);
 }
 
-export function relatedNoteWikilink(fullPath: string, configDir?: string): string | undefined {
-  if (!isSafeRelatedTarget(fullPath, configDir)) {
+export function relatedNoteWikilink(fullPath: string): string | undefined {
+  if (!isSafeRelatedTarget(fullPath)) {
     return undefined;
   }
   const target = stripMarkdownExtension(fullPath);

@@ -1631,7 +1631,6 @@ export default class MindmapPlugin extends Plugin {
         const result = await importAppleBooksAnnotations(payload, {
           vault: createObsidianVaultApi(this.app.vault),
           state,
-          configDir: this.app.vault.configDir,
         });
         return {
           imported: result.imported,

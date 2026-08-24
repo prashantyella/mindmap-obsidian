@@ -62,8 +62,6 @@ export interface AnnotationImporterOptions {
   vault: ReadingVault;
   state: ReadingStateStore;
   now?: () => string;
-  /** Obsidian's configured configuration folder (Vault#configDir), used to reject a related-note wikilink target that resolves inside it. */
-  configDir?: string;
 }
 
 export async function updateAppleAnnotationResearchStatus(
@@ -352,7 +350,7 @@ export async function importAppleBooksAnnotations(
         failures.push({ annotationId: annotation.annotation_id, stage: "note", message: errorMessage(error) });
         continue;
       }
-      if (!noteNeedsFormatCleanup(existingText, annotation, options.configDir)) {
+      if (!noteNeedsFormatCleanup(existingText, annotation)) {
         const durableStatus = readFrontmatterValue(existingText, "research_status");
         if (previous.researchStatus === "too-short" || annotationIsTooShort(annotation)) {
           if (durableStatus !== "too-short") {
@@ -462,7 +460,7 @@ export async function importAppleBooksAnnotations(
       let noteText = renderAnnotationNote(renderInput, annotation, {
         importedAt,
         researchStatus,
-      }, options.configDir);
+      });
 
       if (sourceChanged) {
         noteText = removeFrontmatterKeysFromText(noteText, ["research"]);
@@ -599,10 +597,9 @@ export function renderAnnotationNote(
   existingText: string,
   annotation: AppleBooksAnnotation,
   values: Pick<ReadingStateEntry, "importedAt" | "researchStatus">,
-  configDir?: string,
 ): string {
   const withoutGenerated = removeFrontmatterKeysFromText(existingText, GENERATED_FRONTMATTER_KEYS);
-  const withReadableLinks = convertFrontmatterWikilinkLists(withoutGenerated, configDir);
+  const withReadableLinks = convertFrontmatterWikilinkLists(withoutGenerated);
   const frontmatter = upsertManagedFrontmatter(withReadableLinks, {
     type: "apple-books-annotation",
     source: "apple-books",
@@ -770,9 +767,9 @@ function wikilinkTarget(value: string): string | undefined {
 }
 
 /** relatedNoteWikilink strips the .md extension for display; isSafeRelatedTarget expects it back to validate the underlying vault path. */
-function isSafeExistingRelatedWikilink(raw: string, configDir?: string): boolean {
+function isSafeExistingRelatedWikilink(raw: string): boolean {
   const target = wikilinkTarget(raw);
-  return target !== undefined && isSafeRelatedTarget(`${target}.md`, configDir);
+  return target !== undefined && isSafeRelatedTarget(`${target}.md`);
 }
 
 function unquoteYamlScalar(raw: string): string {
@@ -836,19 +833,14 @@ function convertBlockList(
   return [...lines.slice(0, headerIndex), ...replacement, ...lines.slice(end)];
 }
 
-function convertFrontmatterWikilinkLists(text: string, configDir?: string): string {
+function convertFrontmatterWikilinkLists(text: string): string {
   const parts = splitFrontmatter(text);
   if (!parts.frontmatter) {
     return text;
   }
   let lines = parts.frontmatter.split("\n");
   lines = convertBlockList(lines, "concepts", conceptWikilink);
-  lines = convertBlockList(
-    lines,
-    "related",
-    (raw) => relatedNoteWikilink(raw, configDir),
-    (raw) => isSafeExistingRelatedWikilink(raw, configDir),
-  );
+  lines = convertBlockList(lines, "related", relatedNoteWikilink, isSafeExistingRelatedWikilink);
   return composeFrontmatter(lines.join("\n"), parts.body);
 }
 
@@ -862,7 +854,7 @@ function convertFrontmatterWikilinkLists(text: string, configDir?: string): stri
  * clean, up-to-date note returns false so the unchanged fast path stays a
  * true no-op.
  */
-function noteNeedsFormatCleanup(existingText: string, annotation: AppleBooksAnnotation, configDir?: string): boolean {
+function noteNeedsFormatCleanup(existingText: string, annotation: AppleBooksAnnotation): boolean {
   if (existingText.includes(READING_SOURCE_START) || existingText.includes(READING_SOURCE_END)) {
     return true;
   }
@@ -880,7 +872,7 @@ function noteNeedsFormatCleanup(existingText: string, annotation: AppleBooksAnno
   if (blockListNeedsCleanup(lines, "concepts", isAlreadyWikilink)) {
     return true;
   }
-  if (blockListNeedsCleanup(lines, "related", (value) => isAlreadyWikilink(value) && isSafeExistingRelatedWikilink(value, configDir))) {
+  if (blockListNeedsCleanup(lines, "related", (value) => isAlreadyWikilink(value) && isSafeExistingRelatedWikilink(value))) {
     return true;
   }
   const currentLocation = readFrontmatterValue(existingText, "location") ?? "";
