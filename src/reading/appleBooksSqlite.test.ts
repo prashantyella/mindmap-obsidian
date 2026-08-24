@@ -841,7 +841,7 @@ void test("readAnnotations (direct mode, non-WAL fixture): db/-wal/-shm existenc
     }
   }));
 
-void test("readAnnotations (forced backup mode, WAL fixture): original db and -wal content are byte-for-byte unchanged; -shm keeps its size and is never removed (its content/mtime are inherent, harmless SQLite WAL bookkeeping, not a mutation)", () =>
+void test("readAnnotations (forced backup mode, WAL fixture): original db and -wal content are byte-for-byte unchanged; -shm keeps its size and is never removed (its content/mtime are inherent, harmless SQLite WAL bookkeeping, not a mutation)", (testContext) =>
   withFixtureRoot(async (root) => {
     // A WAL-mode database's -shm file is shared reader-lock/wal-index bookkeeping that SQLite
     // rewrites on every read CONNECTION -- direct AND via `.backup`, regardless of -readonly --
@@ -862,6 +862,10 @@ void test("readAnnotations (forced backup mode, WAL fixture): original db and -w
       "PRAGMA journal_mode=WAL; CREATE TABLE ZAEANNOTATION (Z_PK INTEGER PRIMARY KEY, ZANNOTATIONUUID TEXT, ZANNOTATIONSELECTEDTEXT TEXT); INSERT INTO ZAEANNOTATION VALUES (1,'uuid-1','Integrity passage.');",
     ]);
     const before = await snapshotDatabase(dbPath);
+    if (!before.wal.exists || !before.shm.exists) {
+      testContext.skip("This SQLite build checkpoints and removes WAL sidecars when the setup connection closes.");
+      return;
+    }
     assert.equal(before.wal.exists, true);
     assert.equal(before.shm.exists, true);
 
