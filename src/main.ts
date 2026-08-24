@@ -1383,6 +1383,7 @@ export default class MindmapPlugin extends Plugin {
         const result = await importAppleBooksAnnotations(payload, {
           vault: createObsidianVaultApi(this.app.vault, TFile),
           state,
+          configDir: this.app.vault.configDir,
         });
         return {
           imported: result.imported,
@@ -1846,6 +1847,10 @@ export default class MindmapPlugin extends Plugin {
       onFault: (fault) => {
         this.appendLog(`[production-engine] ${fault.source} fault: ${fault.code}`);
       },
+      onMigrationComplete: () => {
+        void this.refreshCachedMigrationStatus();
+        this.invalidateLiveMindmapViews();
+      },
     };
   }
 
@@ -1914,6 +1919,15 @@ export default class MindmapPlugin extends Plugin {
 
   async refreshCachedMigrationStatus(): Promise<void> {
     this.cachedMigrationStatus = await this.getProductionMigrationStatus();
+  }
+
+  /** Checkpoint 10B SIDEBAR: called once per `ProductionEngine.onMigrationComplete` firing -- resets every open Mindmap sidebar's live-query cache so an `indexed: false` result cached while migration was still running gets re-queried, rather than staying cached forever (`MindmapWorkspaceView.ensureLiveQuery` otherwise never re-fetches for an unchanged active path). Bounded and one-shot per firing: this does not itself trigger a render loop, since `invalidateLiveQuery()` only resets to idle and renders once. */
+  private invalidateLiveMindmapViews(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(MINDMAP_VIEW_TYPE)) {
+      if (leaf.view instanceof MindmapWorkspaceView) {
+        leaf.view.invalidateLiveQuery();
+      }
+    }
   }
 
   /** Item 3: `true` once the production engine's ordinary JobEngine pump AND CoreScheduler have both actually started -- migration complete AND both Ollama readiness probes ok (see `ProductionEngine.tryStartOrdinaryWork`). */

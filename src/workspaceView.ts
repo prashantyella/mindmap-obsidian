@@ -12,6 +12,7 @@ import {
   NO_MINDMAP_CONNECTIONS_MESSAGE,
   NO_MINDMAP_CONNECTIONS_TITLE,
   shouldApplyLiveResponse,
+  shouldSkipLiveQuery,
   type SidebarLiveState,
 } from "./workspaceViewState";
 
@@ -262,6 +263,27 @@ export class MindmapWorkspaceView extends ItemView {
       }
       this.render();
     }));
+    this.render();
+  }
+
+  /**
+   * Checkpoint 10B SIDEBAR: one-shot cache reset for the active note's live
+   * query, called by main.ts exactly once when migration transitions to
+   * `"complete"` -- a query issued while migration was still running can
+   * have cached an `indexed: false` "ready" result that `ensureLiveQuery`
+   * would otherwise never re-fetch for this path. Mirrors the existing
+   * `metadataCache "changed"` handler above (reset to idle, keep the prior
+   * response for display continuity, then render once) rather than making
+   * every render re-check staleness, which would re-trigger a query on
+   * every subsequent render for a note that is still legitimately
+   * unindexed (out of scope, still queued, etc.) -- an unbounded
+   * query/render loop.
+   */
+  invalidateLiveQuery(): void {
+    if (this.liveState.path === "") {
+      return;
+    }
+    this.liveState = createIdleLiveState(this.liveState.path, this.liveState.response);
     this.render();
   }
 
@@ -544,7 +566,7 @@ export class MindmapWorkspaceView extends ItemView {
     if (!this.plugin.settings.liveSemanticLookupEnabled) {
       return;
     }
-    if (this.liveState.path === activeFile.path && this.liveState.status !== "idle") {
+    if (shouldSkipLiveQuery(this.liveState, activeFile.path)) {
       return;
     }
 

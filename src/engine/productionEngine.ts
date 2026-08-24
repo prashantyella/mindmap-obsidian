@@ -190,6 +190,8 @@ export interface ProductionEngineOptions {
   appleBooks: ProductionAppleBooksOptions;
   probes?: ProductionEngineProbes;
   onFault?: (fault: ProductionEngineFault) => void;
+  /** Checkpoint 10B SIDEBAR: fired every time migration settles at phase `"complete"` (mirrors the internal `tryStartOrdinaryWork()` call this shares a subscription with -- safe to fire more than once per engine instance, e.g. a later config-driven re-migration) -- lets a caller (main.ts) refresh anything that cached an empty/not-indexed result while migration was still running (e.g. an open Mindmap sidebar's `queryLiveRelated` cache), since the engine itself has no other way to reach that caller. Never fired for any other phase. */
+  onMigrationComplete?: () => void;
   preflightTimeoutMs?: number;
 }
 
@@ -400,6 +402,7 @@ export class ProductionEngine {
     // capability).
     this.unsubscribeMigration = this.migrationRunner.subscribe((status) => {
       if (status.phase !== "complete") return;
+      safelyNotify(() => options.onMigrationComplete?.());
       void this.tryStartOrdinaryWork();
     });
   }

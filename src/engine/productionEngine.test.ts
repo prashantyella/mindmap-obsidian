@@ -164,6 +164,44 @@ void test("ProductionEngine.startMigration() + provider readiness together clear
   await engine.dispose();
 });
 
+void test("ProductionEngine.onMigrationComplete fires once migration reaches complete, not before, and a throwing listener never breaks the engine (Checkpoint 10B sidebar cache invalidation hook)", async () => {
+  const fs = new FakeIndexFs();
+  const dataRoot = "/data";
+  await buildGeneration(fs, dataRoot, { generationId: 1, embeddingModel: "nomic-embed-text", dimension: 768, notes: [] }, {});
+  await switchCurrentGeneration(fs, dataRoot, 1);
+
+  let completeCount = 0;
+  const engine = new ProductionEngine(baseOptions({
+    fs,
+    dataRoot,
+    ...readyProviders(),
+    onMigrationComplete: () => {
+      completeCount += 1;
+      throw new Error("a throwing listener must not break the engine");
+    },
+  }) as ProductionEngineOptions);
+  await engine.start();
+  assert.equal(completeCount, 0, "must not fire before migration is started, e.g. on a fresh not-started migration");
+
+  const status = await engine.startMigration();
+  assert.equal(status.phase, "complete");
+  assert.equal(completeCount, 1, "must fire exactly once for this single completion");
+  await engine.dispose();
+});
+
+void test("ProductionEngine never throws when onMigrationComplete is omitted", async () => {
+  const fs = new FakeIndexFs();
+  const dataRoot = "/data";
+  await buildGeneration(fs, dataRoot, { generationId: 1, embeddingModel: "nomic-embed-text", dimension: 768, notes: [] }, {});
+  await switchCurrentGeneration(fs, dataRoot, 1);
+
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, ...readyProviders() }) as ProductionEngineOptions);
+  await engine.start();
+  const status = await engine.startMigration();
+  assert.equal(status.phase, "complete");
+  await engine.dispose();
+});
+
 void test("ProductionEngine.startMigration()/retryMigration() (item 2) throw a closed MIGRATION_NOT_STARTABLE error with NO state mutation when the engine itself has never started", async () => {
   const engine = new ProductionEngine(baseOptions(readyProviders() as ProductionEngineOptions));
   await assert.rejects(() => engine.startMigration(), (error: unknown) => isEngineError(error) && error.code === "MIGRATION_NOT_STARTABLE");
