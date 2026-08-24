@@ -1,15 +1,18 @@
 import { createHash } from "node:crypto";
 
-import type { CanonicalPath, NoteIdentityV1 } from "../engine/contracts";
+import type { CanonicalPath, IndexRecordV1, NoteIdentityV1 } from "../engine/contracts";
 import { compareScored, CosineIndexError, dotProduct, MAX_RANKING_LIMIT, normalizeVector } from "./cosineIndex";
 import { identityKey, type NoteRowMetadataV1 } from "./generationMetadata";
 import {
   buildGeneration,
   cleanupStaleStaging,
+  countStaleStaging,
   GenerationBuildCancelledError,
   loadCurrentGenerationId,
+  loadCurrentGenerationManifest,
   loadGeneration,
   switchCurrentGeneration,
+  verifyGenerationFully,
   type BuildGenerationInput,
   type GenerationInputNote,
   type LoadedGeneration,
@@ -248,6 +251,76 @@ export async function queryRelated(fs: IndexFs, root: string, options: QueryRela
 
   refined.sort(compareScored);
   return refined.slice(0, options.limit);
+}
+
+/**
+ * Read-only, single-identity lookup of the committed view's current index
+ * record (base generation row shadowed by the latest matching overlay, if
+ * any) -- an owned-overlay validation failure fails closed exactly like
+ * `queryRelated`'s own `loadOverlayPrefixesOrThrow`, never silently
+ * skipped. Returns `null` when the identity is not currently indexed
+ * (never present, or tombstoned) -- never a fabricated record.
+ */
+export async function getIndexedRecord(fs: IndexFs, root: string, identity: NoteIdentityV1): Promise<IndexRecordV1 | null> {
+  const overlays = await loadOverlayPrefixesOrThrow(fs, root);
+  const key = identityKey(identity);
+  const overlay = overlays.find((o) => identityKey(o.identity) === key);
+  if (overlay) {
+    if (overlay.operation !== "upsert" || overlay.sourceHash === undefined || overlay.embeddingModel === undefined || overlay.chunkCount === undefined) {
+      return null;
+    }
+    return { schemaVersion: 1, identity: overlay.identity, sourceHash: overlay.sourceHash, embeddingModel: overlay.embeddingModel, chunkCount: overlay.chunkCount };
+  }
+  const generationId = await loadCurrentGenerationId(fs, root);
+  if (generationId === null) return null;
+  const generation = await loadGeneration(fs, root, generationId);
+  const row = generation.noteMetadata.find((r) => identityKey(r.identity) === key);
+  return row ?? null;
+}
+
+export interface IndexedCatalogRecord {
+  identity: NoteIdentityV1;
+  sourceHash: string;
+}
+
+/**
+ * Checkpoint 10B PENDING: a fully-verified, read-only snapshot of every
+ * identity/sourceHash the committed view currently holds -- the base
+ * generation is checked through the SAME `verifyGenerationFully` a real
+ * activation runs (checksums, shape/count agreement, every shard
+ * cross-checked), never the cheap `loadGeneration` `getIndexedRecord`
+ * itself uses, since a pending scanner comparing against this snapshot
+ * needs to trust it is real rather than possibly corrupt. Overlays shadow
+ * base rows exactly like `queryRelated`/`getIndexedRecord`: a tombstoned
+ * or upsert-shadowed base row is never double-counted. Returns `null` --
+ * never a partial/fabricated snapshot -- when there is a current
+ * generation pointer but its verification fails; returns `[]` (never
+ * `null`) when there is genuinely no current generation yet (a fresh,
+ * not-yet-built index is a legitimate "nothing indexed", not a failure).
+ */
+export async function snapshotIndexedCatalog(fs: IndexFs, root: string): Promise<IndexedCatalogRecord[] | null> {
+  const generationId = await loadCurrentGenerationId(fs, root);
+  let baseRecords: readonly NoteRowMetadataV1[] = [];
+  if (generationId !== null) {
+    try {
+      const { noteMetadata } = await verifyGenerationFully(fs, root, generationId);
+      baseRecords = noteMetadata;
+    } catch {
+      return null;
+    }
+  }
+  const overlays = await loadOverlayPrefixesOrThrow(fs, root);
+  const shadow = buildShadowInfo(overlays);
+  const result: IndexedCatalogRecord[] = [];
+  for (const row of baseRecords) {
+    if (shadow.byKey.has(identityKey(row.identity))) continue; // shadowed by a later overlay (tombstone or upsert) -- handled below, or removed
+    result.push({ identity: row.identity, sourceHash: row.sourceHash });
+  }
+  for (const overlay of overlays) {
+    if (overlay.operation !== "upsert" || overlay.sourceHash === undefined) continue;
+    result.push({ identity: overlay.identity, sourceHash: overlay.sourceHash });
+  }
+  return result;
 }
 
 export interface UpsertNoteInput {
@@ -843,6 +916,62 @@ export class IndexStore {
     return queryRelated(this.fs, this.root, options);
   }
 
+  /** Read-only single-identity lookup -- see `getIndexedRecord`'s own doc comment. */
+  getRecord(identity: NoteIdentityV1): Promise<IndexRecordV1 | null> {
+    return getIndexedRecord(this.fs, this.root, identity);
+  }
+
+  /** Read-only, fully-verified catalog snapshot -- see `snapshotIndexedCatalog`'s own doc comment. */
+  snapshotCatalog(): Promise<IndexedCatalogRecord[] | null> {
+    return snapshotIndexedCatalog(this.fs, this.root);
+  }
+
+  /**
+   * Read-only, manifest-only note count for the CURRENT committed
+   * generation, when one exists (`null` when there is no current
+   * pointer yet -- a fresh/empty index, never a fabricated `0`). This is
+   * deliberately the CHEAP, NOT-fully-verified count: it confirms a
+   * pointer and a manifest exist, never that `notes.mvx`/`notes.meta.json`
+   * checksums, shapes, or shard declarations actually check out. A caller
+   * that needs to prove the generation is genuinely trustworthy before
+   * querying/reporting a count against it must use
+   * `verifyCurrentGenerationFully()` instead -- see that method's own doc
+   * comment (Checkpoint 9 closure review item 6: "does not prove a current
+   * generation is fully verified despite comments/report claims").
+   */
+  async getCurrentNoteCount(): Promise<number | null> {
+    const manifest = await loadCurrentGenerationManifest(this.fs, this.root);
+    return manifest ? manifest.noteCount : null;
+  }
+
+  /**
+   * Read-only, FULLY verified summary of the current committed generation
+   * -- runs the exact same integrity check (`verifyGenerationFully`,
+   * shared with `switchCurrentGeneration`/`compact`'s own pre-activation
+   * verification) a real activation would: checksums for
+   * `notes.mvx`/`notes.meta.json` against the manifest, shape/count
+   * agreement, every chunk shard's declared ownership cross-checked, and
+   * a sample ranking query actually run against the resident data.
+   * Returns `null` -- never throws, never a fabricated count -- when
+   * there is no current generation yet, OR when verification itself
+   * fails for any reason (a corrupt/tampered shard, a checksum mismatch,
+   * etc.): a caller that needs "this generation is real and intact"
+   * before wiring a query/count into a comparison must treat `null`
+   * exactly like "no generation exists", never attempt to partially
+   * trust a failed verification. Read-only: never writes/activates
+   * anything, unlike `compact()`'s own use of the same underlying check.
+   */
+  async verifyCurrentGenerationFully(): Promise<{ noteCount: number } | null> {
+    const generationId = await loadCurrentGenerationId(this.fs, this.root);
+    if (generationId === null) return null;
+    try {
+      const { manifest } = await verifyGenerationFully(this.fs, this.root, generationId);
+      return { noteCount: manifest.noteCount };
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Rejects (before writing anything) if: the pending-overlay-file budget
    * (`MAX_PENDING_OVERLAY_COUNT`/`MAX_PENDING_OVERLAY_CHUNK_ROWS`) would
@@ -926,6 +1055,11 @@ export class IndexStore {
   /** Best-effort startup housekeeping: removes any staging directory left behind by a build that never completed (including a cancelled one). Never touches `generations/`, `current.json`, or `overlays/`. */
   cleanupStaleStaging(): Promise<number> {
     return cleanupStaleStaging(this.fs, this.root);
+  }
+
+  /** Read-only: counts stale staging directories without removing them -- for preflight, which must never mutate (Checkpoint 9 requirement 2). */
+  countStaleStaging(): Promise<number> {
+    return countStaleStaging(this.fs, this.root);
   }
 }
 

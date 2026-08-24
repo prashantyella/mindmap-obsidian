@@ -24,10 +24,13 @@ const MAX_CHUNK_INPUT_CHARS = 2_000_000;
 const MAX_OVERLAP_TOKENS = 5_000_000;
 const MAX_TARGET_TOKENS = 5_000_000;
 
-function assertBounded(text: string, options: ChunkOptions): void {
-  if (text.length > MAX_CHUNK_INPUT_CHARS) {
-    throw new EngineError("CHUNK_INPUT_INVALID", "Chunker input exceeds the maximum bounded character length.", { length: text.length, maxChars: MAX_CHUNK_INPUT_CHARS });
-  }
+/**
+ * Validates `options` alone, independent of any input text -- exported so a
+ * caller (e.g. `runShadowComparison`) can fail closed on a bad chunk
+ * configuration BEFORE doing any source/provider work, including for an
+ * empty sample where `chunkText` itself would otherwise never run.
+ */
+export function validateChunkTokenOptions(options: ChunkOptions): void {
   if (!Number.isInteger(options.targetTokens) || options.targetTokens <= 0 || options.targetTokens > MAX_TARGET_TOKENS) {
     throw new EngineError("CHUNK_INPUT_INVALID", "Chunker targetTokens must be a positive integer within the bounded range.", { maxTargetTokens: MAX_TARGET_TOKENS });
   }
@@ -43,6 +46,13 @@ function assertBounded(text: string, options: ChunkOptions): void {
       { targetWords, overlapWords },
     );
   }
+}
+
+function assertBounded(text: string, options: ChunkOptions): void {
+  if (text.length > MAX_CHUNK_INPUT_CHARS) {
+    throw new EngineError("CHUNK_INPUT_INVALID", "Chunker input exceeds the maximum bounded character length.", { length: text.length, maxChars: MAX_CHUNK_INPUT_CHARS });
+  }
+  validateChunkTokenOptions(options);
 }
 
 /**

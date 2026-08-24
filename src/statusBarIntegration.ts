@@ -13,11 +13,28 @@ export interface StatusBarInternalState {
   schedulerDetails: StatusBarMenuState["schedulerDetails"];
 }
 
+/** Item 3: `MigrationMessageCode`-shaped codes ("DISCOVERING_NOTES", "BUILDING_INDEX", ...) rendered as plain human-readable text ("discovering notes", "building index", ...) for the status bar menu -- never the raw enum code shown verbatim to a user. */
+function formatMigrationMessage(messageCode: string): string {
+  return messageCode.toLowerCase().replace(/_/g, " ");
+}
+
 export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: StatusBarInternalState): StatusBarMenuState {
   const runtimeSetupState = plugin.getRuntimeSetupState();
+  const migrationStatus = plugin.getCachedProductionMigrationStatus();
   return buildStatusBarMenuState({
     runtimeSetup: runtimeSetupState
       ? { phase: runtimeSetupState.phase, message: runtimeSetupState.message, canSetup: runtimeSetupState.canSetup, canCancel: runtimeSetupState.canCancel, blocking: runtimeSetupState.blocking }
+      : undefined,
+    migration: migrationStatus
+      ? {
+        phase: migrationStatus.phase,
+        message: formatMigrationMessage(migrationStatus.messageCode),
+        discoveredCount: migrationStatus.discoveredCount,
+        processedCount: migrationStatus.processedCount,
+        canStart: migrationStatus.canStart,
+        canRetry: migrationStatus.canRetry,
+        canCancel: migrationStatus.canCancel,
+      }
       : undefined,
     pending: plugin.getPendingSnapshot(),
     running: internal.running,
@@ -76,12 +93,16 @@ export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMe
     startRuntimeSetup: async () => { await plugin.startRuntimeSetup(); },
     cancelRuntimeSetup: () => { plugin.cancelRuntimeSetup(); },
     openPythonDownload: () => { plugin.openPythonRuntimeDownloadPage(); },
+    startMigration: async () => { await plugin.startProductionMigration(); },
+    retryMigration: async () => { await plugin.retryProductionMigration(); },
+    cancelMigration: async () => { await plugin.cancelProductionMigration(); },
   };
 }
 
 export async function openMindmapStatusMenu(plugin: MindmapPlugin, event?: MouseEvent | KeyboardEvent): Promise<void> {
   await plugin.refreshActiveNoteEligibility();
   await plugin.refreshLaunchAgentHealth();
+  await plugin.refreshCachedMigrationStatus();
   if (!plugin.statusBarEl) {
     return;
   }

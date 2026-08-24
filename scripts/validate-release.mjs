@@ -266,4 +266,72 @@ if (!manifest.authorUrl || manifest.authorUrl.trim().length === 0) {
   }
 }
 
+// Checkpoint 9 requirement 4/13: the production dev-shadow isolation audit is authoritative HERE
+// (running against the dist/main.js this same "npm run check"/"npm run validate" pipeline just
+// built via "npm run build", immediately before this script), not in a unit test that can no-op
+// silently on a missing/stale dist/main.js. See productionBuildIsolation.test.ts for the
+// unit-level config-wiring checks (esbuild.config.mjs plugin wiring, source-level import
+// patterns) that remain useful even without a build, but are NOT a substitute for this gate.
+{
+  const distMainPath = path.join("dist", "main.js");
+  if (!fs.existsSync(distMainPath)) {
+    throw new Error(`${distMainPath} does not exist -- run "npm run build" before "npm run validate".`);
+  }
+  const distMain = fs.readFileSync(distMainPath, "utf8");
+  // Checkpoint 10B: main.ts now constructs/owns a REAL `ProductionEngine` directly (the actual
+  // cutover this list previously guarded against ever reaching main.ts's own import graph -- see
+  // productionEngineIsolation.test.ts's now-flipped "main.ts DOES construct ProductionEngine"
+  // check). `planCatalogSample`/`RESEARCH_COMPANION`/`verifyCurrentGenerationFully` are reached
+  // through `ProductionEngine`'s own real composition (`vaultCatalogPlanner.ts`/
+  // `generationStore.ts`), never through the dev-only shadow module -- their presence in
+  // dist/main.js is now expected and correct, not a leak. Every OTHER entry below still guards
+  // real dev-shadow-only surface (`MindmapEngine`, `runShadowComparison`,
+  // `createVaultCatalogShadowSource`, `devShadowIntegration.ts`, etc.) that must still never
+  // appear in a production build.
+  const FORBIDDEN_IN_PRODUCTION_DIST = [
+    { label: "dev shadow command id", pattern: /mindmap-dev-run-shadow-diagnostics/ },
+    { label: "dev shadow command name", pattern: /Development: Run TypeScript shadow diagnostics/ },
+    { label: "runDevelopmentShadowDiagnostics identifier", pattern: /runDevelopmentShadowDiagnostics/ },
+    { label: "getOrCreateMindmapEngine identifier (Checkpoint 9's legacy composer)", pattern: /getOrCreateMindmapEngine/ },
+    { label: "shadowEngine.ts source path reference", pattern: /src\/engine\/shadowEngine\.ts/ },
+    { label: "shadow reason string PROJECTION_FAILED", pattern: /PROJECTION_FAILED/ },
+    { label: "shadow reason string RELATED_PREVIEW_UNAVAILABLE", pattern: /RELATED_PREVIEW_UNAVAILABLE/ },
+    { label: "dev summary string 'Mindmap dev shadow:'", pattern: /Mindmap dev shadow:/ },
+    { label: "tools/parity reference", pattern: /tools\/parity/ },
+    { label: "runShadowComparison function name", pattern: /runShadowComparison/ },
+    { label: "createVaultCatalogShadowSource function name", pattern: /createVaultCatalogShadowSource/ },
+    { label: "MindmapEngine class name", pattern: /class MindmapEngine/ },
+    { label: "NodeOwnedFs class name", pattern: /class NodeOwnedFs/ },
+    { label: "virtual:mindmap-dev-shadow module marker", pattern: /virtual:mindmap-dev-shadow/ },
+    { label: "createDevShadowIntegration factory name", pattern: /createDevShadowIntegration/ },
+    { label: "DevShadowIntegration type/identifier name", pattern: /DevShadowIntegration/ },
+    { label: "getOrCreateDevShadowIntegration accessor name (renamed in source; must never reappear)", pattern: /getOrCreateDevShadowIntegration/ },
+    { label: "devShadowIntegration.ts source path reference", pattern: /devShadowIntegration\.ts/ },
+    { label: "devShadowStub.ts source path reference", pattern: /devShadowStub\.ts/ },
+    { label: "parseShadowBaselineV1 function name", pattern: /parseShadowBaselineV1/ },
+    { label: "vaultCatalogPlanner.ts source path reference", pattern: /vaultCatalogPlanner\.ts/ },
+    { label: "shadow reason string CONTENT_TOO_LARGE", pattern: /CONTENT_TOO_LARGE/ },
+    { label: "shadow reason string SOURCE_ITEM_INVALID", pattern: /SOURCE_ITEM_INVALID/ },
+    { label: "generate_shadow_baseline.py generator script reference", pattern: /generate_shadow_baseline/ },
+    { label: "IndexStore class name", pattern: /class IndexStore/ },
+    { label: "AppleBooksSqliteReader class name", pattern: /class AppleBooksSqliteReader/ },
+    { label: "createNodeAppleBooksFsAdapter function name", pattern: /createNodeAppleBooksFsAdapter/ },
+    { label: "createNodeSqliteProcess function name", pattern: /createNodeSqliteProcess/ },
+    { label: "createAppleBooksReadinessProbe function name", pattern: /createAppleBooksReadinessProbe/ },
+    { label: "createOllamaEmbeddingReadinessProbe function name", pattern: /createOllamaEmbeddingReadinessProbe/ },
+    { label: "createResearchCredentialReadinessProbe function name", pattern: /createResearchCredentialReadinessProbe/ },
+    { label: "hasResearchCredential function name", pattern: /hasResearchCredential/ },
+    { label: "OllamaEmbeddingProvider class name", pattern: /class OllamaEmbeddingProvider/ },
+    { label: "appleBooksSqlite.ts source path reference", pattern: /reading\/appleBooksSqlite\.ts/ },
+    { label: "sqliteProcess.ts source path reference", pattern: /reading\/sqliteProcess\.ts/ },
+  ];
+  const distFailures = FORBIDDEN_IN_PRODUCTION_DIST.filter(({ pattern }) => pattern.test(distMain));
+  if (distFailures.length > 0) {
+    throw new Error(
+      `dist/main.js contains forbidden development-only content: ${distFailures.map((entry) => entry.label).join(", ")}. ` +
+      "The virtual:mindmap-dev-shadow module must resolve to devShadowStub.ts (not devShadowIntegration.ts) for a production build -- check esbuild.config.mjs's devShadowPlugin(process.cwd(), !production) wiring.",
+    );
+  }
+}
+
 console.log("Release validation passed.");

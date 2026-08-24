@@ -100,11 +100,11 @@ const defaultFsDeps = {
   },
 };
 
-function emptySummary(): PendingSummary {
+export function emptySummary(): PendingSummary {
   return { total: 0, items: [] };
 }
 
-function emptyMetrics(): PendingMetrics {
+export function emptyMetrics(): PendingMetrics {
   return {
     durationMs: 0,
     filesListed: 0,

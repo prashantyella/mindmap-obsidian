@@ -1,5 +1,12 @@
 import type { IndexFs } from "./indexFs";
 
+/** A genuinely-missing-path error carrying a REAL typed `.code` (mirrors `NodeJS.ErrnoException`/real `fs` errors) -- callers that need to distinguish "this path just doesn't exist" from "some other failure occurred" (e.g. `migrationStaging.ts`'s `isMissingPathError`) must be able to check `.code`, never parse free-text `.message`. An injected fault (`maybeFail`) deliberately does NOT get a `.code` -- it must never be mistaken for a genuine "missing" condition. */
+function missingPathError(message: string, code: "ENOENT" | "ENOTDIR" = "ENOENT"): NodeJS.ErrnoException {
+  const error = new Error(message) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
+}
+
 /**
  * Shared in-memory, fault-injectable `IndexFs` double for every Checkpoint
  * 5 persistence test (`generationStore.test.ts`, `overlayStore.test.ts`,
@@ -79,7 +86,7 @@ export class FakeIndexFs implements IndexFs {
     }
     this.maybeFail("readFile", path);
     const value = this.files.get(path);
-    if (value === undefined) throw new Error(`ENOENT: ${path}`);
+    if (value === undefined) throw missingPathError(`ENOENT: ${path}`);
     return value;
   }
 
@@ -93,7 +100,7 @@ export class FakeIndexFs implements IndexFs {
     await this.maybePause("readFileBytes", path);
     this.maybeFail("readFileBytes", path);
     const value = this.binaryFiles.get(path);
-    if (value === undefined) throw new Error(`ENOENT: ${path}`);
+    if (value === undefined) throw missingPathError(`ENOENT: ${path}`);
     if (this.corruptNextReadBytesOf.has(path)) {
       this.corruptNextReadBytesOf.delete(path);
       return corrupted(value);
@@ -114,7 +121,7 @@ export class FakeIndexFs implements IndexFs {
     await this.maybePause("readFileBytesRange", path);
     this.maybeFail("readFileBytesRange", path);
     const value = this.binaryFiles.get(path);
-    if (value === undefined) throw new Error(`ENOENT: ${path}`);
+    if (value === undefined) throw missingPathError(`ENOENT: ${path}`);
     if (offset + length > value.length) {
       throw new Error(`range read past end of file: ${path} (${offset}+${length} > ${value.length})`);
     }
@@ -166,7 +173,7 @@ export class FakeIndexFs implements IndexFs {
       this.binaryFiles.delete(fromPath);
       return;
     }
-    throw new Error(`ENOENT rename source: ${fromPath}`);
+    throw missingPathError(`ENOENT rename source: ${fromPath}`);
   }
 
   async unlink(path: string): Promise<void> {
@@ -176,7 +183,9 @@ export class FakeIndexFs implements IndexFs {
     // that is both a tracked directory and (erroneously) a file map key still fails closed the
     // same way a real filesystem would.
     if (this.dirs.has(path)) {
-      throw new Error(`EISDIR: illegal operation on a directory, unlink '${path}'`);
+      const error = new Error(`EISDIR: illegal operation on a directory, unlink '${path}'`) as NodeJS.ErrnoException;
+      error.code = "EISDIR";
+      throw error;
     }
     if (this.files.has(path)) {
       this.files.delete(path);
@@ -186,18 +195,20 @@ export class FakeIndexFs implements IndexFs {
       this.binaryFiles.delete(path);
       return;
     }
-    throw new Error(`ENOENT unlink: ${path}`);
+    throw missingPathError(`ENOENT unlink: ${path}`);
   }
 
   /** Real `fs.promises.rmdir()` semantics: rejects if `path` is not a tracked directory, and rejects (ENOTEMPTY) if it still has any child file/directory. */
   async rmdir(path: string): Promise<void> {
     this.maybeFail("rmdir", path);
     if (!this.dirs.has(path)) {
-      throw new Error(`ENOENT rmdir: ${path}`);
+      throw missingPathError(`ENOENT rmdir: ${path}`);
     }
     const children = await this.readdir(path);
     if (children.length > 0) {
-      throw new Error(`ENOTEMPTY: directory not empty, rmdir '${path}'`);
+      const error = new Error(`ENOTEMPTY: directory not empty, rmdir '${path}'`) as NodeJS.ErrnoException;
+      error.code = "ENOTEMPTY";
+      throw error;
     }
     this.dirs.delete(path);
   }
@@ -208,7 +219,7 @@ export class FakeIndexFs implements IndexFs {
     if (binary !== undefined) return binary.length;
     const text = this.files.get(path);
     if (text !== undefined) return Buffer.byteLength(text, "utf8");
-    throw new Error(`ENOENT stat: ${path}`);
+    throw missingPathError(`ENOENT stat: ${path}`);
   }
 
   async exists(path: string): Promise<boolean> {

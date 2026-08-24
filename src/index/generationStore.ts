@@ -197,6 +197,22 @@ export async function loadCurrentGenerationId(fs: IndexFs, root: string): Promis
   return pointer ? pointer.generationId : null;
 }
 
+/**
+ * Read-only, MANIFEST-ONLY view of the current generation, when one
+ * exists -- deliberately never loads the full `notes.mvx` vector matrix
+ * or `notes.meta.json` (unlike `loadGeneration`), so a caller that only
+ * needs a note/chunk COUNT for a read-only comparison (e.g. the shadow
+ * engine's `indexCountDelta`) never pays for a full generation load.
+ * Returns `null` when there is no current pointer (a fresh/empty index),
+ * never a fabricated zero-note manifest.
+ */
+export async function loadCurrentGenerationManifest(fs: IndexFs, root: string): Promise<VectorIndexManifestV1 | null> {
+  const generationId = await loadCurrentGenerationId(fs, root);
+  if (generationId === null) return null;
+  const dirPath = generationDirPath(generationId);
+  return loadOrThrow(manifestStore(fs, root, dirPath), `generation ${generationId} manifest.json`);
+}
+
 /** Writes the pointer directly, WITHOUT verifying `generationId` exists or loads cleanly. Never exported -- every external caller must go through `switchCurrentGeneration`, which verifies first. Exists only so `switchCurrentGeneration` and tests that specifically exercise pointer-write failure modes share one implementation. */
 async function switchCurrentGenerationUnsafe(fs: IndexFs, root: string, generationId: number): Promise<void> {
   await pointerStore(fs, root).save({ generationId });
@@ -863,6 +879,17 @@ export async function cleanupStaleStaging(fs: IndexFs, root: string): Promise<nu
     removed += await removeStagingEntryRecursively(fs, joinRelative(stagingRoot, token));
   }
   return removed;
+}
+
+/** Read-only counterpart to `cleanupStaleStaging`: counts top-level `staging/<token>` entries without removing anything -- for preflight, which must never mutate (Checkpoint 9 requirement 2). */
+export async function countStaleStaging(fs: IndexFs, root: string): Promise<number> {
+  const stagingRoot = joinRelative(root, "staging");
+  try {
+    const tokens = await fs.readdir(stagingRoot);
+    return tokens.filter(isSafeDirEntryName).length;
+  } catch {
+    return 0;
+  }
 }
 
 /** A `readdir` entry is trusted to be a bare basename (real filesystems can't produce one containing `/` or `..` as a distinct segment) -- but this is the one place in the module where a directory LISTING (not a path this code itself constructed) feeds directly into a delete, so it's defensively re-checked rather than assumed. */

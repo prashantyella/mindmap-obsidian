@@ -30,7 +30,8 @@ import { noteIdentityStableKey, PROVIDER_WIDE_PAUSE_CODES, toFailureCode, type J
  * a stale one.
  */
 export interface NoteSourceReader {
-  read(identity: NoteIdentityV1): Promise<{ identity: NoteIdentityV1; rawContent: string } | null>;
+  /** `signal`, when provided, is aborted on `JobEngine.dispose()` -- a well-behaved implementation checks it around every underlying vault I/O and any full-catalog annotation scan, stopping promptly rather than working through a large vault regardless. */
+  read(identity: NoteIdentityV1, signal?: AbortSignal): Promise<{ identity: NoteIdentityV1; rawContent: string } | null>;
 }
 
 export interface EmbeddedNote {
@@ -217,13 +218,13 @@ export class NoteJobRunner implements JobPhaseRunner {
     try {
       switch (persisted.job.phase) {
         case "discover":
-          return await this.stepDiscover(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion);
+          return await this.stepDiscover(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
         case "embed":
           return await this.stepEmbed(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
         case "extract-metadata":
           return await this.stepExtractMetadata(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
         case "confirm-source":
-          return await this.stepConfirmSource(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion);
+          return await this.stepConfirmSource(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
         case "write-note":
           return await this.stepWriteNote(persisted, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
         case "write-overlay":
@@ -301,8 +302,9 @@ export class NoteJobRunner implements JobPhaseRunner {
     expectedSourceHash: string,
     embeddingModel: string,
     pipelineVersion: number,
+    signal?: AbortSignal,
   ): Promise<{ ok: true; projection: SourceProjectionV1 } | { ok: false; outcome: PhaseStepOutcome }> {
-    const found = await this.deps.sourceReader.read(identity);
+    const found = await this.deps.sourceReader.read(identity, signal);
     if (!found) return { ok: false, outcome: { type: "obsolete", failureCode: "SOURCE_STALE" } };
     if (noteIdentityStableKey(found.identity) !== noteIdentityStableKey(identity)) {
       // The reader resolved to a stable identity this job was never queued for -- fail closed
@@ -327,8 +329,8 @@ export class NoteJobRunner implements JobPhaseRunner {
     return this.memory.get(jobId)?.resolvedIdentity ?? fallback;
   }
 
-  private async stepDiscover(jobId: string, identity: NoteIdentityV1, expectedSourceHash: string, embeddingModel: string, pipelineVersion: number): Promise<PhaseStepOutcome> {
-    const result = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion);
+  private async stepDiscover(jobId: string, identity: NoteIdentityV1, expectedSourceHash: string, embeddingModel: string, pipelineVersion: number, signal: AbortSignal): Promise<PhaseStepOutcome> {
+    const result = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
     if (!result.ok) return result.outcome;
     return { type: "advance", nextPhase: "embed" };
   }
@@ -342,7 +344,7 @@ export class NoteJobRunner implements JobPhaseRunner {
     pipelineVersion: number,
     signal: AbortSignal,
   ): Promise<{ ok: true; value: EmbeddedNote } | { ok: false; outcome: PhaseStepOutcome }> {
-    const projectionResult = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion);
+    const projectionResult = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
     if (!projectionResult.ok) return projectionResult;
     let embedded: EmbeddedNote;
     try {
@@ -387,7 +389,7 @@ export class NoteJobRunner implements JobPhaseRunner {
   ): Promise<{ ok: true; value: MetadataOutputV1 } | { ok: false; outcome: PhaseStepOutcome }> {
     const embeddedResult = await this.ensureEmbedded(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
     if (!embeddedResult.ok) return embeddedResult;
-    const projectionResult = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion);
+    const projectionResult = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
     if (!projectionResult.ok) return projectionResult;
     let metadata: MetadataOutputV1;
     try {
@@ -418,11 +420,11 @@ export class NoteJobRunner implements JobPhaseRunner {
     return { type: "advance", nextPhase: "confirm-source" };
   }
 
-  private async stepConfirmSource(jobId: string, identity: NoteIdentityV1, expectedSourceHash: string, embeddingModel: string, pipelineVersion: number): Promise<PhaseStepOutcome> {
+  private async stepConfirmSource(jobId: string, identity: NoteIdentityV1, expectedSourceHash: string, embeddingModel: string, pipelineVersion: number, signal: AbortSignal): Promise<PhaseStepOutcome> {
     // The explicit "re-read/project source immediately before note mutation" checkpoint --
     // requirement 4. A stale source here discards every in-memory embed/metadata result and
     // performs zero note/index write.
-    const result = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion);
+    const result = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
     if (!result.ok) return result.outcome;
     return { type: "advance", nextPhase: "write-note" };
   }

@@ -268,6 +268,29 @@ export class AtomicStore<T> {
     return removed;
   }
 
+  /** Read-only counterpart to `cleanupStaleTempFiles`: counts leftover `${baseName}${TEMP_PREFIX}*` entries via the same matching rule, without ever calling `unlink`. Used by preflight, which must never mutate (Checkpoint 9 requirement 2). */
+  async countStaleTempFiles(): Promise<number> {
+    let entries: string[];
+    try {
+      entries = await this.fs.readdir(this.parentDirPath);
+    } catch {
+      return 0;
+    }
+    const prefix = `${this.fileBaseName}${TEMP_PREFIX}`;
+    let count = 0;
+    for (const entry of entries) {
+      if (!entry.startsWith(prefix)) continue;
+      const candidateRelative = this.fileDir === "" ? entry : `${this.fileDir}/${entry}`;
+      try {
+        validateOwnedRelativePath(candidateRelative, this.root, "AtomicStore stale-temp count");
+      } catch {
+        continue;
+      }
+      count += 1;
+    }
+    return count;
+  }
+
   private async safeUnlink(path: string): Promise<void> {
     try {
       await this.fs.unlink(path);

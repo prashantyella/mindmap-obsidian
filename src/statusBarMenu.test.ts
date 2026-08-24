@@ -79,6 +79,9 @@ const ALL_ACTIONS_STUB: StatusBarMenuActions = {
   startRuntimeSetup: () => undefined,
   cancelRuntimeSetup: () => undefined,
   openPythonDownload: () => undefined,
+  startMigration: () => undefined,
+  retryMigration: () => undefined,
+  cancelMigration: () => undefined,
 };
 
 void test("standard status stays compact and exposes the orbit icon", () => {
@@ -736,4 +739,33 @@ void test("removed menu actions remain registered as command-palette commands", 
   assert.ok(registered.includes("mindmap-research-reprocess-active-note"));
   assert.ok(registered.includes("mindmap-run-active-note"));
   assert.ok(registered.includes("mindmap-validate-runtime"));
+});
+
+void test("Checkpoint 10B item 3: the migration section is absent from the menu when no production engine/migration record is available", () => {
+  const items = buildStatusBarMenuItems(state({ migration: undefined }));
+  assert.equal(items.some((item) => item.title === "Mindmap engine (TypeScript)"), false);
+  assert.equal(items.some((item) => item.action === "startMigration" || item.action === "retryMigration" || item.action === "cancelMigration"), false);
+});
+
+void test("Checkpoint 10B item 3: a not-started migration shows a Start action but never Retry/Cancel", () => {
+  const items = buildStatusBarMenuItems(state({ migration: { phase: "not-started", message: "not started", discoveredCount: 0, processedCount: 0, canStart: true, canRetry: false, canCancel: false } }));
+  assert.ok(items.some((item) => item.action === "startMigration"));
+  assert.equal(items.some((item) => item.action === "retryMigration"), false);
+  assert.equal(items.some((item) => item.action === "cancelMigration"), false);
+  assert.ok(items.some((item) => item.title.includes("Migration: not started (0/0)")));
+});
+
+void test("Checkpoint 10B item 3: an in-flight migration shows a Cancel action and progress counts, never Start/Retry", () => {
+  const items = buildStatusBarMenuItems(state({ migration: { phase: "build", message: "building index", discoveredCount: 40, processedCount: 12, canStart: false, canRetry: false, canCancel: true } }));
+  assert.ok(items.some((item) => item.action === "cancelMigration"));
+  assert.equal(items.some((item) => item.action === "startMigration"), false);
+  assert.equal(items.some((item) => item.action === "retryMigration"), false);
+  assert.ok(items.some((item) => item.title.includes("(12/40)")));
+});
+
+void test("Checkpoint 10B item 3: a failed migration shows a Retry action, never Start/Cancel", () => {
+  const items = buildStatusBarMenuItems(state({ migration: { phase: "failed", message: "failed retryable", discoveredCount: 10, processedCount: 3, canStart: false, canRetry: true, canCancel: false } }));
+  assert.ok(items.some((item) => item.action === "retryMigration"));
+  assert.equal(items.some((item) => item.action === "startMigration"), false);
+  assert.equal(items.some((item) => item.action === "cancelMigration"), false);
 });
