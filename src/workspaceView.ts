@@ -666,7 +666,7 @@ export class MindmapWorkspaceView extends ItemView {
     for (const [index, candidate] of candidates.entries()) {
       const x = xFor(index);
       const marker = svg.createSvg("rect", {
-        cls: `mindmap-heatmap-hit${candidate.path === this.expandedPath ? " is-selected" : ""}`,
+        cls: "mindmap-heatmap-hit",
         attr: {
           x: String(x - plotWidth / Math.max(candidates.length - 1, 1) / 2),
           y: String(chart.top),
@@ -677,6 +677,9 @@ export class MindmapWorkspaceView extends ItemView {
           "aria-label": `Select ${candidate.title}`,
         },
       });
+      if (candidate.path === this.expandedPath) {
+        marker.addClass("is-selected");
+      }
       marker.addEventListener("click", () => {
         this.expandedPath = candidate.path;
         this.render();
@@ -697,23 +700,28 @@ export class MindmapWorkspaceView extends ItemView {
         const cell = candidate.heatmap.find((candidateMetric) => candidateMetric.key === metric.key);
         return `${xFor(index)},${yFor(cell?.level ?? 0)}`;
       });
-      svg.createSvg("polyline", {
-        cls: `mindmap-heatmap-line is-${metric.key}`,
+      const line = svg.createSvg("polyline", {
+        cls: "mindmap-heatmap-line",
         attr: { points: points.join(" ") },
       });
+      line.addClass(`is-${metric.key}`);
     }
 
     for (const [index, candidate] of candidates.entries()) {
       const x = xFor(index);
       for (const metric of candidate.heatmap) {
         const point = svg.createSvg("circle", {
-          cls: `mindmap-heatmap-point is-${metric.key}${candidate.path === this.expandedPath ? " is-selected" : ""}`,
+          cls: "mindmap-heatmap-point",
           attr: {
             cx: String(x),
             cy: String(yFor(metric.level)),
             r: candidate.path === this.expandedPath ? "2.6" : "2",
           },
         });
+        point.addClass(`is-${metric.key}`);
+        if (candidate.path === this.expandedPath) {
+          point.addClass("is-selected");
+        }
         point.addEventListener("click", () => {
           this.expandedPath = candidate.path;
           this.render();
