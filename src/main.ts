@@ -44,6 +44,7 @@ import { confirmMindmapRun } from "./runConfirmModal";
 import type { LiveRelatedResponse, LiveRelatedResult, LookupRelatedResponse } from "./semanticTypes";
 import { buildMindmapLocalGraphState, isMindmapLocalGraphLeaf } from "./localGraph";
 import {
+  retireLegacyPythonLaunchAgents,
   normalizeHour,
   normalizeMinute,
   type LaunchAgentHealth,
@@ -70,7 +71,7 @@ import { buildStatusSummary } from "./statusBarState";
 import type { LaunchAgentDetail } from "./launchAgentHealth";
 import { registerVaultRefreshEvents } from "./vaultRefreshEvents";
 import { ProductionEngine, type ProductionEngineOptions, type ProductionRelatedResult, PRODUCTION_SCOPE_CURRENT, PRODUCTION_SCOPE_ALL, PRODUCTION_SCOPE_READING } from "./engine/productionEngine";
-import { createNodeBackgroundSchedulerFs, createNodeBackgroundSchedulerProcessRunner } from "./scheduling/backgroundSchedulerNodeAdapters";
+import { createNodeBackgroundSchedulerFs, createNodeBackgroundSchedulerProcessRunner, createNodeLegacyLaunchAgentCleanupFs } from "./scheduling/backgroundSchedulerNodeAdapters";
 import { toSystemLocalWakeCadence, type WakeCadence } from "./scheduling/backgroundScheduler";
 import { parseScheduleDefinitionV1 } from "./scheduling/scheduleTypes";
 import { NodeOwnedFs } from "./engine/nodeFs";
@@ -234,6 +235,7 @@ export default class MindmapPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    await this.retireLegacyLaunchAgents();
 
     this.statusBarEl = this.addStatusBarItem();
     configureStatusBarElement(this.statusBarEl, (event) => this.openStatusMenu(event));
@@ -314,6 +316,24 @@ export default class MindmapPlugin extends Plugin {
     await this.saveData(this.settings);
     this.syncScheduler();
     this.pendingScanService?.requestRefresh("settings updated");
+  }
+
+  /** One-time-by-absence retirement of content-owned 0.2.x Python LaunchAgents; foreign or ambiguous files are never touched. */
+  private async retireLegacyLaunchAgents(): Promise<void> {
+    if (process.platform !== "darwin" || typeof process.getuid !== "function") return;
+    const context = this.getRuntimeContext();
+    const results = await retireLegacyPythonLaunchAgents({
+      fs: createNodeLegacyLaunchAgentCleanupFs(),
+      runner: createNodeBackgroundSchedulerProcessRunner(),
+      userHomeDir: os.homedir(),
+      pluginDir: context.pluginDir,
+      uid: process.getuid(),
+      platform: process.platform,
+    });
+    for (const result of results) {
+      if (result.status === "retired") this.appendLog(`[migration] Retired legacy LaunchAgent ${result.label}.`);
+      if (result.status === "foreign" || result.status === "ambiguous") this.appendLog(`[migration] Legacy LaunchAgent ${result.label} was not changed (${result.status}).`);
+    }
   }
 
   /** Checkpoint 11: there is no Python runtime to set up anymore -- always unblocked. Kept as a named check (rather than deleted outright) since several call sites still gate on it for readability/future use. */

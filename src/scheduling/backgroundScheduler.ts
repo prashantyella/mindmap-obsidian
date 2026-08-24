@@ -346,6 +346,7 @@ export interface ProcessResult {
   code: number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 }
 
 /**
@@ -514,6 +515,9 @@ function assertValidProcessResult(result: unknown): asserts result is ProcessRes
   }
   if (typeof record.stderr !== "string" || Buffer.byteLength(record.stderr, "utf8") > MAX_PROCESS_OUTPUT_BYTES) {
     throw new EngineError("LAUNCH_AGENT_INVALID", "ProcessResult.stderr must be a bounded string.", {});
+  }
+  if (record.timedOut !== undefined && typeof record.timedOut !== "boolean") {
+    throw new EngineError("LAUNCH_AGENT_INVALID", "ProcessResult.timedOut must be a boolean when present.", {});
   }
 }
 
