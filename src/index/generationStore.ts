@@ -561,6 +561,7 @@ export async function buildGeneration(fs: IndexFs, root: string, input: BuildGen
     // half-done) -- an abort signalled DURING the rename call itself is not observed.
     checkAborted(signal);
     const finalDir = generationDirPath(input.generationId);
+    await fs.mkdir(joinRelative(root, "generations"));
     await fs.rename(joinRelative(root, stagingDir), joinRelative(root, finalDir));
   } catch (error) {
     if (error instanceof GenerationBuildCancelledError) {

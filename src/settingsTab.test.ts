@@ -76,7 +76,7 @@ void test("the Local AI provider config path is never rendered", () => {
 
 void test("Scope renders no separate status/guidance row outside ScopeManager (no duplicate summary)", () => {
   const scopeBody = SOURCE.slice(sectionIndex("renderScope"), sectionIndex("renderSchedule"));
-  assert.equal((scopeBody.match(/new Setting\(/g) ?? []).length, 1, "expected exactly one fallback Setting row (the !canManage guidance), no duplicate status card");
+  assert.equal((scopeBody.match(/new Setting\(/g) ?? []).length, 0, "renderScope itself must render no Setting rows -- ScopeManager owns the whole surface, unconditionally");
   assert.doesNotMatch(scopeBody, /getScopeSetupSummary/);
 });
 
@@ -95,37 +95,18 @@ void test("Troubleshooting uses a native collapsed <details>/<summary> disclosur
   assert.doesNotMatch(troubleshootingBody, /\.open\s*=\s*true/, "the disclosure must start collapsed");
 });
 
-void test("Troubleshooting offers Run preflight, a one-line result, Copy diagnostics, and the advanced runtime overrides", () => {
+void test("Troubleshooting offers Run preflight, a one-line result, Copy diagnostics, and the Apple Books database overrides", () => {
   const troubleshootingBody = SOURCE.slice(sectionIndex("renderTroubleshooting"), SOURCE.length);
   assert.match(troubleshootingBody, /Run preflight/);
   assert.match(troubleshootingBody, /getDiagnosticsOneLine/);
   assert.match(troubleshootingBody, /Copy diagnostics/);
   assert.match(troubleshootingBody, /copyDiagnostics/);
-  assert.match(troubleshootingBody, /pythonCommand/);
-  assert.match(troubleshootingBody, /scriptPath/);
-  assert.match(troubleshootingBody, /configPath/);
+  assert.match(troubleshootingBody, /appleAnnotationDbPath/);
+  assert.match(troubleshootingBody, /appleLibraryDbPath/);
 });
 
-void test("runtime setup progress/cancel/download actions live in Overview, and are not duplicated as buttons elsewhere", () => {
-  const overviewBody = SOURCE.slice(sectionIndex("renderOverview"), sectionIndex("renderReadingAndResearch"));
-  assert.match(overviewBody, /setupRuntime/);
-  assert.match(overviewBody, /cancelSetup/);
-  assert.match(overviewBody, /openPythonDownload/);
-  assert.match(overviewBody, /openPythonRuntimeDownloadPage/);
-
-  const restOfFile = SOURCE.slice(sectionIndex("renderReadingAndResearch"));
-  assert.doesNotMatch(restOfFile, /startRuntimeSetup\(\)/);
-  assert.doesNotMatch(restOfFile, /cancelRuntimeSetup\(\)/);
-  assert.doesNotMatch(restOfFile, /openPythonRuntimeDownloadPage\(\)/);
-});
-
-void test("display() resubscribes to runtime-setup state and hide() cleans up the prior subscription (no leaked listener)", () => {
-  const displayBody = SOURCE.slice(SOURCE.indexOf("display(): void {"), SOURCE.indexOf("hide(): void {"));
-  const hideBody = SOURCE.slice(SOURCE.indexOf("hide(): void {"));
-  assert.match(displayBody, /this\.unsubscribeRuntimeSetup\?\.\(\)/, "display() must unsubscribe any prior listener before resubscribing");
-  assert.match(displayBody, /this\.unsubscribeRuntimeSetup = this\.plugin\.subscribeRuntimeSetupState/);
-  assert.match(hideBody, /this\.unsubscribeRuntimeSetup\?\.\(\)/, "hide() must unsubscribe on teardown");
-  assert.match(hideBody, /this\.unsubscribeRuntimeSetup = null/);
+void test("Checkpoint 11: settingsTab.ts never references the retired Python runtime setup surface", () => {
+  assert.doesNotMatch(SOURCE, /startRuntimeSetup|cancelRuntimeSetup|openPythonRuntimeDownloadPage|subscribeRuntimeSetupState|getRuntimeSetupState|pythonCommand|scriptPath\b|\bconfigPath\b/);
 });
 
 void test("copyDiagnostics() reports a clipboard failure with fixed copy, never the raw error message", () => {

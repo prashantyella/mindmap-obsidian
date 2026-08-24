@@ -3,7 +3,6 @@ import type { PreflightResult } from "./diagnostics";
 export const MAX_REPORT_LOG_LINES = 20;
 export const MAX_FIELD_CHARS = 500;
 export const MAX_CHECKS = 20;
-export const MAX_RUNTIME_MESSAGES = 20;
 export const MAX_CONTEXT_DEPTH = 4;
 export const MAX_CONTEXT_ARRAY_ITEMS = 10;
 export const MAX_REPORT_CHARS = 8000;
@@ -89,27 +88,16 @@ function redactContext(context: Record<string, unknown> | undefined): Record<str
   return redactContextValue(context, 0) as Record<string, unknown>;
 }
 
-export interface DiagnosticsReportRuntime {
-  command: string;
-  args: string[];
-  scriptPath: string;
-  configPath: string;
-  valid: boolean;
-  trustLevel: string;
-  trustInterpreter: string;
-  trustScript: string;
-  trustConfig: string;
-  messages: Array<{ level: string; message: string }>;
+export interface DiagnosticsReportEngine {
+  available: boolean;
 }
 
 export interface DiagnosticsReportProvider {
-  canManage: boolean;
-  provider: string;
-  baseUrl: string;
-  model: string;
-  hasApiKey: boolean;
-  maxTokens: number;
-  enableThinking: boolean;
+  embedBaseUrl: string;
+  embedModel: string;
+  llmBaseUrl: string;
+  llmModel: string;
+  llmMaxTokens: number;
 }
 
 export interface DiagnosticsReportPreflight {
@@ -127,7 +115,7 @@ export interface DiagnosticsReportScheduler {
 
 export interface DiagnosticsReportInput {
   generatedAt: string;
-  runtime: DiagnosticsReportRuntime;
+  engine: DiagnosticsReportEngine;
   provider: DiagnosticsReportProvider;
   preflight: DiagnosticsReportPreflight;
   scheduler: DiagnosticsReportScheduler;
@@ -173,29 +161,16 @@ export function buildDiagnosticsReport(input: DiagnosticsReportInput): string {
   lines.push(`Generated: ${input.generatedAt}`);
   lines.push("");
 
-  lines.push("Runtime");
-  lines.push(`  Command: ${sanitizeField(`${input.runtime.command} ${input.runtime.args.join(" ")}`.trimEnd())}`);
-  lines.push(`  Script: ${input.runtime.scriptPath}`);
-  lines.push(`  Config: ${input.runtime.configPath}`);
-  lines.push(`  Valid: ${input.runtime.valid ? "yes" : "no"}`);
-  lines.push(`  Trust: ${input.runtime.trustLevel} (interpreter: ${input.runtime.trustInterpreter}, script: ${input.runtime.trustScript}, config: ${input.runtime.trustConfig})`);
-  const { items: messages, omittedCount: omittedMessages } = truncateList(input.runtime.messages, MAX_RUNTIME_MESSAGES);
-  for (const message of messages) {
-    lines.push(`  [${message.level}] ${sanitizeField(message.message)}`);
-  }
-  if (omittedMessages > 0) {
-    lines.push(`  ${LIST_TRUNCATION_MARKER(omittedMessages)}`);
-  }
+  lines.push("Engine");
+  lines.push(`  Available: ${input.engine.available ? "yes" : "no"}`);
   lines.push("");
 
   lines.push("Provider");
-  lines.push(`  Can manage: ${input.provider.canManage ? "yes" : "no"}`);
-  lines.push(`  Provider: ${input.provider.provider}`);
-  lines.push(`  Base URL: ${redactUrl(input.provider.baseUrl)}`);
-  lines.push(`  Model: ${sanitizeField(input.provider.model, 200)}`);
-  lines.push(`  API key: ${input.provider.hasApiKey ? "set" : "not set"}`);
-  lines.push(`  Max tokens: ${input.provider.maxTokens}`);
-  lines.push(`  Thinking: ${input.provider.enableThinking ? "enabled" : "disabled"}`);
+  lines.push(`  Embedding base URL: ${redactUrl(input.provider.embedBaseUrl)}`);
+  lines.push(`  Embedding model: ${sanitizeField(input.provider.embedModel, 200)}`);
+  lines.push(`  Metadata base URL: ${redactUrl(input.provider.llmBaseUrl)}`);
+  lines.push(`  Metadata model: ${sanitizeField(input.provider.llmModel, 200)}`);
+  lines.push(`  Max tokens: ${input.provider.llmMaxTokens}`);
   lines.push("");
 
   lines.push("Preflight");

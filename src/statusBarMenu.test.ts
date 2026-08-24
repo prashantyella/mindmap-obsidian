@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-import { buildStatusBarMenuItems, buildStatusBarPresentation, buildStatusSummary, type StatusBarMenuActions, type StatusBarMenuState, type StatusBarRuntimeSetupState } from "./statusBarState";
+import { buildStatusBarMenuItems, buildStatusBarPresentation, buildStatusSummary, type StatusBarMenuActions, type StatusBarMenuState } from "./statusBarState";
 import { NO_ACTIVE_NOTE } from "./individualNote";
 import { registerMindmapCommands } from "./pluginCommands";
 
@@ -40,23 +40,11 @@ function state(overrides: Partial<StatusBarMenuState> = {}): StatusBarMenuState 
   };
 }
 
-function runtimeSetupState(overrides: Partial<StatusBarRuntimeSetupState> = {}): StatusBarRuntimeSetupState {
-  return {
-    phase: "setup-required",
-    message: "A compatible Python was found, but Mindmap's packages are not installed yet.",
-    canSetup: true,
-    canCancel: false,
-    blocking: true,
-    ...overrides,
-  };
-}
-
 function labelTitles(items: ReturnType<typeof buildStatusBarMenuItems>): string[] {
   return items.filter((item) => item.label).map((item) => item.title);
 }
 
-// A full ACTIONS implementation for compile-time proof every action key
-// (including openPythonDownload) is actually wired end to end.
+// A full ACTIONS implementation for compile-time proof every action key is actually wired end to end.
 const ALL_ACTIONS_STUB: StatusBarMenuActions = {
   runCurrent: () => undefined,
   runActiveNote: () => undefined,
@@ -76,13 +64,17 @@ const ALL_ACTIONS_STUB: StatusBarMenuActions = {
   researchAndReprocessActiveNote: () => undefined,
   toggleAutomaticReadingResearch: () => undefined,
   retryAutomaticResearch: () => undefined,
-  startRuntimeSetup: () => undefined,
-  cancelRuntimeSetup: () => undefined,
-  openPythonDownload: () => undefined,
   startMigration: () => undefined,
   retryMigration: () => undefined,
   cancelMigration: () => undefined,
 };
+
+void test("StatusBarMenuActions is fully wired end to end (compile-time proof plus a runtime smoke call)", () => {
+  assert.equal(typeof ALL_ACTIONS_STUB.runCurrent, "function");
+  assert.doesNotThrow(() => {
+    void ALL_ACTIONS_STUB.runCurrent();
+  });
+});
 
 void test("standard status stays compact and exposes the orbit icon", () => {
   const presentation = buildStatusBarPresentation(state());
@@ -407,118 +399,8 @@ void test("Navigation offers Open Mindmap and Open settings", () => {
 });
 
 // ---------------------------------------------------------------------------
-// (7) Runtime setup or exactly one highest-priority recovery row at top.
+// (7) Exactly one highest-priority recovery row at top.
 // ---------------------------------------------------------------------------
-
-void test("setup-required: menu shows the runtime line and a Set up action; presentation is actionable", () => {
-  const items = buildStatusBarMenuItems(state({ runtimeSetup: runtimeSetupState({ phase: "setup-required" }) }));
-  assert.ok(items.some((item) => item.title === "Runtime setup" && item.label));
-  const line = items.find((item) => item.title.startsWith("Runtime: "));
-  assert.ok(line);
-  assert.equal(line?.disabled, true);
-  assert.equal(line?.icon, "triangle-alert");
-  const setupAction = items.find((item) => item.action === "startRuntimeSetup");
-  assert.ok(setupAction);
-  assert.equal(setupAction?.title, "Set up Mindmap runtime");
-  assert.equal(items.some((item) => item.action === "cancelRuntimeSetup"), false);
-
-  const presentation = buildStatusBarPresentation(state({ runtimeSetup: runtimeSetupState({ phase: "setup-required" }) }));
-  assert.equal(presentation.actionable, true);
-  assert.equal(presentation.busy, false);
-  assert.match(presentation.ariaLabel, /runtime setup required/i);
-});
-
-void test("unavailable: menu offers the Python download page instead of a Set up action", () => {
-  const items = buildStatusBarMenuItems(state({
-    runtimeSetup: runtimeSetupState({ phase: "unavailable", message: "No compatible Python 3.11-3.13 was found.", canSetup: false }),
-  }));
-  assert.equal(items.some((item) => item.action === "startRuntimeSetup"), false);
-  assert.equal(items.some((item) => item.action === "cancelRuntimeSetup"), false);
-  const download = items.find((item) => item.action === "openPythonDownload");
-  assert.ok(download);
-  assert.equal(download?.title, "Open official Python download page");
-
-  const presentation = buildStatusBarPresentation(state({ runtimeSetup: runtimeSetupState({ phase: "unavailable", canSetup: false }) }));
-  assert.equal(presentation.actionable, true);
-  assert.match(presentation.ariaLabel, /Python not found/);
-});
-
-void test("busy setup phases (creating/installing/verifying) show Cancel and a loader, and are not 'actionable'", () => {
-  for (const phase of ["creating", "installing", "verifying"] as const) {
-    const rt = runtimeSetupState({ phase, canSetup: false, canCancel: true, message: `${phase}...` });
-    const items = buildStatusBarMenuItems(state({ runtimeSetup: rt }));
-    const cancel = items.find((item) => item.action === "cancelRuntimeSetup");
-    assert.ok(cancel, `expected a cancel action for phase ${phase}`);
-    assert.equal(items.some((item) => item.action === "startRuntimeSetup"), false);
-
-    const presentation = buildStatusBarPresentation(state({ runtimeSetup: rt }));
-    assert.equal(presentation.busy, true, `expected busy for phase ${phase}`);
-    assert.equal(presentation.icon, "loader-circle");
-    assert.equal(presentation.actionable, false, `expected not actionable for phase ${phase}`);
-  }
-});
-
-void test("runtime-setup message row uses loader-circle for busy phases and triangle-alert for warning phases", () => {
-  for (const phase of ["discovering", "confirming", "creating", "installing", "verifying"] as const) {
-    const items = buildStatusBarMenuItems(state({ runtimeSetup: runtimeSetupState({ phase, canSetup: false, canCancel: true, message: `${phase}...` }) }));
-    const line = items.find((item) => item.title.startsWith("Runtime: "));
-    assert.equal(line?.icon, "loader-circle", `expected loader-circle for busy phase ${phase}`);
-  }
-
-  for (const phase of ["setup-required", "unavailable", "failed", "cancelled"] as const) {
-    const items = buildStatusBarMenuItems(state({ runtimeSetup: runtimeSetupState({ phase, canSetup: true, canCancel: false, message: `${phase}...` }) }));
-    const line = items.find((item) => item.title.startsWith("Runtime: "));
-    assert.equal(line?.icon, "triangle-alert", `expected triangle-alert for warning phase ${phase}`);
-  }
-
-  // Presentation-level animation/warning precedence stays untouched by this menu-only icon fix.
-  const busyPresentation = buildStatusBarPresentation(state({ runtimeSetup: runtimeSetupState({ phase: "discovering", canSetup: false, canCancel: false }) }));
-  assert.equal(busyPresentation.icon, "loader-circle");
-  assert.equal(busyPresentation.animateIcon, true);
-  const warningPresentation = buildStatusBarPresentation(state({ runtimeSetup: runtimeSetupState({ phase: "failed", canSetup: true }) }));
-  assert.equal(warningPresentation.icon, "triangle-alert");
-  assert.equal(warningPresentation.animateIcon, false);
-});
-
-void test("ready runtime is healthy: no runtime line, no top recovery row, queue actions are not blocked", () => {
-  const rt = runtimeSetupState({ phase: "ready", message: "Mindmap runtime is ready.", canSetup: false, canCancel: false, blocking: false });
-  const items = buildStatusBarMenuItems(state({ runtimeSetup: rt, scopeReady: true }));
-  assert.equal(items.some((item) => item.title.startsWith("Runtime:")), false);
-  assert.equal(items.some((item) => item.title === "Runtime setup" && item.label), false);
-  assert.equal(items.some((item) => item.action === "startRuntimeSetup"), false);
-  assert.equal(items.some((item) => item.action === "cancelRuntimeSetup"), false);
-  assert.equal(items.some((item) => item.action === "openPythonDownload"), false);
-  assert.equal(items.find((item) => item.action === "runCurrent")?.disabled, false);
-  assert.equal(items[0].title, "Mode");
-
-  const presentation = buildStatusBarPresentation(state({ runtimeSetup: rt }));
-  assert.equal(presentation.actionable, false);
-  assert.equal(presentation.busy, false);
-});
-
-void test("attention precedence: an actionable runtime-setup state wins over preflight/scope/scheduler attention text", () => {
-  const presentation = buildStatusBarPresentation(state({
-    runtimeSetup: runtimeSetupState({ phase: "unavailable", canSetup: false }),
-    preflightOk: false,
-    scopeReady: false,
-    schedulerHealth: "overdue",
-  }));
-  assert.match(presentation.ariaLabel, /Python not found/);
-  assert.doesNotMatch(presentation.ariaLabel, /preflight failed/);
-  assert.doesNotMatch(presentation.ariaLabel, /scope setup required/);
-  assert.doesNotMatch(presentation.ariaLabel, /scheduler overdue/);
-});
-
-void test("runtime-setup block wins over the top recovery row: only one appears at once", () => {
-  const items = buildStatusBarMenuItems(state({
-    runtimeSetup: runtimeSetupState({ phase: "unavailable", canSetup: false }),
-    preflightOk: false,
-    schedulerHealth: "overdue",
-  }));
-  assert.ok(items.some((item) => item.title === "Runtime setup" && item.label));
-  assert.equal(items.some((item) => item.title.startsWith("Run preflight")), false);
-  assert.equal(items.some((item) => item.title.startsWith("Scheduler ")), false);
-});
 
 void test("top recovery row precedence: preflight, then Reading error, then manual/off Web Research error, then scheduler failure", () => {
   const preflightWins = buildStatusBarMenuItems(state({
@@ -619,98 +501,6 @@ void test("automatic-mode pauses/errors are represented exactly once: in Researc
   assert.equal(automaticActivityError.filter((item) => item.title.startsWith("Web Research error:")).length, 0);
   assert.equal(automaticActivityError.filter((item) => item.title === "Automatic research: Provider request failed.").length, 1);
   assert.equal(automaticActivityError[0].title, "Mode");
-});
-
-void test("blocked Reading backlog: disabled with setup-directed copy even when annotations are pending", () => {
-  const items = buildStatusBarMenuItems(state({
-    readingMode: "reading",
-    readingPending: 4,
-    runtimeSetup: runtimeSetupState({ phase: "setup-required" }),
-  }));
-  const backlog = items.find((item) => item.action === "processReadingBacklog");
-  assert.ok(backlog);
-  assert.equal(backlog?.title, "Process Reading backlog (runtime setup required)");
-  assert.equal(backlog?.disabled, true);
-});
-
-void test("runtime blocking disables normal queue actions and preflight with setup-directed copy; manual research toggle stays enabled", () => {
-  const items = buildStatusBarMenuItems(state({
-    scopeReady: true,
-    activeNote: { path: "Notes/one.md", eligible: true, reason: "", code: "eligible" },
-    pendingAvailable: true,
-    allPending: 2,
-    webResearchMode: "manual",
-    runtimeSetup: runtimeSetupState({ phase: "setup-required" }),
-  }));
-
-  const runActiveNote = items.find((item) => item.title.startsWith("Run Mindmap for active note") || item.title.startsWith("Run active note"));
-  assert.equal(runActiveNote?.disabled, true);
-  assert.match(runActiveNote?.title ?? "", /runtime setup required/);
-
-  const runCurrent = items.find((item) => item.title.includes("Run current scope") || item.title.includes("Run active:"));
-  assert.equal(runCurrent?.disabled, true);
-  assert.match(runCurrent?.title ?? "", /runtime setup required/);
-
-  const runAll = items.find((item) => item.action === "runAll");
-  assert.equal(runAll?.disabled, true);
-  assert.match(runAll?.title ?? "", /runtime setup required/);
-
-  // The runtime-setup block itself owns the top row, so there is no
-  // separate "preflight failed" recovery row while it is blocking.
-  assert.equal(items.some((item) => item.action === "runPreflight"), false);
-
-  // Manual research reads/derives locally and never touches the Python runtime.
-  const manualRow = items.find((item) => item.title === "Manual research");
-  assert.equal(manualRow?.disabled, false);
-});
-
-void test("runtime blocking disables enabling automatic Reading research but not pausing it, and disables retry", () => {
-  const notYetEnabled = buildStatusBarMenuItems(state({
-    readingMode: "reading",
-    webResearchMode: "manual",
-    runtimeSetup: runtimeSetupState({ phase: "setup-required" }),
-  }));
-  const enableAction = notYetEnabled.find((item) => item.title === "Automatic for Reading" || item.title.startsWith("Automatic for Reading "));
-  assert.equal(enableAction?.disabled, true);
-  assert.match(enableAction?.title ?? "", /runtime setup required/);
-
-  const alreadyOn = buildStatusBarMenuItems(state({
-    readingMode: "reading",
-    webResearchMode: "automatic-reading",
-    runtimeSetup: runtimeSetupState({ phase: "setup-required" }),
-  }));
-  const pauseAction = alreadyOn.find((item) => item.title === "Automatic for Reading");
-  assert.equal(pauseAction?.disabled, false);
-
-  const transientPause = buildStatusBarMenuItems(state({
-    readingMode: "reading",
-    webResearchMode: "automatic-reading",
-    automaticResearchPauseReason: "provider-network",
-    runtimeSetup: runtimeSetupState({ phase: "setup-required" }),
-  }));
-  const retry = transientPause.find((item) => item.action === "retryAutomaticResearch");
-  assert.ok(retry);
-  assert.equal(retry?.disabled, true);
-  assert.match(retry?.title ?? "", /runtime setup required/);
-});
-
-void test("retry copy is used for failed/cancelled phases, and cancel is offered independently of canSetup", () => {
-  for (const phase of ["failed", "cancelled"] as const) {
-    const items = buildStatusBarMenuItems(state({ runtimeSetup: runtimeSetupState({ phase, canSetup: true, canCancel: false }) }));
-    const action = items.find((item) => item.action === "startRuntimeSetup");
-    assert.equal(action?.title, "Retry Mindmap runtime setup");
-  }
-
-  const cancellableButNotRetryable = buildStatusBarMenuItems(state({ runtimeSetup: runtimeSetupState({ phase: "confirming", canSetup: false, canCancel: true }) }));
-  assert.ok(cancellableButNotRetryable.some((item) => item.action === "cancelRuntimeSetup"));
-  assert.equal(cancellableButNotRetryable.some((item) => item.action === "startRuntimeSetup"), false);
-});
-
-void test("StatusBarMenuActions requires openPythonDownload to be wired (compile-time proof) and it is callable", () => {
-  assert.equal(typeof ALL_ACTIONS_STUB.openPythonDownload, "function");
-  assert.doesNotThrow(() => {
-    void ALL_ACTIONS_STUB.openPythonDownload();
-  });
 });
 
 // ---------------------------------------------------------------------------

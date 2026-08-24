@@ -42,10 +42,11 @@ void test("source audit: preflight is ProductionEngine.recheckReadiness() whenev
   assert.match(mainSource, /await engine\.recheckReadiness\(\)/);
 });
 
-void test("source audit: sidebar live/lookup related queries prefer the TypeScript ProductionEngine over the Python semantic worker", () => {
+void test("source audit: sidebar live/lookup related queries require the TypeScript ProductionEngine -- there is no Python semantic worker fallback left to prefer over", () => {
   const mainSource = readSource("src/main.ts");
-  assert.match(mainSource, /async queryLiveRelated\(path: string\): Promise<LiveRelatedResponse> \{[\s\S]{0,300}if \(this\.productionEngine\) \{/);
-  assert.match(mainSource, /async queryLookupRelated\(query: string, limit\?: number\): Promise<LookupRelatedResponse> \{[\s\S]{0,300}if \(this\.productionEngine\) \{/);
+  assert.match(mainSource, /async queryLiveRelated\(path: string\): Promise<LiveRelatedResponse> \{[\s\S]{0,300}if \(!this\.productionEngine\) \{/);
+  assert.match(mainSource, /async queryLookupRelated\(query: string, limit\?: number\): Promise<LookupRelatedResponse> \{[\s\S]{0,300}if \(!this\.productionEngine\) \{/);
+  assert.doesNotMatch(mainSource, /semanticEnvironment\.queryRelated|semanticEnvironment\.queryText/);
 });
 
 void test("source audit: reading Apple Books annotations never falls back to the Python apple_books_reader.py subprocess", () => {
@@ -54,10 +55,11 @@ void test("source audit: reading Apple Books annotations never falls back to the
   assert.match(mainSource, /this\.productionEngine\.appleBooksReader\.readAnnotations\(\)/);
 });
 
-void test("source audit: starting the semantic environment is a TypeScript-engine no-op (never spawns the Python worker) whenever a ProductionEngine is composed", () => {
+void test("source audit: starting the semantic environment is a pure TypeScript-engine no-op -- the Python worker client no longer exists to spawn", () => {
   const mainSource = readSource("src/main.ts");
-  const match = mainSource.match(/async startSemanticEnvironment\(showNotice: boolean\): Promise<void> \{\s*\n\s*if \(this\.productionEngine\) \{/);
-  assert.ok(match, "startSemanticEnvironment must check `this.productionEngine` and return BEFORE ever touching `this.semanticEnvironment` (the Python worker client)");
+  assert.doesNotMatch(mainSource, /MindmapSemanticEnvironment|semanticWorkerClient|new SemanticWorkerClient/);
+  const method = mainSource.match(/async startSemanticEnvironment\(showNotice: boolean\): Promise<void> \{[\s\S]*?\n {2}\}/);
+  assert.ok(method, "startSemanticEnvironment method not found");
 });
 
 void test("source audit: pending-notes scanning is entirely TypeScript-engine-backed -- no Python state.json reader is wired into production pending scanning", () => {
@@ -89,18 +91,20 @@ void test("source audit: startProductionEngine sets productionEngineFailed and s
   assert.match(body, /new Notice\(/);
 });
 
-void test("source audit: runMindmap/runPreflight/queryLiveRelated/queryLookupRelated/startSemanticEnvironment all check productionEngineFailed and fail closed before reaching any Python/semantic-worker fallback", () => {
+void test("source audit: runMindmap/runPreflight/queryLiveRelated/queryLookupRelated/startSemanticEnvironment all fail closed on a missing/failed ProductionEngine, never reaching a Python/semantic-worker fallback", () => {
   const mainSource = readSource("src/main.ts");
-  const occurrences = mainSource.match(/this\.productionEngineFailed/g) ?? [];
-  // One assignment (in startProductionEngine) plus one read-check per guarded command entry point.
-  assert.ok(occurrences.length >= 6, `expected productionEngineFailed to be assigned once and checked in at least 5 command entry points, found ${occurrences.length} references`);
+  // Checkpoint 11: ProductionEngine is mandatory, so every one of these command entry points now
+  // uses the SAME unconditional "!this.productionEngine" guard (there is no separate Python-
+  // fallback branch left to distinguish a construction failure from a never-attempted
+  // composition) -- `productionEngineFailed` still exists only to make the failure-case Notice
+  // more specific, set once in startProductionEngine's own catch block.
+  assert.match(mainSource, /this\.productionEngineFailed = true;/);
 
   for (const guardedMethod of [
-    /async runMindmap\(trigger: RunTrigger, scope: RunScope = "current", notePath\?: string\): Promise<boolean> \{[\s\S]{0,400}if \(this\.productionEngineFailed\) \{/,
-    /async runPreflight\(trigger: "manual" \| "startup"\): Promise<PreflightResult> \{[\s\S]{0,400}if \(this\.productionEngineFailed\) \{/,
-    /async queryLiveRelated\(path: string\): Promise<LiveRelatedResponse> \{[\s\S]{0,900}if \(this\.productionEngineFailed\) \{/,
-    /async queryLookupRelated\(query: string, limit\?: number\): Promise<LookupRelatedResponse> \{[\s\S]{0,500}if \(this\.productionEngineFailed\) \{/,
-    /async startSemanticEnvironment\(showNotice: boolean\): Promise<void> \{[\s\S]{0,400}if \(this\.productionEngineFailed\) \{/,
+    /async runMindmap\(trigger: RunTrigger, scope: RunScope = "current", notePath\?: string\): Promise<boolean> \{\s*\n\s*if \(this\.productionEngine\) \{/,
+    /async runPreflight\(trigger: "manual" \| "startup"\): Promise<PreflightResult> \{\s*\n\s*if \(this\.productionEngine\) \{/,
+    /async queryLiveRelated\(path: string\): Promise<LiveRelatedResponse> \{[\s\S]{0,300}if \(!this\.productionEngine\) \{/,
+    /async queryLookupRelated\(query: string, limit\?: number\): Promise<LookupRelatedResponse> \{[\s\S]{0,300}if \(!this\.productionEngine\) \{/,
   ]) {
     assert.match(mainSource, guardedMethod);
   }

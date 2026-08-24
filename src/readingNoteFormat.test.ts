@@ -6,6 +6,7 @@ import {
   conceptWikilinks,
   deriveHumanTitle,
   humanTitleCandidate,
+  isSafeRelatedTarget,
   relatedNoteWikilink,
   relatedNoteWikilinks,
   renderLeadingBlockquote,
@@ -190,6 +191,14 @@ test("does not special-case a hidden-looking folder without a configDir to compa
   // Traversal, absolute paths, and injection characters remain rejected
   // regardless (checked elsewhere in this file).
   assert.notEqual(relatedNoteWikilink("Books/Apple Books/.journal/Note.md"), undefined);
+});
+
+test("rejects a related target inside configDir when the caller supplies one", () => {
+  assert.equal(relatedNoteWikilink(".obsidian/plugins/mindmap-ai/data.md", ".obsidian"), undefined);
+  assert.equal(isSafeRelatedTarget(".obsidian/plugins/mindmap-ai/data.md", ".obsidian"), false);
+  // A hidden-looking folder unrelated to the actual configDir must remain
+  // allowed even when configDir is supplied.
+  assert.notEqual(relatedNoteWikilink(".journal/Note.md", ".obsidian"), undefined);
 });
 
 test("rejects a related target containing a control character", () => {

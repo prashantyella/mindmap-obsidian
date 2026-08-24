@@ -1,9 +1,12 @@
-import { readFileSync } from "node:fs";
+import fs, { readFileSync } from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
 
 import { canonicalizePath, stableNoteIdentity } from "../engine/contracts";
 import { FakeIndexFs } from "./fakeIndexFs.test-support";
+import { NodeOwnedFs } from "../engine/nodeFs";
 import { computeMetadataChecksumHex } from "./generationMetadata";
 import {
   buildGeneration,
@@ -682,4 +685,30 @@ void test("source-level regression: verifyGenerationIntegrity never retains a de
   // retaining a decoded shard beyond its own iteration.
   assert.ok(loopBody.includes("refineWithChunks("), "refineWithChunks must be called from inside the shard loop, not after it");
   assert.ok(!postLoopBody.includes("refineWithChunks("), "refineWithChunks must not run again after the shard loop has already finished");
+});
+
+void test("buildGeneration promotes into a fresh generations directory on a real filesystem", async () => {
+  const parent = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mindmap-generation-real-fs-"));
+  const root = path.join(parent, "production-engine");
+  try {
+    const adapter = new NodeOwnedFs(root);
+    const unit = new Float32Array([1, 0, 0, 0]);
+    await buildGeneration(adapter, root, {
+      generationId: 1,
+      embeddingModel: MODEL,
+      dimension: DIM,
+      notes: [{
+        identity: stableNoteIdentity(canonicalizePath("Notes/real-fs.md")),
+        sourceHash: HASH,
+        vector: unit,
+        chunkCount: 1,
+        loadChunkVectors: async () => [unit],
+      }],
+    });
+    await switchCurrentGeneration(adapter, root, 1);
+    assert.equal(await loadCurrentGenerationId(adapter, root), 1);
+    assert.equal(await adapter.exists(path.join(root, generationDirPath(1), "manifest.json")), true);
+  } finally {
+    await fs.promises.rm(parent, { recursive: true, force: true });
+  }
 });

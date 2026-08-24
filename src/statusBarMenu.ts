@@ -99,12 +99,6 @@ function addMenuItem(menu: Menu, descriptor: StatusBarMenuItemDescriptor, action
           void actions.toggleAutomaticReadingResearch();
         } else if (action === "retryAutomaticResearch") {
           void actions.retryAutomaticResearch();
-        } else if (action === "startRuntimeSetup") {
-          void actions.startRuntimeSetup();
-        } else if (action === "cancelRuntimeSetup") {
-          void actions.cancelRuntimeSetup();
-        } else if (action === "openPythonDownload") {
-          void actions.openPythonDownload();
         } else if (action === "startMigration") {
           void actions.startMigration();
         } else if (action === "retryMigration") {

@@ -1,68 +1,45 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
-import {
-  DEFAULT_METADATA_MODEL,
-  getLlmProviderConfigStatus,
-  saveLlmProviderConfig,
-  type LlmProviderConfigStatus,
-} from "./pluginConfig";
+import { getLlmProviderConfigStatus, getScopeSetupStatus, saveLlmProviderConfig, saveScopeSetup } from "./pluginConfig";
+import { DEFAULT_SETTINGS, type MindmapSettings } from "./settings";
 
-void test("provider fallback uses the approved Qwen metadata model", () => {
-  const status = getLlmProviderConfigStatus({
-    valid: false,
-    messages: [],
-  } as never, false);
+function freshSettings(): MindmapSettings {
+  return { ...DEFAULT_SETTINGS, pinnedConnections: {}, scopeCurrentPaths: [], scopeAllPaths: [] };
+}
 
-  assert.equal(DEFAULT_METADATA_MODEL, "Qwen3.5-9B-MLX-4bit");
-  assert.equal(status.model, DEFAULT_METADATA_MODEL);
+void test("getLlmProviderConfigStatus reads baseUrl/model/maxTokens straight from settings", () => {
+  const settings = freshSettings();
+  settings.llmBaseUrl = "http://localhost:11434";
+  settings.llmModel = "llama3.1:8b";
+  settings.llmMaxTokens = 512;
+
+  const status = getLlmProviderConfigStatus(settings);
+  assert.equal(status.baseUrl, "http://localhost:11434");
+  assert.equal(status.model, "llama3.1:8b");
+  assert.equal(status.maxTokens, 512);
 });
 
-void test("saveLlmProviderConfig trims a whitespace-only API key so env clearing is not triggered", () => {
-  const configPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mindmap-config-")), "config.json");
-  fs.writeFileSync(configPath, JSON.stringify({ llm_api_key_env: "OPENAI_API_KEY" }), "utf8");
+void test("saveLlmProviderConfig trims baseUrl/model and only updates maxTokens when finite/positive", () => {
+  const settings = freshSettings();
+  saveLlmProviderConfig(settings, { baseUrl: "  http://localhost:11434  ", model: "  llama3.1:8b  ", maxTokens: 2048 });
+  assert.equal(settings.llmBaseUrl, "http://localhost:11434");
+  assert.equal(settings.llmModel, "llama3.1:8b");
+  assert.equal(settings.llmMaxTokens, 2048);
 
-  const status: LlmProviderConfigStatus = {
-    provider: "openai_compatible",
-    baseUrl: "http://localhost:8000/v1",
-    model: DEFAULT_METADATA_MODEL,
-    apiKey: "",
-    maxTokens: 1024,
-    enableThinking: true,
-    canManage: true,
-    configPath,
-    guidance: "",
-  };
-
-  saveLlmProviderConfig(status, { ...status, apiKey: "   " });
-
-  const saved = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
-  assert.equal(saved.llm_api_key, "");
-  assert.equal(saved.llm_api_key_env, "OPENAI_API_KEY");
+  saveLlmProviderConfig(settings, { maxTokens: -1 });
+  assert.equal(settings.llmMaxTokens, 2048, "an invalid maxTokens must never overwrite the last good value");
 });
 
-void test("saveLlmProviderConfig trims a real API key before persisting and clears the env var", () => {
-  const configPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mindmap-config-")), "config.json");
-  fs.writeFileSync(configPath, JSON.stringify({ llm_api_key_env: "OPENAI_API_KEY" }), "utf8");
+void test("getScopeSetupStatus/saveScopeSetup round-trip through settings, normalizing and validating", () => {
+  const settings = freshSettings();
+  assert.equal(getScopeSetupStatus(settings).complete, false);
 
-  const status: LlmProviderConfigStatus = {
-    provider: "openai_compatible",
-    baseUrl: "http://localhost:8000/v1",
-    model: DEFAULT_METADATA_MODEL,
-    apiKey: "",
-    maxTokens: 1024,
-    enableThinking: true,
-    canManage: true,
-    configPath,
-    guidance: "",
-  };
+  saveScopeSetup(settings, { currentPaths: ["Projects", "Journal"], allPaths: [".", "Projects"] });
+  const status = getScopeSetupStatus(settings);
+  assert.equal(status.complete, true);
+  assert.deepEqual(status.currentPaths, ["Journal", "Projects"]);
+  assert.deepEqual(status.allPaths, [".", "Projects"]);
 
-  saveLlmProviderConfig(status, { ...status, apiKey: "  sk-test-123  " });
-
-  const saved = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
-  assert.equal(saved.llm_api_key, "sk-test-123");
-  assert.equal(saved.llm_api_key_env, "");
+  assert.throws(() => saveScopeSetup(settings, { currentPaths: [], allPaths: ["Projects"] }));
 });

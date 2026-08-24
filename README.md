@@ -1,50 +1,52 @@
 # Mindmap AI
 
-Mindmap is a desktop-only Obsidian plugin that runs a local Python workflow to:
-- summarize notes
-- suggest tags and concepts
-- generate related-note links in a `## Mindmap` section
-- search indexed notes with natural-language questions
-- pin high-value connections to the active note
+Mindmap is a desktop-only Obsidian plugin, written entirely in TypeScript and bundled into the plugin itself, that:
+- summarizes notes
+- suggests tags and concepts
+- generates related-note links in a `## Mindmap` section
+- searches indexed notes with natural-language questions
+- pins high-value connections to the active note
+
+Everything runs inside the Obsidian process. There is no companion runtime or separate executable to install, and no local network service other than the Ollama server you already run.
+
+## Architecture
+
+- **Engine.** A single TypeScript `ProductionEngine`, composed once when the plugin loads, owns embeddings, metadata extraction, the exact-cosine vector index, the persistent job queue, and the in-app scheduler. It is mandatory on this desktop-only plugin: if it fails to start, Mindmap fails closed with a clear in-app notice rather than falling back to anything else.
+- **Models.** Ollama hosts both the embedding model and the local metadata model. No other provider is supported.
+- **Apple Books.** Reading annotations are read directly from the local Apple Books SQLite database using a fixed-argument `/usr/bin/sqlite3` call (`shell: false`, read-only), never a general-purpose scripting engine or a modification of Apple's own database.
+- **Scheduling.** An in-app `CoreScheduler` performs due work (daily maintenance, weekly refresh, Reading sync) once Obsidian is open. An optional macOS LaunchAgent adapter can additionally wake or open the vault at the scheduled time via a fixed `/usr/bin/open` call — it never runs Mindmap work itself while Obsidian is closed.
+- **Configuration.** All runtime configuration (Ollama base URLs/models, scope folders, Apple Books database overrides) lives in plugin settings. A vault upgrading from an earlier plugin release has its existing configuration imported into settings automatically, once, the first time this version loads.
 
 ## Requirements
 
 - Obsidian Desktop `1.7.2+`
-- macOS, for the automated Python runtime setup below (Windows/Linux use an advanced manual interpreter path instead — see Advanced Runtime Overrides)
-- Ollama running locally at `http://localhost:11434`
-- oMLX with `Qwen3.5-9B-MLX-4bit` for metadata extraction
-- Ollama models:
-  - `mxbai-embed-large`
+- Ollama running locally, with:
+  - an embedding model (default: `mxbai-embed-large`)
+  - a metadata model (default: `llama3.1:8b`)
 
 ## Install
 
 1. In Obsidian: `Settings -> Community plugins`.
 2. Install and enable `Mindmap`.
-3. On enable, Mindmap automatically looks for a compatible Python 3.11-3.13 already on your Mac (Framework installs, Homebrew, PATH, Xcode). If it finds one with the required packages already installed, it's selected and Mindmap is ready immediately — no terminal, no path to edit.
-4. If Mindmap finds Python but not the required packages, Settings and the status-bar menu show **Runtime setup required** with a **Set up Mindmap runtime** action. Choosing it shows one confirmation before anything happens: Mindmap will create a private Python environment, download pinned packages from PyPI, and store them outside every vault under `~/Library/Application Support/Mindmap AI/runtime/<fingerprint>` (shared and reused across vaults; a change to the pinned package set creates a new versioned folder alongside the old one). This takes a few minutes and needs network access; setup shows live progress and can be cancelled or retried at any point.
-5. If no compatible Python is found at all, Settings link directly to the official [Python macOS installer](https://www.python.org/downloads/macos/) (Python 3.11-3.13). Install it, then reopen Mindmap settings to retry discovery.
-6. Pull required Ollama embedding model and install the default oMLX metadata model:
+3. Pull the Ollama models you plan to use:
 
 ```bash
 ollama pull mxbai-embed-large
+ollama pull llama3.1:8b
 ```
-
-Install `Qwen3.5-9B-MLX-4bit` in oMLX, then set the local oMLX API key in Mindmap settings if your oMLX server requires one.
 
 ## First Run
 
-1. Confirm `Mindmap runtime` shows ready in Settings (see Install above), then run `Run Mindmap preflight checks` from Command Palette.
-2. Open `Mindmap` settings -> `Scope setup`.
-3. Select folders for both:
-   - `Current scope (--current)`
-   - `All scope (--all)`
-4. Click `Save setup`.
+1. Open `Mindmap` settings and confirm the **Overview** row reads Ready (or use **Run checks** and follow its guidance).
+2. Under **Local AI**, confirm the embedding and metadata base URLs/models match your Ollama setup.
+3. Under **Scope**, select folders for both the current-note scope and the all-notes scope, then save.
+4. If this vault was previously running an earlier version of Mindmap, the status menu shows a first-run **migration** step that builds the TypeScript vector index; start it and let it finish (it can be retried if interrupted). A brand-new vault skips straight to indexing on its first run.
 5. Run one command:
    - `Run Mindmap (current scope)` or
    - `Run Mindmap (all scopes)`
    - `Run Mindmap metadata refresh (all notes)` to rewrite note metadata without rebuilding embeddings
    - `Run Mindmap full refresh (all notes)` after changing metadata models/prompts
-   - `Run Mindmap full rebuild (all notes)` to wipe and rebuild the vector index
+   - `Run Mindmap full rebuild (all notes)` to rebuild the vector index from the committed generation
 
 ## Main Commands
 
@@ -65,25 +67,20 @@ Mindmap supports three scheduler modes:
 
 - `Manual`: runs only from commands.
 - `Interval`: runs current scope while Obsidian is open.
-- `LaunchAgent`: writes plugin-managed macOS LaunchAgents so scheduled runs continue when Obsidian is closed.
+- `LaunchAgent`: the in-app `CoreScheduler` performs daily/weekly/Reading-sync work whenever Obsidian is open, exactly like Interval mode does for its own schedule; additionally, an optional macOS LaunchAgent wakes or opens the vault at the scheduled time (a fixed `/usr/bin/open <vault>` call, disclosed and confirmed before it is installed) so that work can actually run even if Obsidian was closed at the scheduled time. The LaunchAgent itself never touches your notes, the index, or any model — it only opens the app.
 
-LaunchAgent mode uses the plugin runtime resolved in settings. With default paths, scheduled runs use:
+Default schedules:
 
-- `.obsidian/plugins/mindmap-ai/python/mindmap.py`
-- `.obsidian/plugins/mindmap-ai/python/config.json`
-
-Default LaunchAgent schedules:
-
-- Daily Mon-Sat 02:30: `--all --apply --include-reading-pending`. The extra flag only adds already-imported, pending `Books/Apple Books` annotation notes to that run's note universe; it never reads the Apple Books database or widens your configured all-scope folders.
-- Weekly Sunday 03:00: `--all --refresh-all --apply`. Weekly refresh never includes Reading notes.
+- Daily Monday-Saturday 02:30: an all-scope refresh.
+- Weekly Sunday 03:00: a full all-scope rebuild.
 
 Scheduled maintenance runs Mindmap only. It never starts Web Research.
 
-`Run Mindmap full rebuild (all notes)` deletes and recreates the local vector collections for your configured all-scope folders. Any already-indexed Apple Books annotation vectors are snapshotted first and restored afterward, so a manual rebuild of your regular notes does not force the whole Reading history to be re-embedded by the next daily run.
+`Run Mindmap full rebuild (all notes)` rebuilds the local vector index from the current committed generation for your configured all-scope folders, atomically switching over only once the rebuild is verified.
 
 ## Reading Mode and Apple Books
 
-Reading Mode is an experimental, opt-in workflow for Apple Books annotations. The first enablement previews access and eligible-note counts before any import. Mindmap reads the supported Apple Books annotation database and its WAL/SHM companions without modifying Apple Books or your source database.
+Reading Mode is an experimental, opt-in workflow for Apple Books annotations. The first enablement previews access and eligible-note counts before any import. Mindmap reads the local Apple Books annotation database (and its WAL/SHM companions) through a fixed-argument, read-only `/usr/bin/sqlite3` call — it never modifies Apple Books or your source database, and never invokes a general-purpose scripting engine.
 
 **Import-only first activation.** Enabling Reading Mode imports every eligible annotation into your vault, but does not process the historical backlog automatically. If any annotations are pending right after import, Mindmap asks once whether to process them now. If you decline (or close the prompt), pending notes stay visible in the status menu behind a **Process Reading backlog** action you can trigger at any time, and they are also picked up by the next daily scheduled run (see Scheduling above).
 
@@ -103,7 +100,7 @@ Web Research has three modes in the status menu and Settings:
 - `Manual`: research selected text or an active Markdown note on demand.
 - `Automatic for Reading`: includes the Manual actions and may research eligible Apple Books annotations while Reading Mode is active.
 
-Before either research mode is enabled, Mindmap shows consent. Annotation or note excerpts stay on your machine for local Qwen query derivation and synthesis. Exa receives only one or two derived queries; it returns up to five bounded source excerpts and metadata. Unrelated vault content is never sent to Exa.
+Before either research mode is enabled, Mindmap shows consent. Annotation or note excerpts stay on your machine for local query derivation and synthesis, using the same Ollama metadata model configured under Local AI. Exa receives only one or two derived queries; it returns up to five bounded source excerpts and metadata. Unrelated vault content is never sent to Exa.
 
 Automatic for Reading is capped at five attempts per sync and ten per local calendar day. The status menu and Settings show current usage, pauses, errors, and retry controls. A daily cap resumes after local midnight; scheduled maintenance does not use Web Research.
 
@@ -113,36 +110,34 @@ Store the Exa API key in macOS Keychain under service `com.mindmap-ai.web-resear
 
 ## Vault Path Safety
 
-By default, Mindmap stores runtime data under `.obsidian/plugins/mindmap-ai/` inside your current vault; if you customize runtime paths, keep them vault-relative and inside the same vault.
+Mindmap stores its own runtime data (index, job queue, schedules) under `.obsidian/plugins/mindmap-ai/data/` inside your current vault, and never writes outside it. The only processes Mindmap ever starts are the four fixed-argument system binaries disclosed throughout this README (`/usr/bin/sqlite3` for Apple Books reads, `/usr/bin/security` for Keychain access, `/bin/launchctl` and `/usr/bin/open` for the optional LaunchAgent adapter) — always `shell: false`, never with vault content interpolated into the command line.
 
-## Advanced Runtime Overrides
+## Privacy
 
-Mindmap's automated setup covers macOS. Windows/Linux, and any macOS setup that needs a specific interpreter, use the **Advanced** section of Mindmap settings: set `pythonCommand` to an absolute interpreter path (with the required packages already installed) or a PATH command name. An explicit `pythonCommand` is validated as-is and is never replaced or offered automated setup; leave it blank or the default `python3` to re-enable automatic discovery.
+- Note and annotation content sent for embeddings or metadata extraction goes only to the Ollama server you configure (default `http://localhost:11434`); Mindmap never sends vault content to any other network destination on its own.
+- Optional Exa Web Research sends only the one or two short derived queries described above, never raw note or annotation text, and never unrelated vault content.
+- The Exa API key lives only in macOS Keychain; it is never written to plugin settings, note frontmatter, logs, or diagnostics output.
+- Diagnostics you copy from Troubleshooting are bounded and redact anything key/token/secret/password/authorization-shaped before they are ever assembled.
 
 ## Troubleshooting
 
-- Runtime setup shows `unavailable` or a Set up/Retry action never finishes: check Settings for the current status message, then use the **Retry** action. As a fallback, or on Windows/Linux, install dependencies manually against your own interpreter and set `pythonCommand` under Advanced (see above):
-
-```bash
-python3 -m pip install -r .obsidian/plugins/mindmap-ai/python/requirements.txt
-```
-
+- Overview shows the engine is unavailable: open the Troubleshooting section, run **Run preflight**, and use **Copy diagnostics** for a bounded, redacted report of provider/scheduler/engine state.
 - Missing models:
 
 ```bash
 ollama pull mxbai-embed-large
+ollama pull llama3.1:8b
 ```
 
-For metadata extraction, confirm oMLX exposes `Qwen3.5-9B-MLX-4bit` from `http://localhost:8000/v1/models`.
-
 - Plugin shows `scope setup required`:
-  - complete `Scope setup` in plugin settings and save.
+  - complete Scope setup in plugin settings and save.
+- A first-run migration failed partway: reopen the status menu and use **Retry migration** — it resumes rather than starting over, and never touches the vault's existing note content.
 
 ## Notes
 
 - Desktop only (`isDesktopOnly: true`)
 - Mobile is not supported
-- Mindmap processing and Qwen research preparation run locally. Optional Exa Web Research sends only derived queries as described above.
+- Mindmap processing and query preparation for Web Research run locally through Ollama. Optional Exa Web Research sends only derived queries as described above.
 
 ## Release Metadata
 

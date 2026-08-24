@@ -46,6 +46,25 @@ export function createReadyLiveState(path: string, response: LiveRelatedResponse
   };
 }
 
+/**
+ * `ensureLiveQuery`'s cache-skip guard: a query already exists for this
+ * exact path and hasn't been reset to `"idle"`, so no re-fetch is needed.
+ *
+ * Deliberately NOT status-aware beyond `"idle"` -- in particular, this
+ * does not treat a `"ready"` response with `indexed: false` (e.g. a note
+ * queried before migration finished indexing it) as automatically stale.
+ * That would make every `render()` call re-issue a query for a note that
+ * is still legitimately unindexed, cascading into an unbounded
+ * query -> render -> query loop (query resolves indexed:false -> render()
+ * -> ensureLiveQuery sees "not fresh" -> queries again -> ...). Invalidating
+ * a stale `indexed: false` cache is instead a deliberate, ONE-SHOT action
+ * (`MindmapWorkspaceView.invalidateLiveQuery()`, driven by
+ * `ProductionEngine.onMigrationComplete`), never an implicit per-render check.
+ */
+export function shouldSkipLiveQuery(liveState: SidebarLiveState, path: string): boolean {
+  return liveState.path === path && liveState.status !== "idle";
+}
+
 export function getDisplayLiveRelated(activePath: string, liveState: SidebarLiveState): LiveRelatedResult[] {
   return liveState.path === activePath
     ? liveState.response?.related ?? []

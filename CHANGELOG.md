@@ -9,6 +9,22 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.0
+
+### Changed
+- **Mindmap is now a standard, Python-free Obsidian plugin.** Every shipped/runtime Python file, the bundled runtime installer/discovery/verifier, the Python semantic-worker subprocess, the Python LaunchAgent, and the `python`/`tools/parity` directories are deleted from the repository and the release. The release bundle is exactly `main.js`, `manifest.json`, and `styles.css` — no `mindmap-python.zip`, no companion runtime, no interpreter to discover or install.
+- The TypeScript `ProductionEngine` (embeddings, metadata, the exact-cosine vector index, job queue, scheduler, and Apple Books reading, all built out over the prior 0.3.0 development checkpoints) is now the **only** engine: it is mandatory on this desktop-only plugin, and a construction/start failure fails closed with a clear in-app notice rather than ever falling back to a subprocess.
+- Runtime configuration (Ollama embedding/metadata provider and model, scope folders, Apple Books database overrides) now lives entirely in plugin settings (`data.json`), never a Python `config.json`. A vault upgrading from an earlier Python-powered install has its existing `config.json` values imported into settings automatically, once, the first time the new version loads; existing Chroma vector data is left untouched on disk and simply ignored (no automatic migration or deletion).
+- Settings, the status-bar menu, and diagnostics/troubleshooting copy no longer mention Python, `pip`, virtual environments, or a runtime installer anywhere; the former "Advanced runtime overrides" (Python command/script/config path) fields are removed.
+- README rewritten for the TypeScript-only architecture: Ollama (embeddings + local metadata), Apple Books reading through a fixed-argument `/usr/bin/sqlite3` call, the in-app scheduler plus an optional LaunchAgent adapter that only wakes/opens the vault (`/usr/bin/open`) — CoreScheduler performs the actual work once Obsidian is open — first-run migration/retry, and privacy/troubleshooting guidance for the new architecture.
+- CI and the release workflow no longer install Python or run the Python test suite; both are Node-only (`npm ci`, lint, official Obsidian lint, typecheck, `npm test`, build, validate).
+- Release validation (`npm run validate`) now asserts the release directory contains exactly three files, scans the built `dist/main.js` for any Python/Chroma/semantic-worker/runtime-installer string or process invocation, and confirms no `.py` file remains tracked in the repository.
+
+### Removed
+- `python/`, `tools/parity/` (the Python-oracle fixture/parity generators and the dev-shadow TypeScript comparison command), every Python unit test, the bundled-runtime-asset pipeline, the runtime discovery/setup/verifier/coordinator modules, the Python semantic-worker client, the Python LaunchAgent plist builder, and the Python config-migration helper.
+
+`minAppVersion` is unchanged at `1.7.2` for this release; this is a runtime-architecture release, not an API-compatibility bump.
+
 ## 0.2.1
 
 ### Changed

@@ -84,10 +84,11 @@ void test("release workflow publishes only main.js, manifest.json, and styles.cs
   assert.doesNotMatch(publishStep, /release\/mindmap-python\.zip/);
 });
 
-void test("release workflow does not delete the Python packaging tooling that still produces mindmap-python.zip", () => {
+void test("Checkpoint 11: prepare-release.mjs no longer packages a Python zip -- the release ships exactly three files", () => {
   assert.ok(fs.existsSync(path.join(REPO_ROOT, "scripts/prepare-release.mjs")), "prepare-release.mjs must still exist");
   const prepareScript = readSource("scripts/prepare-release.mjs");
-  assert.match(prepareScript, /mindmap-python\.zip/);
+  assert.doesNotMatch(prepareScript, /mindmap-python\.zip/);
+  assert.doesNotMatch(prepareScript, /\bpython\b/i);
 });
 
 void test("release workflow makes the release non-empty via generate_release_notes (preferred) or an explicit body_path", () => {
@@ -162,14 +163,14 @@ void test("CHANGELOG.md documents the current release under its own version head
 });
 
 // ---------------------------------------------------------------------------
-// (7) readingVault.ts must load "obsidian" through require, not a dynamic
+// (7) readingVault.ts must never reference "obsidian" as a dynamic
 // import(): esbuild preserves a dynamic import() of an external bare
 // specifier verbatim in the CommonJS bundle, and Obsidian's CommonJS
-// plugin loader can't resolve that form for "obsidian".
+// plugin loader can't resolve that form for "obsidian". (The real TFile
+// constructor is injected by main.ts instead -- see createObsidianVaultApi.)
 // ---------------------------------------------------------------------------
 
-void test("readingVault.ts loads \"obsidian\" via require, never a dynamic import() that esbuild would preserve unresolved", () => {
+void test("readingVault.ts never references \"obsidian\" as a dynamic import() that esbuild would preserve unresolved", () => {
   const source = readSource("src/readingVault.ts");
-  assert.match(source, /require\(["']obsidian["']\)/);
-  assert.doesNotMatch(source, /\bimport\s*\(\s*["']obsidian["']\s*\)/);
+  assert.doesNotMatch(source, /\bawait\s+import\s*\(\s*["']obsidian["']\s*\)/);
 });

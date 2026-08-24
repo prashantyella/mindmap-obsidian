@@ -10,18 +10,9 @@ const requiredFiles = [
   "dist/main.js",
   "dist/manifest.json",
   "dist/styles.css",
-  "dist/python/mindmap.py",
-  "dist/python/mindmap_worker.py",
-  "dist/python/apple_books_reader.py",
-  "dist/python/requirements.txt",
-  "dist/python/config.template.json",
-  "python/mindmap.py",
-  "python/mindmap_worker.py",
-  "python/apple_books_reader.py",
-  "python/requirements.txt",
-  "python/config.template.json",
   "versions.json",
   ".github/workflows/release.yml",
+  ".github/workflows/ci.yml",
 ];
 
 for (const file of requiredFiles) {
@@ -30,15 +21,113 @@ for (const file of requiredFiles) {
   }
 }
 
-const trackedCacheArtifacts = execSync(
-  "git ls-files",
-  { encoding: "utf8" },
-).split("\n").filter((file) => /(^|\/)__pycache__\/|\.pyc$/.test(file));
+// ---------------------------------------------------------------------------
+// Checkpoint 11: no tracked Python source, cache artifact, or Python-only
+// runtime directory anywhere in the repository.
+// ---------------------------------------------------------------------------
 
+const trackedFiles = execSync("git ls-files", { encoding: "utf8" }).split("\n").filter(Boolean);
+
+const trackedCacheArtifacts = trackedFiles.filter((file) => /(^|\/)__pycache__\/|\.pyc$/.test(file));
 if (trackedCacheArtifacts.length > 0) {
-  throw new Error(
-    `Tracked Python cache artifacts must not be committed: ${trackedCacheArtifacts.join(", ")}`,
-  );
+  throw new Error(`Tracked Python cache artifacts must not be committed: ${trackedCacheArtifacts.join(", ")}`);
+}
+
+const trackedPythonFiles = trackedFiles.filter((file) => file.endsWith(".py"));
+if (trackedPythonFiles.length > 0) {
+  throw new Error(`No tracked Python source files are permitted in the shipping repository: ${trackedPythonFiles.join(", ")}`);
+}
+
+const forbiddenTrackedPaths = trackedFiles.filter((file) => file === "python" || file.startsWith("python/") || file === "tools/parity" || file.startsWith("tools/parity/"));
+if (forbiddenTrackedPaths.length > 0) {
+  throw new Error(`The Python runtime directory and the dev-shadow parity tooling must not be tracked: ${forbiddenTrackedPaths.join(", ")}`);
+}
+
+// ---------------------------------------------------------------------------
+// Source scan: no shipped src/ file may reference Python/pip/venv/runtime-
+// installer/Chroma tooling, or invoke python3/mindmap.py/mindmap_worker/
+// apple_books_reader as a real process. Fixed-argv system integrations this
+// plugin DOES ship (sqlite3, security, launchctl, open) are the only
+// approved child-process targets, and only ever with shell:false.
+// ---------------------------------------------------------------------------
+
+// Filename-shaped patterns require a single/double-quoted literal (a real path/string
+// construction a caller could actually reach at runtime) -- backticks are deliberately excluded
+// since this codebase uses them as markdown code-span delimiters inside doc comments (e.g.
+// "mirrors `python/mindmap.py`'s `select_mindmap_links` behaviorally"), which document parity
+// with the retired oracle and are explicitly out of scope for this scan; a bare, unquoted mention
+// is prose for the same reason.
+const FORBIDDEN_SOURCE_PATTERNS = [
+  { label: "python3 interpreter invocation", pattern: /["']python3["']/ },
+  { label: "mindmap.py script path construction", pattern: /["'][^"'\n]*mindmap\.py["']/ },
+  { label: "mindmap_worker script path construction", pattern: /["'][^"'\n]*mindmap_worker[^"'\n]*["']/ },
+  { label: "apple_books_reader.py script path construction", pattern: /["'][^"'\n]*apple_books_reader\.py["']/ },
+  { label: "pip install reference", pattern: /\bpip install\b/ },
+  { label: "venv/virtualenv reference", pattern: /\bvenv\b|virtualenv/ },
+  { label: "requirements.txt reference", pattern: /requirements\.txt/ },
+  { label: "chromadb reference", pattern: /chromadb/i },
+  { label: "semantic worker client reference", pattern: /semanticWorkerClient|SemanticWorkerClient/ },
+  { label: "localhost IPC worker port reference", pattern: /127\.0\.0\.1:\d{4,5}.*worker|worker.*127\.0\.0\.1:\d{4,5}/i },
+];
+
+const srcFiles = trackedFiles.filter((file) => file.startsWith("src/") && !file.endsWith(".test.ts") && !file.endsWith(".test-support.ts"));
+const sourceFailures = [];
+for (const file of srcFiles) {
+  const content = fs.readFileSync(file, "utf8");
+  for (const { label, pattern } of FORBIDDEN_SOURCE_PATTERNS) {
+    if (pattern.test(content)) {
+      sourceFailures.push(`${file}: ${label}`);
+    }
+  }
+}
+if (sourceFailures.length > 0) {
+  throw new Error(`Forbidden Python/Chroma/semantic-worker reference(s) in shipping source:\n${sourceFailures.join("\n")}`);
+}
+
+// Approved fixed-argv system integrations only -- every real child-process invocation in shipping
+// source must be one of these four, and every one must be shell:false and disclosed.
+const APPROVED_SYSTEM_BINARIES = ["/usr/bin/sqlite3", "/usr/bin/security", "/bin/launchctl", "/usr/bin/open"];
+const execFileCallPattern = /execFile\(\s*(["'`])((?:(?!\1).)*)\1/g;
+const spawnCallPattern = /spawn\(\s*(["'`])((?:(?!\1).)*)\1/g;
+const unsupportedProcessCalls = [];
+for (const file of srcFiles) {
+  const content = fs.readFileSync(file, "utf8");
+  for (const pattern of [execFileCallPattern, spawnCallPattern]) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(content)) !== null) {
+      const target = match[2];
+      // A relative/variable executable path (e.g. a helper binding, or "sqlite3Path") is not a
+      // literal binary invocation this scan can evaluate -- only a literal absolute path is
+      // checked against the approved allow-list.
+      if (!target.startsWith("/")) continue;
+      if (!APPROVED_SYSTEM_BINARIES.includes(target)) {
+        unsupportedProcessCalls.push(`${file}: unsupported process target "${target}"`);
+      }
+    }
+  }
+}
+if (unsupportedProcessCalls.length > 0) {
+  throw new Error(`Unsupported process invocation(s) in shipping source (only ${APPROVED_SYSTEM_BINARIES.join(", ")} are approved):\n${unsupportedProcessCalls.join("\n")}`);
+}
+
+const shellTrueUsages = [];
+for (const file of srcFiles) {
+  const content = fs.readFileSync(file, "utf8");
+  // Line-scoped, and skips comment lines (leading `//` or `*`) -- this codebase documents the
+  // shell:false requirement in doc comments using backtick-quoted code spans like
+  // "never ... with `shell: true`", which must not be mistaken for the real object property.
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("//") || trimmed.startsWith("*")) continue;
+    if (/shell:\s*true/.test(line)) {
+      shellTrueUsages.push(file);
+      break;
+    }
+  }
+}
+if (shellTrueUsages.length > 0) {
+  throw new Error(`shell:true is never permitted in shipping source: ${shellTrueUsages.join(", ")}`);
 }
 
 const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
@@ -76,51 +165,21 @@ if (manifest.isDesktopOnly !== true) {
   throw new Error("manifest.json must keep isDesktopOnly set to true");
 }
 
-const config = JSON.parse(fs.readFileSync("python/config.template.json", "utf8"));
-const serialized = JSON.stringify(config);
-if (serialized.includes("/Users/") || serialized.includes("\\Users\\")) {
-  throw new Error("config.template.json contains a machine-specific path");
-}
-if (config.vault_root !== "../../../../") {
-  throw new Error(`config.template.json vault_root must be "../../../../", got ${String(config.vault_root)}`);
-}
-if (config.llm_api_key !== "" || config.llm_api_key_env !== "") {
-  throw new Error("config.template.json must not ship a baked-in llm_api_key or llm_api_key_env.");
-}
-if (config.remove_mindmap_section !== false) {
-  throw new Error(`config.template.json remove_mindmap_section must be the literal boolean false, got ${JSON.stringify(config.remove_mindmap_section)}`);
-}
-
 const distManifest = JSON.parse(fs.readFileSync(path.join("dist", "manifest.json"), "utf8"));
 if (distManifest.version !== manifest.version) {
   throw new Error("dist/manifest.json is not in sync with manifest.json");
 }
 
 const readme = fs.readFileSync("README.md", "utf8");
-for (const phrase of ["desktop-only", "Python", "Ollama", "versions.json", "manifest.json"]) {
+for (const phrase of ["desktop-only", "TypeScript", "Ollama", "Apple Books", "/usr/bin/sqlite3", "LaunchAgent", "migration", "Troubleshooting", "Privacy", "versions.json", "manifest.json"]) {
   if (!readme.includes(phrase)) {
     throw new Error(`README.md must mention ${phrase}`);
   }
 }
-for (const phrase of [
-  "Community plugins",
-  "automatically looks for a compatible Python",
-  "Set up Mindmap runtime",
-  "PyPI",
-  "Application Support/Mindmap AI",
-  "cancelled or retried",
-  "3.11-3.13",
-  "python.org/downloads/macos",
-]) {
-  if (!readme.includes(phrase)) {
-    throw new Error(`README.md must mention ${phrase} for zero-terminal onboarding.`);
+for (const phrase of ["Python", "pip install", "virtual environment", "PyPI", "interpreter"]) {
+  if (readme.includes(phrase)) {
+    throw new Error(`README.md must not describe a Python onboarding step ("${phrase}" found) -- the plugin ships no Python.`);
   }
-}
-if (readme.includes("manual release install")) {
-  throw new Error("README.md must not present manual release install as the primary onboarding path.");
-}
-if (readme.includes("restore its Python runtime automatically")) {
-  throw new Error("README.md must not claim the plugin silently restores a Python runtime; describe explicit discovery/one-click setup instead.");
 }
 {
   const installIndex = readme.indexOf("## Install");
@@ -134,10 +193,6 @@ if (readme.includes("restore its Python runtime automatically")) {
   if (firstRunIndex <= installIndex) {
     throw new Error("README.md must present ## Install before ## First Run.");
   }
-  const installSection = readme.slice(installIndex, firstRunIndex);
-  if (installSection.includes("pip install")) {
-    throw new Error("README.md primary Install section must not present a manual pip install command; keep it under Troubleshooting/Advanced only.");
-  }
 }
 
 const changelog = fs.readFileSync("CHANGELOG.md", "utf8");
@@ -150,24 +205,6 @@ if (!changelog.includes("## Unreleased")) {
     throw new Error(`CHANGELOG.md must include a section for ${manifest.version}.`);
   }
 }
-for (const requirementsPath of ["python/requirements.txt", "dist/python/requirements.txt"]) {
-  const lines = fs.readFileSync(requirementsPath, "utf8").split(/\r?\n/).filter((line) => line.trim().length > 0);
-  if (!lines.includes("chromadb==1.4.0")) {
-    throw new Error(`${requirementsPath} must pin chromadb==1.4.0 for the embedded client.`);
-  }
-  if (!lines.includes("ruamel.yaml==0.19.1")) {
-    throw new Error(`${requirementsPath} must pin the tested ruamel.yaml==0.19.1 release.`);
-  }
-  const looseLines = lines.filter((line) => /(>=|<=|~=|!=|>|<)/.test(line));
-  if (looseLines.length > 0) {
-    throw new Error(`${requirementsPath} must pin every direct managed-runtime dependency to an exact version; found non-exact spec(s): ${looseLines.join(", ")}`);
-  }
-}
-
-const distMindmapSource = fs.readFileSync("dist/python/mindmap.py", "utf8");
-if (!distMindmapSource.includes("--runtime-preflight") || !distMindmapSource.includes("run_runtime_preflight")) {
-  throw new Error("dist/python/mindmap.py must ship the isolated --runtime-preflight mode used by the plugin's runtime verifier.");
-}
 
 const workflow = fs.readFileSync(".github/workflows/release.yml", "utf8");
 const RELEASE_ASSETS = ["release/main.js", "release/manifest.json", "release/styles.css"];
@@ -178,6 +215,10 @@ if (!/persist-credentials:\s*false/.test(workflow)) {
 
 if (!/id-token:\s*write/.test(workflow) || !/attestations:\s*write/.test(workflow)) {
   throw new Error("Release workflow must grant id-token: write and attestations: write permissions for build attestation.");
+}
+
+if (/setup-python|requirements\.txt|python -m/.test(workflow)) {
+  throw new Error("Release workflow must never install or invoke Python.");
 }
 
 {
@@ -236,9 +277,6 @@ if (!workflow.includes("npm run lint:obsidian")) {
   throw new Error("Release workflow must run the official Obsidian plugin guidelines lint gate (npm run lint:obsidian).");
 }
 
-if (!fs.existsSync(".github/workflows/ci.yml")) {
-  throw new Error("Missing required file: .github/workflows/ci.yml");
-}
 const ciWorkflow = fs.readFileSync(".github/workflows/ci.yml", "utf8");
 if (!/on:[\s\S]*pull_request/.test(ciWorkflow)) {
   throw new Error("CI workflow must trigger on pull_request.");
@@ -248,8 +286,8 @@ for (const step of ["npm ci", "npm run lint", "npm run lint:obsidian", "npm run 
     throw new Error(`CI workflow must run: ${step}`);
   }
 }
-if (!/discover -s tests/.test(ciWorkflow)) {
-  throw new Error("CI workflow must run the Python test suite.");
+if (/setup-python|requirements\.txt|python -m/.test(ciWorkflow)) {
+  throw new Error("CI workflow must never install or invoke Python.");
 }
 
 if (!manifest.authorUrl || manifest.authorUrl.trim().length === 0) {
@@ -266,70 +304,47 @@ if (!manifest.authorUrl || manifest.authorUrl.trim().length === 0) {
   }
 }
 
-// Checkpoint 9 requirement 4/13: the production dev-shadow isolation audit is authoritative HERE
-// (running against the dist/main.js this same "npm run check"/"npm run validate" pipeline just
-// built via "npm run build", immediately before this script), not in a unit test that can no-op
-// silently on a missing/stale dist/main.js. See productionBuildIsolation.test.ts for the
-// unit-level config-wiring checks (esbuild.config.mjs plugin wiring, source-level import
-// patterns) that remain useful even without a build, but are NOT a substitute for this gate.
+// ---------------------------------------------------------------------------
+// Production bundle audit: dist/main.js must contain no Python/Chroma/
+// semantic-worker/runtime-installer content, and no leftover dev-shadow
+// surface (that subsystem is deleted entirely as of Checkpoint 11, so these
+// identifiers can now never legitimately appear at all).
+// ---------------------------------------------------------------------------
 {
   const distMainPath = path.join("dist", "main.js");
   if (!fs.existsSync(distMainPath)) {
     throw new Error(`${distMainPath} does not exist -- run "npm run build" before "npm run validate".`);
   }
   const distMain = fs.readFileSync(distMainPath, "utf8");
-  // Checkpoint 10B: main.ts now constructs/owns a REAL `ProductionEngine` directly (the actual
-  // cutover this list previously guarded against ever reaching main.ts's own import graph -- see
-  // productionEngineIsolation.test.ts's now-flipped "main.ts DOES construct ProductionEngine"
-  // check). `planCatalogSample`/`RESEARCH_COMPANION`/`verifyCurrentGenerationFully` are reached
-  // through `ProductionEngine`'s own real composition (`vaultCatalogPlanner.ts`/
-  // `generationStore.ts`), never through the dev-only shadow module -- their presence in
-  // dist/main.js is now expected and correct, not a leak. Every OTHER entry below still guards
-  // real dev-shadow-only surface (`MindmapEngine`, `runShadowComparison`,
-  // `createVaultCatalogShadowSource`, `devShadowIntegration.ts`, etc.) that must still never
-  // appear in a production build.
   const FORBIDDEN_IN_PRODUCTION_DIST = [
+    { label: "python3 interpreter reference", pattern: /\bpython3\b/ },
+    { label: "mindmap.py script reference", pattern: /mindmap\.py\b/ },
+    { label: "mindmap_worker reference", pattern: /mindmap_worker/ },
+    { label: "apple_books_reader.py reference", pattern: /apple_books_reader\.py/ },
+    { label: "chromadb reference", pattern: /chromadb/i },
+    { label: "pip install reference", pattern: /pip install/ },
+    { label: "requirements.txt reference", pattern: /requirements\.txt/ },
+    { label: "semantic worker client reference", pattern: /semanticWorkerClient|SemanticWorkerClient/ },
     { label: "dev shadow command id", pattern: /mindmap-dev-run-shadow-diagnostics/ },
     { label: "dev shadow command name", pattern: /Development: Run TypeScript shadow diagnostics/ },
     { label: "runDevelopmentShadowDiagnostics identifier", pattern: /runDevelopmentShadowDiagnostics/ },
-    { label: "getOrCreateMindmapEngine identifier (Checkpoint 9's legacy composer)", pattern: /getOrCreateMindmapEngine/ },
+    { label: "getOrCreateMindmapEngine identifier", pattern: /getOrCreateMindmapEngine/ },
     { label: "shadowEngine.ts source path reference", pattern: /src\/engine\/shadowEngine\.ts/ },
-    { label: "shadow reason string PROJECTION_FAILED", pattern: /PROJECTION_FAILED/ },
-    { label: "shadow reason string RELATED_PREVIEW_UNAVAILABLE", pattern: /RELATED_PREVIEW_UNAVAILABLE/ },
-    { label: "dev summary string 'Mindmap dev shadow:'", pattern: /Mindmap dev shadow:/ },
     { label: "tools/parity reference", pattern: /tools\/parity/ },
     { label: "runShadowComparison function name", pattern: /runShadowComparison/ },
     { label: "createVaultCatalogShadowSource function name", pattern: /createVaultCatalogShadowSource/ },
-    { label: "MindmapEngine class name", pattern: /class MindmapEngine/ },
-    { label: "NodeOwnedFs class name", pattern: /class NodeOwnedFs/ },
+    { label: "class MindmapEngine (retired dev-shadow composer)", pattern: /class MindmapEngine\b/ },
     { label: "virtual:mindmap-dev-shadow module marker", pattern: /virtual:mindmap-dev-shadow/ },
     { label: "createDevShadowIntegration factory name", pattern: /createDevShadowIntegration/ },
     { label: "DevShadowIntegration type/identifier name", pattern: /DevShadowIntegration/ },
-    { label: "getOrCreateDevShadowIntegration accessor name (renamed in source; must never reappear)", pattern: /getOrCreateDevShadowIntegration/ },
     { label: "devShadowIntegration.ts source path reference", pattern: /devShadowIntegration\.ts/ },
     { label: "devShadowStub.ts source path reference", pattern: /devShadowStub\.ts/ },
-    { label: "parseShadowBaselineV1 function name", pattern: /parseShadowBaselineV1/ },
-    { label: "vaultCatalogPlanner.ts source path reference", pattern: /vaultCatalogPlanner\.ts/ },
-    { label: "shadow reason string CONTENT_TOO_LARGE", pattern: /CONTENT_TOO_LARGE/ },
-    { label: "shadow reason string SOURCE_ITEM_INVALID", pattern: /SOURCE_ITEM_INVALID/ },
     { label: "generate_shadow_baseline.py generator script reference", pattern: /generate_shadow_baseline/ },
-    { label: "IndexStore class name", pattern: /class IndexStore/ },
-    { label: "AppleBooksSqliteReader class name", pattern: /class AppleBooksSqliteReader/ },
-    { label: "createNodeAppleBooksFsAdapter function name", pattern: /createNodeAppleBooksFsAdapter/ },
-    { label: "createNodeSqliteProcess function name", pattern: /createNodeSqliteProcess/ },
-    { label: "createAppleBooksReadinessProbe function name", pattern: /createAppleBooksReadinessProbe/ },
-    { label: "createOllamaEmbeddingReadinessProbe function name", pattern: /createOllamaEmbeddingReadinessProbe/ },
-    { label: "createResearchCredentialReadinessProbe function name", pattern: /createResearchCredentialReadinessProbe/ },
-    { label: "hasResearchCredential function name", pattern: /hasResearchCredential/ },
-    { label: "OllamaEmbeddingProvider class name", pattern: /class OllamaEmbeddingProvider/ },
-    { label: "appleBooksSqlite.ts source path reference", pattern: /reading\/appleBooksSqlite\.ts/ },
-    { label: "sqliteProcess.ts source path reference", pattern: /reading\/sqliteProcess\.ts/ },
   ];
   const distFailures = FORBIDDEN_IN_PRODUCTION_DIST.filter(({ pattern }) => pattern.test(distMain));
   if (distFailures.length > 0) {
     throw new Error(
-      `dist/main.js contains forbidden development-only content: ${distFailures.map((entry) => entry.label).join(", ")}. ` +
-      "The virtual:mindmap-dev-shadow module must resolve to devShadowStub.ts (not devShadowIntegration.ts) for a production build -- check esbuild.config.mjs's devShadowPlugin(process.cwd(), !production) wiring.",
+      `dist/main.js contains forbidden content: ${distFailures.map((entry) => entry.label).join(", ")}.`,
     );
   }
 }

@@ -120,14 +120,6 @@ export class ScopeManager {
     }
 
     const status = this.plugin.getScopeSetupStatus();
-    if (!status.canManage) {
-      this.containerEl.createEl("p", {
-        cls: "mindmap-muted",
-        text: status.guidance,
-      });
-      return;
-    }
-
     const draftComplete = isScopeSetupComplete(this.draft);
     this.renderSummary(draftComplete ? null : status.guidance);
     this.renderToolbar();
@@ -222,13 +214,15 @@ export class ScopeManager {
     });
 
     this.createButton(toolbar, "Save", () => {
-      try {
-        this.plugin.saveScopeSetup(normalizeDraft(this.draft));
-        new Notice("Mindmap scope saved.");
-        this.render();
-      } catch (error) {
-        new Notice(error instanceof Error ? error.message : "Failed to save scope.", 12000);
-      }
+      void (async () => {
+        try {
+          await this.plugin.saveScopeSetup(normalizeDraft(this.draft));
+          new Notice("Mindmap scope saved.");
+          this.render();
+        } catch (error) {
+          new Notice(error instanceof Error ? error.message : "Failed to save scope.", 12000);
+        }
+      })();
     }, true);
   }
 

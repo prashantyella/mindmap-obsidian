@@ -545,6 +545,26 @@ test("converts existing block-list concepts and related values to readable wikil
   assert.match(text, /User content/);
 });
 
+test("drops an existing related wikilink pointing inside configDir when renderAnnotationNote is given one", () => {
+  const source = annotation("links-configdir");
+  const existingText = [
+    "---",
+    "related:",
+    "  - Books/Apple Books/Author/The Book/Annotations/Other note.md",
+    '  - "[[.obsidian/plugins/mindmap-ai/data|data]]"',
+    "---",
+    "User content.",
+    "",
+  ].join("\n");
+
+  const withoutConfigDir = renderAnnotationNote(existingText, source, { importedAt: "2026-08-17T01:00:00Z", researchStatus: "off" });
+  assert.match(withoutConfigDir, /\.obsidian\/plugins\/mindmap-ai\/data/);
+
+  const withConfigDir = renderAnnotationNote(existingText, source, { importedAt: "2026-08-17T01:00:00Z", researchStatus: "off" }, ".obsidian");
+  assert.doesNotMatch(withConfigDir, /\.obsidian\/plugins\/mindmap-ai\/data/);
+  assert.match(withConfigDir, /related:\n {2}- "\[\[Books\/Apple Books\/Author\/The Book\/Annotations\/Other note\|Other note\]\]"/);
+});
+
 test("leaves an unfamiliar concepts/related shape untouched instead of corrupting frontmatter", () => {
   const source = annotation("links-2");
   const existingText = [

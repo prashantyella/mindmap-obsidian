@@ -1,2 +1,0 @@
-chromadb==1.4.0
-ruamel.yaml==0.19.1
