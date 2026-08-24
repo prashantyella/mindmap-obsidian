@@ -7,7 +7,22 @@ import { buildGeneration, switchCurrentGeneration } from "../index/generationSto
 import type { IntervalRegistrar } from "../scheduling/coreScheduler";
 import { isEngineError } from "./errors";
 import { MigrationStore } from "../migration/migrationStore";
-import { ProductionEngine } from "./productionEngine";
+import { createProductionScopeDiscoverySeam } from "./productionVaultAdapter";
+import { canonicalizePath, stableNoteIdentity } from "./contracts";
+import { projectSource } from "./sourceProjection";
+import { ProductionEngine, buildProductionScopeRegistry, PRODUCTION_SCOPE_CURRENT, PRODUCTION_SCOPE_ALL, PRODUCTION_SCOPE_READING } from "./productionEngine";
+
+/** A fuller fake `Vault` (unlike this file's own minimal `fakeVault` below) that actually resolves/reads note content -- needed to exercise the real scope-registry discovery seam end to end. Mirrors `productionVaultAdapter.test.ts`'s own `fakeVault` helper. */
+function richFakeVault(files: Record<string, string>, configDir = ".obsidian"): Vault {
+  const toFile = (filePath: string) => ({ path: filePath, extension: filePath.split(".").pop() ?? "", stat: { size: 0, mtime: 0, ctime: 0 } });
+  return {
+    configDir,
+    getMarkdownFiles: () => Object.keys(files).filter((p) => p.endsWith(".md")).map(toFile) as never,
+    getAbstractFileByPath: (relpath: string): unknown => (Object.prototype.hasOwnProperty.call(files, relpath) ? toFile(relpath) : null),
+    read: async (file: { path: string }) => files[file.path],
+    cachedRead: async (file: { path: string }) => files[file.path],
+  } as unknown as Vault;
+}
 
 function fakeVault(files: Record<string, string> = {}, configDir = ".obsidian"): Vault {
   const entries = Object.keys(files).map((filePath) => ({ path: filePath, extension: filePath.split(".").pop() ?? "" }));
@@ -39,6 +54,13 @@ function fakeRegistrar(): IntervalRegistrar & { registerCount: number } {
 
 type ProductionEngineOptions = ConstructorParameters<typeof ProductionEngine>[0];
 
+/** Prerequisite 1 (10B cutover): `ProductionEngineOptions.vaultFileClasses` is now REQUIRED (no structural fallback in a real engine) -- these fake classes satisfy that requirement for every test in this file without needing to model real Obsidian `instanceof` behavior (no test here exercises actual vault-object guards). */
+class FakeTFile {}
+class FakeTFolder {}
+function fakeVaultFileClasses(): ProductionEngineOptions["vaultFileClasses"] {
+  return { TFile: FakeTFile as never, TFolder: FakeTFolder as never };
+}
+
 function fakeAppleBooksOptions(): ProductionEngineOptions["appleBooks"] {
   return {
     config: {},
@@ -59,9 +81,11 @@ function baseOptions(overrides: Partial<ProductionEngineOptions> = {}): Producti
     metadataProvider: null,
     metadataPipelineConfig: null,
     scopeFolders: ["Notes"],
+    currentScopeFolders: ["Notes/Current"],
     minimumWords: 30,
     pipelineVersion: 1,
     appleBooks: fakeAppleBooksOptions(),
+    vaultFileClasses: fakeVaultFileClasses(),
     ...overrides,
   } as ProductionEngineOptions;
 }
@@ -79,7 +103,7 @@ void test("ProductionEngine.start() composes every store and returns a runtime-r
   await engine.dispose();
 });
 
-function readyProviders(): Pick<ProductionEngineOptions, "embeddingProvider" | "embeddingModel" | "embeddingDimension" | "metadataProvider" | "metadataPipelineConfig" | "probes" | "chunkOptions"> {
+function readyProviders(): Pick<ProductionEngineOptions, "embeddingProvider" | "embeddingModel" | "embeddingDimension" | "metadataProvider" | "metadataPipelineConfig" | "probes" | "chunkOptions" | "relatedSelectionConfig"> {
   const fakeEmbeddingProvider = { embedBatch: async () => ({ model: "m", dimension: 4, items: [] }) };
   const fakeMetadataProvider = { complete: async () => "{}" };
   return {
@@ -90,6 +114,17 @@ function readyProviders(): Pick<ProductionEngineOptions, "embeddingProvider" | "
     metadataPipelineConfig: { model: "m", maxTokens: 200, tagLimit: 5, conceptLimit: 5, conceptMaxWords: 3, conceptCaseMode: "lower", controlledTags: [], allowFreeTags: true, tagMinLen: 2, tagMaxWords: 3, tagAliases: {} } as never,
     probes: { ollama: okProbe(), localMetadataProvider: okProbe() },
     chunkOptions: { targetTokens: 400, overlapTokens: 40 },
+    relatedSelectionConfig: { relatedLimit: 8, overreachCount: 0, creativeCount: 0, creativeMin: 0.45, creativeMax: 0.7, candidateLimit: 40, minScore: 0 },
+  };
+}
+
+/** Every vector is the SAME fixed unit basis vector (`[1,0,0,0]`) regardless of input text -- deterministic, always-unit-norm, and always cosine-1 against itself/anything else this fixture embeds, so ranking tests never depend on a real hash/model. */
+function fixedVectorEmbeddingProvider(dimension = 4): import("./embeddingProvider").EmbeddingProvider {
+  const values = Array.from({ length: dimension }, (_, i) => (i === 0 ? 1 : 0));
+  return {
+    async embedBatch(request) {
+      return { model: request.model, dimension, items: request.items.map((item) => ({ id: item.id, values })) };
+    },
   };
 }
 
@@ -277,6 +312,13 @@ void test("ProductionEngine.start() is idempotent -- calling twice returns the s
   const second = await engine.start();
   assert.deepEqual(first, second);
   assert.equal(fs.readFileCalls.length, readsAfterFirst, "second start() must not re-run preflight/recovery I/O");
+  await engine.dispose();
+});
+
+void test("ProductionEngine.start() (10B cutover bugfix) never runs a redundant second preflight pass on a fresh install -- getLastPreflightReport() stays byte-identical to what start() itself returned", async () => {
+  const engine = new ProductionEngine(baseOptions());
+  const returned = await engine.start();
+  assert.deepEqual(engine.getLastPreflightReport(), returned, "start()'s own internal tryStartOrdinaryWork() call must not overwrite lastPreflightReport with a second, microseconds-later preflight pass when migration is not complete");
   await engine.dispose();
 });
 
@@ -517,4 +559,198 @@ void test("ProductionEngine.openRelatedNote (item 5) rejects a target inside the
 
   await engine.openRelatedNote("Notes/ordinary.md");
   assert.deepEqual(calls, [["Notes/ordinary.md", "", false]]);
+});
+
+const SCOPE_REGISTRY_LONG_NOTE = "word ".repeat(40).trim();
+const SCOPE_REGISTRY_ANNOTATION_TEXT = ["---", "type: apple-books-annotation", "annotation_id: abc123", "---", SCOPE_REGISTRY_LONG_NOTE].join("\n");
+
+function scopeRegistryFixture(): { vault: Vault; files: Record<string, string> } {
+  const files: Record<string, string> = {
+    "Notes/Current/a.md": `---\n---\n${SCOPE_REGISTRY_LONG_NOTE}`,
+    "Notes/AllOnly/b.md": `---\n---\n${SCOPE_REGISTRY_LONG_NOTE}`,
+    "Books/Apple Books/Author/Book/Annotations/note.md": SCOPE_REGISTRY_ANNOTATION_TEXT,
+  };
+  return { vault: richFakeVault(files), files };
+}
+
+void test("buildProductionScopeRegistry (10B blocker resolution) 'current' resolves to ONLY currentScopeFolders and never expands to allPaths", async () => {
+  const { vault } = scopeRegistryFixture();
+  const registry = buildProductionScopeRegistry({ scopeFolders: ["Notes/Current", "Notes/AllOnly"], currentScopeFolders: ["Notes/Current"] });
+  const seam = createProductionScopeDiscoverySeam({ vault, minimumWords: 5 }, registry, "m");
+  const items = await seam.discover(PRODUCTION_SCOPE_CURRENT, new AbortController().signal);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].identity.canonicalPath, "Notes/Current/a.md");
+});
+
+void test("buildProductionScopeRegistry (10B blocker resolution) 'all' includes every configured allPaths folder, including notes NOT in currentScopeFolders", async () => {
+  const { vault } = scopeRegistryFixture();
+  const registry = buildProductionScopeRegistry({ scopeFolders: ["Notes/Current", "Notes/AllOnly"], currentScopeFolders: ["Notes/Current"] });
+  const seam = createProductionScopeDiscoverySeam({ vault, minimumWords: 5 }, registry, "m");
+  const items = await seam.discover(PRODUCTION_SCOPE_ALL, new AbortController().signal);
+  assert.deepEqual(items.map((item) => item.identity.canonicalPath).sort(), ["Notes/AllOnly/b.md", "Notes/Current/a.md"]);
+});
+
+void test("buildProductionScopeRegistry (10B blocker resolution) 'reading' discovers ONLY strict Reading annotations, never ordinary scope notes (no scope widening)", async () => {
+  const { vault } = scopeRegistryFixture();
+  const registry = buildProductionScopeRegistry({ scopeFolders: ["Notes/Current", "Notes/AllOnly"], currentScopeFolders: ["Notes/Current"] });
+  const seam = createProductionScopeDiscoverySeam({ vault, minimumWords: 5 }, registry, "m");
+  const items = await seam.discover(PRODUCTION_SCOPE_READING, new AbortController().signal);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].identity.kind, "apple-annotation");
+  assert.equal(items[0].identity.appleAnnotationId, "abc123");
+});
+
+void test("buildProductionScopeRegistry (10B blocker resolution) an unrecognized scopeId has zero reads/effects -- fails closed, never falls back to 'all'", async () => {
+  const reads: string[] = [];
+  const { vault, files } = scopeRegistryFixture();
+  (vault as unknown as { cachedRead: (file: { path: string }) => Promise<string> }).cachedRead = async (file: { path: string }) => {
+    reads.push(file.path);
+    return files[file.path];
+  };
+  const registry = buildProductionScopeRegistry({ scopeFolders: ["Notes/Current", "Notes/AllOnly"], currentScopeFolders: ["Notes/Current"] });
+  const seam = createProductionScopeDiscoverySeam({ vault, minimumWords: 5 }, registry, "m");
+  const items = await seam.discover("mystery-scope-id", new AbortController().signal);
+  assert.deepEqual(items, []);
+  assert.deepEqual(reads, []);
+});
+
+void test("buildProductionScopeRegistry (10B blocker resolution) preserves migration's own full-vault-plus-annotations discovery semantics unchanged, under its own dedicated MIGRATION_SCOPE_ID", async () => {
+  const { vault } = scopeRegistryFixture();
+  const registry = buildProductionScopeRegistry({ scopeFolders: ["Notes/Current", "Notes/AllOnly"], currentScopeFolders: ["Notes/Current"] });
+  const seam = createProductionScopeDiscoverySeam({ vault, minimumWords: 5 }, registry, "m");
+  const items = await seam.discover("migration:full-vault", new AbortController().signal);
+  assert.deepEqual(items.map((item) => item.identity.canonicalPath).sort(), ["Books/Apple Books/Author/Book/Annotations/note.md", "Notes/AllOnly/b.md", "Notes/Current/a.md"]);
+});
+
+void test("ProductionEngine.submitNoteForProcessing/submitScopeRefresh/submitReadingSync throw a closed JOB_SHAPE_INVALID when process-note/scope-refresh/reading-sync were never registered (no full provider config)", async () => {
+  const engine = new ProductionEngine(baseOptions());
+  await engine.start();
+  await assert.rejects(() => engine.submitNoteForProcessing("Notes/a.md"), (error: unknown) => isEngineError(error) && error.code === "JOB_SHAPE_INVALID");
+  await assert.rejects(() => engine.submitScopeRefresh(PRODUCTION_SCOPE_ALL), (error: unknown) => isEngineError(error) && error.code === "JOB_SHAPE_INVALID");
+  await assert.rejects(() => engine.submitReadingSync(), (error: unknown) => isEngineError(error) && error.code === "JOB_SHAPE_INVALID");
+  await engine.dispose();
+});
+
+void test("ProductionEngine.submitScopeRefresh (10B) submits a real scope-refresh job carrying the exact scopeId given, once process-note/scope-refresh are registered", async () => {
+  const engine = new ProductionEngine(baseOptions(readyProviders() as ProductionEngineOptions));
+  await engine.start();
+  await engine.submitScopeRefresh(PRODUCTION_SCOPE_CURRENT);
+  const jobs = await engine.jobStore.list();
+  assert.ok(jobs.some((persisted) => persisted.job.kind === "scope-refresh" && persisted.job.target.kind === "scope" && persisted.job.target.scopeId === PRODUCTION_SCOPE_CURRENT));
+  await engine.dispose();
+});
+
+void test("ProductionEngine.queryLiveRelated/queryLookupRelated throw a closed JOB_SHAPE_INVALID when no embedding provider/relatedSelectionConfig is configured", async () => {
+  const engine = new ProductionEngine(baseOptions());
+  await engine.start();
+  await assert.rejects(() => engine.queryLiveRelated("Notes/a.md", false), (error: unknown) => isEngineError(error) && error.code === "JOB_SHAPE_INVALID");
+  await assert.rejects(() => engine.queryLookupRelated("query text", 8), (error: unknown) => isEngineError(error) && error.code === "JOB_SHAPE_INVALID");
+  await engine.dispose();
+});
+
+function sidebarFixture() {
+  const files: Record<string, string> = {
+    "Notes/active.md": "Active note body text.",
+    "Notes/other.md": "Other note body text.",
+  };
+  return { vault: richFakeVault(files), files };
+}
+
+void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) reports not-indexed/stale with empty related for a note the index has never seen, and does NOT submit a job when ensureIndex is false", async () => {
+  const { vault } = sidebarFixture();
+  const fs = new FakeIndexFs();
+  const dataRoot = "/data";
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  const result = await engine.queryLiveRelated("Notes/active.md", false);
+  assert.equal(result.indexed, false);
+  assert.equal(result.stale, true);
+  assert.deepEqual(result.related, []);
+  assert.deepEqual(await engine.jobStore.list(), []);
+  await engine.dispose();
+});
+
+void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) submits the exact process-note job when absent/stale and ensureIndex is true, returning the same not-yet-indexed empty semantics rather than blocking on the job", async () => {
+  const { vault } = sidebarFixture();
+  const fs = new FakeIndexFs();
+  const dataRoot = "/data";
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  const result = await engine.queryLiveRelated("Notes/active.md", true);
+  assert.equal(result.indexed, false);
+  assert.equal(result.stale, true);
+  assert.deepEqual(result.related, []);
+  const jobs = await engine.jobStore.list();
+  assert.ok(jobs.some((persisted) => persisted.job.kind === "process-note" && persisted.job.target.kind === "note" && persisted.job.target.identity.canonicalPath === "Notes/active.md"));
+  await engine.dispose();
+});
+
+void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed IndexStore view against a FRESH embed of the active note's current text once the note is already indexed, excluding itself", async () => {
+  const { vault, files } = sidebarFixture();
+  const fs = new FakeIndexFs();
+  const dataRoot = "/data";
+  const activeIdentity = stableNoteIdentity(canonicalizePath("Notes/active.md"));
+  const otherIdentity = stableNoteIdentity(canonicalizePath("Notes/other.md"));
+  const activeProjection = projectSource(activeIdentity, files["Notes/active.md"]);
+  const otherProjection = projectSource(otherIdentity, files["Notes/other.md"]);
+  const basisVector = new Float32Array([1, 0, 0, 0]);
+  await buildGeneration(fs, dataRoot, {
+    generationId: 1,
+    embeddingModel: "nomic-embed-text",
+    dimension: 4,
+    notes: [
+      { identity: activeIdentity, sourceHash: activeProjection.sourceHash, vector: basisVector, chunkCount: 1, loadChunkVectors: async () => [basisVector] },
+      { identity: otherIdentity, sourceHash: otherProjection.sourceHash, vector: basisVector, chunkCount: 1, loadChunkVectors: async () => [basisVector] },
+    ],
+  }, {});
+  await switchCurrentGeneration(fs, dataRoot, 1);
+
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  const result = await engine.queryLiveRelated("Notes/active.md", false);
+  assert.equal(result.indexed, true);
+  assert.equal(result.stale, false);
+  assert.equal(result.related.length, 1);
+  assert.equal(result.related[0].path, "Notes/other.md");
+  assert.equal(result.related[0].kind, "core");
+  await engine.dispose();
+});
+
+void test("ProductionEngine.queryLookupRelated (10B SIDEBAR) ranks the committed IndexStore view against a fresh embed of the raw query text, every result carrying kind \"lookup\"", async () => {
+  const { vault } = sidebarFixture();
+  const fs = new FakeIndexFs();
+  const dataRoot = "/data";
+  const otherIdentity = stableNoteIdentity(canonicalizePath("Notes/other.md"));
+  const basisVector = new Float32Array([1, 0, 0, 0]);
+  await buildGeneration(fs, dataRoot, {
+    generationId: 1,
+    embeddingModel: "nomic-embed-text",
+    dimension: 4,
+    notes: [{ identity: otherIdentity, sourceHash: "c".repeat(64), vector: basisVector, chunkCount: 1, loadChunkVectors: async () => [basisVector] }],
+  }, {});
+  await switchCurrentGeneration(fs, dataRoot, 1);
+
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  const related = await engine.queryLookupRelated("some lookup query", 8);
+  assert.equal(related.length, 1);
+  assert.equal(related[0].path, "Notes/other.md");
+  assert.equal(related[0].kind, "lookup");
+  await engine.dispose();
+});
+
+void test("ProductionEngine.queryLookupRelated (10B SIDEBAR) returns [] for a blank/whitespace-only query without ever embedding or querying", async () => {
+  const engine = new ProductionEngine(baseOptions(readyProviders() as ProductionEngineOptions));
+  await engine.start();
+  assert.deepEqual(await engine.queryLookupRelated("   ", 8), []);
+  await engine.dispose();
+});
+
+void test("ProductionEngine.submitRebuild (10B FORCE COMMANDS) submits a real rebuild-index job, available even with no providers configured", async () => {
+  const engine = new ProductionEngine(baseOptions());
+  await engine.start();
+  await engine.submitRebuild();
+  const jobs = await engine.jobStore.list();
+  assert.ok(jobs.some((persisted) => persisted.job.kind === "rebuild-index" && persisted.job.target.kind === "global"));
+  await engine.dispose();
 });

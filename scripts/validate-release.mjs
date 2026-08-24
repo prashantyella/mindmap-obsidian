@@ -278,6 +278,16 @@ if (!manifest.authorUrl || manifest.authorUrl.trim().length === 0) {
     throw new Error(`${distMainPath} does not exist -- run "npm run build" before "npm run validate".`);
   }
   const distMain = fs.readFileSync(distMainPath, "utf8");
+  // Checkpoint 10B: main.ts now constructs/owns a REAL `ProductionEngine` directly (the actual
+  // cutover this list previously guarded against ever reaching main.ts's own import graph -- see
+  // productionEngineIsolation.test.ts's now-flipped "main.ts DOES construct ProductionEngine"
+  // check). `planCatalogSample`/`RESEARCH_COMPANION`/`verifyCurrentGenerationFully` are reached
+  // through `ProductionEngine`'s own real composition (`vaultCatalogPlanner.ts`/
+  // `generationStore.ts`), never through the dev-only shadow module -- their presence in
+  // dist/main.js is now expected and correct, not a leak. Every OTHER entry below still guards
+  // real dev-shadow-only surface (`MindmapEngine`, `runShadowComparison`,
+  // `createVaultCatalogShadowSource`, `devShadowIntegration.ts`, etc.) that must still never
+  // appear in a production build.
   const FORBIDDEN_IN_PRODUCTION_DIST = [
     { label: "dev shadow command id", pattern: /mindmap-dev-run-shadow-diagnostics/ },
     { label: "dev shadow command name", pattern: /Development: Run TypeScript shadow diagnostics/ },
@@ -292,7 +302,6 @@ if (!manifest.authorUrl || manifest.authorUrl.trim().length === 0) {
     { label: "createVaultCatalogShadowSource function name", pattern: /createVaultCatalogShadowSource/ },
     { label: "MindmapEngine class name", pattern: /class MindmapEngine/ },
     { label: "NodeOwnedFs class name", pattern: /class NodeOwnedFs/ },
-    { label: "planCatalogSample function name", pattern: /planCatalogSample/ },
     { label: "virtual:mindmap-dev-shadow module marker", pattern: /virtual:mindmap-dev-shadow/ },
     { label: "createDevShadowIntegration factory name", pattern: /createDevShadowIntegration/ },
     { label: "DevShadowIntegration type/identifier name", pattern: /DevShadowIntegration/ },
@@ -303,7 +312,6 @@ if (!manifest.authorUrl || manifest.authorUrl.trim().length === 0) {
     { label: "vaultCatalogPlanner.ts source path reference", pattern: /vaultCatalogPlanner\.ts/ },
     { label: "shadow reason string CONTENT_TOO_LARGE", pattern: /CONTENT_TOO_LARGE/ },
     { label: "shadow reason string SOURCE_ITEM_INVALID", pattern: /SOURCE_ITEM_INVALID/ },
-    { label: "catalog skip reason string RESEARCH_COMPANION", pattern: /RESEARCH_COMPANION/ },
     { label: "generate_shadow_baseline.py generator script reference", pattern: /generate_shadow_baseline/ },
     { label: "IndexStore class name", pattern: /class IndexStore/ },
     { label: "AppleBooksSqliteReader class name", pattern: /class AppleBooksSqliteReader/ },
@@ -312,7 +320,6 @@ if (!manifest.authorUrl || manifest.authorUrl.trim().length === 0) {
     { label: "createAppleBooksReadinessProbe function name", pattern: /createAppleBooksReadinessProbe/ },
     { label: "createOllamaEmbeddingReadinessProbe function name", pattern: /createOllamaEmbeddingReadinessProbe/ },
     { label: "createResearchCredentialReadinessProbe function name", pattern: /createResearchCredentialReadinessProbe/ },
-    { label: "verifyCurrentGenerationFully function name", pattern: /verifyCurrentGenerationFully/ },
     { label: "hasResearchCredential function name", pattern: /hasResearchCredential/ },
     { label: "OllamaEmbeddingProvider class name", pattern: /class OllamaEmbeddingProvider/ },
     { label: "appleBooksSqlite.ts source path reference", pattern: /reading\/appleBooksSqlite\.ts/ },

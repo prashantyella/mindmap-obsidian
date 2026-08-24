@@ -100,17 +100,8 @@ void test("migrationRunner.ts never imports NoteWriter, a metadata provider/pipe
   assert.doesNotMatch(source, /from ["'][^"']*appleBooks(Import|Sqlite)["']/i);
 });
 
-void test("main.ts does not import or construct ProductionEngine -- no user-reachable cutover in Checkpoint 10A", () => {
+void test("Checkpoint 10B: main.ts now constructs/owns ProductionEngine directly -- the ONE production, write-capable engine this plugin ships", () => {
   const mainTs = read("src/main.ts");
-  assert.doesNotMatch(mainTs, /productionEngine/i);
-  assert.doesNotMatch(mainTs, /ProductionEngine/);
-});
-
-void test("dist/main.js, when a production build exists, contains no Checkpoint 10A production/migration identifiers (nothing is wired to main.ts yet, but this stays a belt-and-suspenders check)", () => {
-  const distMain = path.join(REPO_ROOT, "dist", "main.js");
-  if (!fs.existsSync(distMain)) return;
-  const built = fs.readFileSync(distMain, "utf8");
-  for (const identifier of ["class ProductionEngine", "class MigrationRunner", "class MigrationStore", "createProductionNoteVaultAdapter", "createProductionScopeDiscoverySeam"]) {
-    assert.doesNotMatch(built, new RegExp(identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `dist/main.js contains "${identifier}" -- Checkpoint 10A composition must not be reachable from the production bundle yet`);
-  }
+  assert.match(mainTs, /import \{ ProductionEngine,[^}]*\} from "\.\/engine\/productionEngine";/);
+  assert.match(mainTs, /new ProductionEngine\(options\)/);
 });

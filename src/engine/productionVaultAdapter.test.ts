@@ -233,11 +233,27 @@ void test("createProductionNoteSourceReader throws a closed, retryable VAULT_REA
 
 void test("createProductionScopeDiscoverySeam discovers eligible notes and computes each one's real sourceHash via projectSource", async () => {
   const { vault } = fakeVault({ "Notes/a.md": `---\n---\n${LONG_NOTE}`, "Notes/short.md": "too short" });
-  const seam = createProductionScopeDiscoverySeam({ vault, scopeFolders: ["Notes"], minimumWords: 30 }, "nomic-embed-text");
+  const registry = new Map([["scope-id", { scopeFolders: ["Notes"], includeReadingAnnotations: false }]]);
+  const seam = createProductionScopeDiscoverySeam({ vault, minimumWords: 30 }, registry, "nomic-embed-text");
   const items = await seam.discover("scope-id", new AbortController().signal);
   assert.equal(items.length, 1);
   assert.equal(items[0].embeddingModel, "nomic-embed-text");
   assert.match(items[0].sourceHash, /^[0-9a-f]{64}$/);
+});
+
+void test("createProductionScopeDiscoverySeam (10B blocker resolution) fails closed -- an unrecognized scopeId returns zero items and reads nothing, never falling back to any other registered scope's folders", async () => {
+  const reads: string[] = [];
+  const { vault } = fakeVault({ "Notes/a.md": `---\n---\n${LONG_NOTE}` });
+  const originalRead = (vault as unknown as { cachedRead: (file: unknown) => Promise<string> }).cachedRead;
+  (vault as unknown as { cachedRead: (file: unknown) => Promise<string> }).cachedRead = async (file: unknown) => {
+    reads.push((file as { path: string }).path);
+    return originalRead(file);
+  };
+  const registry = new Map([["all", { scopeFolders: ["Notes"], includeReadingAnnotations: false }]]);
+  const seam = createProductionScopeDiscoverySeam({ vault, minimumWords: 5 }, registry, "nomic-embed-text");
+  const items = await seam.discover("unknown-scope-id", new AbortController().signal);
+  assert.deepEqual(items, []);
+  assert.deepEqual(reads, [], "an unrecognized scopeId must read zero files, never falling back to the 'all' entry's folders");
 });
 
 void test("createDeferredScopeImportSeam.import resolves without touching anything -- a documented no-op, never a live Apple Books call", async () => {
@@ -282,6 +298,13 @@ void test("openRelatedNote (item 6) rejects an absolute path, a traversal path, 
   await assert.rejects(() => openRelatedNote(workspace, "Notes/../Secret/note.md"), (error: unknown) => isEngineError(error) && error.code === "PATH_TRAVERSAL");
   await assert.rejects(() => openRelatedNote(workspace, "Notes/\x01note.md"), (error: unknown) => isEngineError(error) && error.code === "PATH_CONTROL_CHARACTER");
   assert.equal(calls.length, 0);
+});
+
+void test("openRelatedNote (10B prerequisite 2) rejects a raw path that differs from its own canonicalized form, instead of silently opening the fixed-up version", async () => {
+  const { workspace, calls } = fakeWorkspace();
+  await assert.rejects(() => openRelatedNote(workspace, "Notes//related.md"), (error: unknown) => isEngineError(error) && error.code === "IDENTITY_INVALID");
+  await assert.rejects(() => openRelatedNote(workspace, "Notes/./related.md"), (error: unknown) => isEngineError(error) && error.code === "IDENTITY_INVALID");
+  assert.equal(calls.length, 0, "a noncanonical raw path must never reach workspace.openLinkText, not even at its canonicalized form");
 });
 
 void test("openRelatedNote (item 6) rejects a non-.md path", async () => {

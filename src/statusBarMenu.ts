@@ -105,6 +105,12 @@ function addMenuItem(menu: Menu, descriptor: StatusBarMenuItemDescriptor, action
           void actions.cancelRuntimeSetup();
         } else if (action === "openPythonDownload") {
           void actions.openPythonDownload();
+        } else if (action === "startMigration") {
+          void actions.startMigration();
+        } else if (action === "retryMigration") {
+          void actions.retryMigration();
+        } else if (action === "cancelMigration") {
+          void actions.cancelMigration();
         }
       });
     }

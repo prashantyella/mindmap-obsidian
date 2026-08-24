@@ -329,6 +329,25 @@ void test("findCatalogItemByAnnotationId returns null when no candidate matches"
   assert.equal(found, null);
 });
 
+void test("streamFullCatalogDiscovery (10B cutover prerequisite 3) counts bytes for a SKIPPED/ineligible file too -- a too-short note that was read and rejected still counts toward totalBytesRead", async () => {
+  const tooShort = "only three words";
+  const files = { "Notes/short.md": tooShort };
+  const result = await streamFullCatalogDiscovery(Object.keys(files), { scopeFolders: ["Notes"], minimumWords: 30 }, reader(files));
+  assert.equal(result.items.length, 0, "the too-short note must never become an accepted item");
+  assert.equal(result.skipReasonCounts.TOO_SHORT, 1);
+  assert.equal(result.totalBytesRead, Buffer.byteLength(tooShort, "utf8"), "the skipped note's body was still actually read off disk and must count toward the byte budget");
+});
+
+void test("streamFullCatalogDiscovery (10B cutover prerequisite 3) stops once maxTotalBytes is reached from SKIPPED reads alone, even with zero accepted items", async () => {
+  const tooShort = "only three words";
+  const files = { "Notes/a.md": tooShort, "Notes/b.md": tooShort, "Notes/c.md": tooShort };
+  const byteBound = Buffer.byteLength(tooShort, "utf8");
+  const result = await streamFullCatalogDiscovery(Object.keys(files), { scopeFolders: ["Notes"], minimumWords: 30 }, reader(files), undefined, undefined, byteBound);
+  assert.equal(result.items.length, 0);
+  assert.equal(result.aborted, true, "the walk must stop once skipped-file reads alone exhaust the byte budget");
+  assert.equal(result.totalBytesRead, byteBound);
+});
+
 void test("streamFullCatalogDiscovery (item 4) never accepts the item that would cross maxTotalBytes, but still counts its bytes as read -- a byte budget can never be silently exceeded by one oversized note", async () => {
   const small = NOTE_TEXT;
   const large = NOTE_TEXT + " " + "extra ".repeat(200);

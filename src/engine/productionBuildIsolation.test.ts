@@ -52,9 +52,9 @@ void test("main.ts gates the dev shadow command's addCommand call and the integr
   assert.match(mainTs, /if \(__MINDMAP_DEV_BUILD__\) \{\s*\n\s*this\.diagOverlay\?\.dispose\(\);/);
 });
 
-void test("main.ts never directly imports the real engine/shadow modules -- only the virtual:mindmap-dev-shadow specifier", () => {
+void test("main.ts never directly imports the DEV-ONLY shadow-diagnostics engine modules -- only the virtual:mindmap-dev-shadow specifier (Checkpoint 10B: main.ts DOES now import the real production engine/nodeFs directly -- see productionEngineIsolation.test.ts for that cutover's own audits)", () => {
   const mainTs = fs.readFileSync(path.join(REPO_ROOT, "src", "main.ts"), "utf8");
-  for (const forbidden of ['from "./engine/mindmapEngine"', 'from "./engine/nodeFs"', 'from "./engine/shadowEngine"', 'from "./engine/vaultCatalogReader"']) {
+  for (const forbidden of ['from "./engine/mindmapEngine"', 'from "./engine/shadowEngine"', 'from "./engine/vaultCatalogReader"']) {
     assert.doesNotMatch(mainTs, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   assert.match(mainTs, /from "virtual:mindmap-dev-shadow"/);
@@ -72,16 +72,18 @@ void test("esbuild.config.mjs wires the dev-shadow virtual-module plugin, switch
   assert.match(config, /devShadowPlugin\(process\.cwd\(\),\s*!production\)/);
 });
 
-void test("dist/main.js, when a production build exists, contains no engine/shadow module source (function/class names unique to those files)", () => {
+void test("dist/main.js, when a production build exists, contains no DEV-SHADOW-ONLY engine/shadow module source (function/class names unique to those files)", () => {
   if (!fs.existsSync(DIST_MAIN)) {
     return;
   }
   const built = fs.readFileSync(DIST_MAIN, "utf8");
-  for (const identifier of [
-    "runShadowComparison", "createVaultCatalogShadowSource", "class MindmapEngine", "class NodeOwnedFs", "parseShadowBaselineV1", "planCatalogSample",
-    "class IndexStore", "class AppleBooksSqliteReader", "createNodeAppleBooksFsAdapter", "createNodeSqliteProcess", "verifyCurrentGenerationFully",
-    "generate_shadow_baseline",
-  ]) {
+  // Checkpoint 10B: `NodeOwnedFs`, `IndexStore`, `AppleBooksSqliteReader`, `createNodeAppleBooksFsAdapter`,
+  // `createNodeSqliteProcess`, `planCatalogSample` (via `vaultCatalogPlanner.ts`), and
+  // `verifyCurrentGenerationFully` (via `generationStore.ts`) are now reached through main.ts's OWN
+  // real `ProductionEngine` composition, never only through the dev-shadow module -- their presence
+  // is expected and correct now. Every identifier still checked below remains genuinely
+  // dev-shadow-only surface.
+  for (const identifier of ["runShadowComparison", "createVaultCatalogShadowSource", "class MindmapEngine", "parseShadowBaselineV1", "generate_shadow_baseline"]) {
     assert.doesNotMatch(built, new RegExp(identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `dist/main.js contains "${identifier}" -- the dev-shadow virtual module resolved to the real implementation instead of the production stub`);
   }
 });

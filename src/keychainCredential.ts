@@ -26,6 +26,46 @@ export async function getExaCredential(options: CredentialOptions): Promise<stri
   }
 }
 
+/**
+ * Boolean-ONLY macOS Keychain existence check -- deliberately does NOT use
+ * `-w` (the flag that would print the credential's value), so the
+ * credential's value is never read into this process at all. Never calls
+ * Exa itself. Resolves `false` (never throws) on any spawn/exit failure,
+ * including on a non-macOS platform where `/usr/bin/security` does not
+ * exist. Mirrors the identical, already-reviewed pattern in
+ * `engine/devShadowIntegration.ts`'s own (module-private) credential check.
+ */
+export function hasExaCredential(signal?: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let child: ReturnType<typeof spawn>;
+    const settle = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = () => {
+      child?.kill();
+      settle(false);
+    };
+    try {
+      child = spawn("/usr/bin/security", ["find-generic-password", "-s", EXA_KEYCHAIN_SERVICE, "-a", EXA_KEYCHAIN_ACCOUNT], { stdio: "ignore" });
+    } catch {
+      settle(false);
+      return;
+    }
+    if (signal?.aborted) {
+      child.kill();
+      settle(false);
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.on("error", () => settle(false));
+    child.on("close", (code) => settle(code === 0));
+  });
+}
+
 function runSecurityCommand(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("/usr/bin/security", args, { stdio: ["ignore", "pipe", "ignore"] });

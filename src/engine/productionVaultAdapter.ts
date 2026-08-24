@@ -206,20 +206,52 @@ export function createProductionNoteSourceReader(options: ProductionCatalogOptio
 }
 
 /**
- * Real vault-backed `ScopeDiscoverySeam` for `"scope-refresh"` jobs:
- * walks the FULL configured scope (never a 50-note dev-diagnostic sample)
- * via `planFullCatalogDiscovery`, and computes each item's `sourceHash`
- * through `projectSource` -- the SAME normalized-projection hash every
- * other write path in this codebase uses, never a raw-content hash.
+ * Checkpoint 10B blocker resolution: a CLOSED, injected mapping from a
+ * job's own `scopeId` (`ScopeDiscoverySeam.discover`'s first argument,
+ * already threaded through by `ScopeJobRunner`/`JobEngine` but previously
+ * IGNORED by this module's own discovery seam -- every scope-refresh/
+ * reading-sync discovery silently ran over the same fixed "all" folder
+ * set regardless of which scope a caller actually asked for) to exactly
+ * which folders/annotation-inclusion policy that id means. An id with no
+ * entry fails CLOSED: `discover` returns an empty result (zero reads, zero
+ * effects) rather than falling back to any other scope's folders --
+ * unknown must never silently widen to "everything".
  */
-export function createProductionScopeDiscoverySeam(options: ProductionCatalogOptions, embeddingModel: string): ScopeDiscoverySeam {
+export type ScopeRegistry = ReadonlyMap<string, { scopeFolders: readonly string[]; includeReadingAnnotations: boolean }>;
+
+export interface ProductionScopeDiscoveryOptions {
+  vault: Vault;
+  minimumWords: number;
+  configDir?: string;
+  vaultFileClasses?: VaultFileClasses;
+}
+
+/**
+ * Real vault-backed `ScopeDiscoverySeam` for `"scope-refresh"`/
+ * `"reading-sync"` jobs: resolves `scopeId` against `scopeRegistry` FIRST
+ * (failing closed on an unrecognized id -- see `ScopeRegistry`'s own doc
+ * comment), then walks that entry's exact configured scope (never a
+ * 50-note dev-diagnostic sample) via `streamFullCatalogDiscovery`, and
+ * computes each item's `sourceHash` through `projectSource` -- the SAME
+ * normalized-projection hash every other write path in this codebase
+ * uses, never a raw-content hash.
+ */
+export function createProductionScopeDiscoverySeam(options: ProductionScopeDiscoveryOptions, scopeRegistry: ScopeRegistry, embeddingModel: string): ScopeDiscoverySeam {
   const reader = makeCatalogTextReader(options.vault, options.vaultFileClasses);
   return {
-    async discover(_scopeId: string, signal: AbortSignal): Promise<ScopeDiscoveryItem[]> {
+    async discover(scopeId: string, signal: AbortSignal): Promise<ScopeDiscoveryItem[]> {
+      const entry = scopeRegistry.get(scopeId);
+      if (!entry) return []; // unknown scopeId -- fails closed, never widens to any other scope's folders
+      const config: CatalogPlannerConfig = {
+        scopeFolders: entry.scopeFolders,
+        includeReadingAnnotations: entry.includeReadingAnnotations,
+        minimumWords: options.minimumWords,
+        configDir: options.configDir ?? options.vault.configDir,
+      };
       const candidatePaths = options.vault.getMarkdownFiles().map((file) => file.path);
       // Item 8: content-free streaming discovery -- never retains more than one note's body at a
       // time, regardless of how many thousands of notes the configured scope covers.
-      const stream = await streamFullCatalogDiscovery(candidatePaths, toCatalogConfig(options, true), reader, signal);
+      const stream = await streamFullCatalogDiscovery(candidatePaths, config, reader, signal);
       return stream.items.map((item) => ({ identity: item.identity, sourceHash: item.sourceHash, embeddingModel }));
     },
   };
@@ -302,6 +334,13 @@ export async function openRelatedNote(workspace: Workspace, notePath: string, op
   // Throws PATH_EMPTY/PATH_ABSOLUTE/PATH_TRAVERSAL/PATH_CONTROL_CHARACTER for anything unsafe --
   // the canonical result is used for every check below, never the raw caller-supplied string.
   const canonical = canonicalizePath(notePath);
+  // Item 2 (10B cutover prerequisite): a raw path that DIFFERS from its own canonicalized form
+  // (double slashes, a trailing slash, `./` segments, etc.) is rejected outright rather than
+  // silently opened at the "fixed up" canonical path -- this function never re-normalizes an
+  // already-unsafe-shaped caller input into something that merely happens to look safe.
+  if (canonical !== notePath) {
+    throw new EngineError("IDENTITY_INVALID", "openRelatedNote requires an already-canonical path.");
+  }
   if (!canonical.toLowerCase().endsWith(".md")) {
     throw new EngineError("IDENTITY_INVALID", "openRelatedNote requires a .md path.");
   }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { CanonicalPath, NoteIdentityV1 } from "../engine/contracts";
+import type { CanonicalPath, IndexRecordV1, NoteIdentityV1 } from "../engine/contracts";
 import { compareScored, CosineIndexError, dotProduct, MAX_RANKING_LIMIT, normalizeVector } from "./cosineIndex";
 import { identityKey, type NoteRowMetadataV1 } from "./generationMetadata";
 import {
@@ -251,6 +251,76 @@ export async function queryRelated(fs: IndexFs, root: string, options: QueryRela
 
   refined.sort(compareScored);
   return refined.slice(0, options.limit);
+}
+
+/**
+ * Read-only, single-identity lookup of the committed view's current index
+ * record (base generation row shadowed by the latest matching overlay, if
+ * any) -- an owned-overlay validation failure fails closed exactly like
+ * `queryRelated`'s own `loadOverlayPrefixesOrThrow`, never silently
+ * skipped. Returns `null` when the identity is not currently indexed
+ * (never present, or tombstoned) -- never a fabricated record.
+ */
+export async function getIndexedRecord(fs: IndexFs, root: string, identity: NoteIdentityV1): Promise<IndexRecordV1 | null> {
+  const overlays = await loadOverlayPrefixesOrThrow(fs, root);
+  const key = identityKey(identity);
+  const overlay = overlays.find((o) => identityKey(o.identity) === key);
+  if (overlay) {
+    if (overlay.operation !== "upsert" || overlay.sourceHash === undefined || overlay.embeddingModel === undefined || overlay.chunkCount === undefined) {
+      return null;
+    }
+    return { schemaVersion: 1, identity: overlay.identity, sourceHash: overlay.sourceHash, embeddingModel: overlay.embeddingModel, chunkCount: overlay.chunkCount };
+  }
+  const generationId = await loadCurrentGenerationId(fs, root);
+  if (generationId === null) return null;
+  const generation = await loadGeneration(fs, root, generationId);
+  const row = generation.noteMetadata.find((r) => identityKey(r.identity) === key);
+  return row ?? null;
+}
+
+export interface IndexedCatalogRecord {
+  identity: NoteIdentityV1;
+  sourceHash: string;
+}
+
+/**
+ * Checkpoint 10B PENDING: a fully-verified, read-only snapshot of every
+ * identity/sourceHash the committed view currently holds -- the base
+ * generation is checked through the SAME `verifyGenerationFully` a real
+ * activation runs (checksums, shape/count agreement, every shard
+ * cross-checked), never the cheap `loadGeneration` `getIndexedRecord`
+ * itself uses, since a pending scanner comparing against this snapshot
+ * needs to trust it is real rather than possibly corrupt. Overlays shadow
+ * base rows exactly like `queryRelated`/`getIndexedRecord`: a tombstoned
+ * or upsert-shadowed base row is never double-counted. Returns `null` --
+ * never a partial/fabricated snapshot -- when there is a current
+ * generation pointer but its verification fails; returns `[]` (never
+ * `null`) when there is genuinely no current generation yet (a fresh,
+ * not-yet-built index is a legitimate "nothing indexed", not a failure).
+ */
+export async function snapshotIndexedCatalog(fs: IndexFs, root: string): Promise<IndexedCatalogRecord[] | null> {
+  const generationId = await loadCurrentGenerationId(fs, root);
+  let baseRecords: readonly NoteRowMetadataV1[] = [];
+  if (generationId !== null) {
+    try {
+      const { noteMetadata } = await verifyGenerationFully(fs, root, generationId);
+      baseRecords = noteMetadata;
+    } catch {
+      return null;
+    }
+  }
+  const overlays = await loadOverlayPrefixesOrThrow(fs, root);
+  const shadow = buildShadowInfo(overlays);
+  const result: IndexedCatalogRecord[] = [];
+  for (const row of baseRecords) {
+    if (shadow.byKey.has(identityKey(row.identity))) continue; // shadowed by a later overlay (tombstone or upsert) -- handled below, or removed
+    result.push({ identity: row.identity, sourceHash: row.sourceHash });
+  }
+  for (const overlay of overlays) {
+    if (overlay.operation !== "upsert" || overlay.sourceHash === undefined) continue;
+    result.push({ identity: overlay.identity, sourceHash: overlay.sourceHash });
+  }
+  return result;
 }
 
 export interface UpsertNoteInput {
@@ -844,6 +914,16 @@ export class IndexStore {
 
   queryRelated(options: QueryRelatedOptions): Promise<ScoredNote[]> {
     return queryRelated(this.fs, this.root, options);
+  }
+
+  /** Read-only single-identity lookup -- see `getIndexedRecord`'s own doc comment. */
+  getRecord(identity: NoteIdentityV1): Promise<IndexRecordV1 | null> {
+    return getIndexedRecord(this.fs, this.root, identity);
+  }
+
+  /** Read-only, fully-verified catalog snapshot -- see `snapshotIndexedCatalog`'s own doc comment. */
+  snapshotCatalog(): Promise<IndexedCatalogRecord[] | null> {
+    return snapshotIndexedCatalog(this.fs, this.root);
   }
 
   /**

@@ -238,13 +238,19 @@ function canonicalizeCandidatePaths(candidatePaths: readonly unknown[]): string[
  *    per-file read failure or ineligibility is recorded as a bounded
  *    reason count and the walk continues, never aborting the whole plan.
  */
+/** `classifyCandidate`'s own result: `item` is the classified `CatalogPlanItem` (or `null` for anything ineligible); `bytesRead` is the UTF-8 byte length of whatever `reader.readText` actually returned for this candidate -- `0` when the candidate was rejected BEFORE ever reaching a read (`UNSAFE_PATH`/`OUT_OF_SCOPE`/`RESEARCH_COMPANION`), and the real byte count for every other outcome, INCLUDING a later skip (`READ_FAILED` reads nothing so stays `0`; `MANAGED_ARTIFACT`/further `OUT_OF_SCOPE`/`TOO_SHORT`/`MISSING_ANNOTATION_ID`/`IDENTITY_INVALID` all read the file first, so all report the real byte count even though `item` is `null`). A byte-bounded streaming caller (`streamFullCatalogDiscovery`, item 4 of the 10B cutover) needs this to bound EVERY file body it actually reads, not merely the ones that end up eligible. */
+interface ClassifyCandidateResult {
+  item: CatalogPlanItem | null;
+  bytesRead: number;
+}
+
 /**
  * Classifies ONE candidate path against the shared eligibility rules --
  * factored out of `planCatalogSample` so `planFullCatalogDiscovery` (real
  * migration/production discovery, Checkpoint 10A) walks the EXACT same
  * decision tree instead of a parallel, drift-prone copy. Calls `skip` with
- * the closed reason code and returns `null` for anything ineligible;
- * returns the classified `CatalogPlanItem` on success. Never throws for an
+ * the closed reason code and reports `item: null` for anything ineligible;
+ * reports the classified `CatalogPlanItem` on success. Never throws for an
  * ordinary skip -- only a truly unexpected internal error would escape.
  */
 async function classifyCandidate(
@@ -255,14 +261,14 @@ async function classifyCandidate(
   reader: CatalogTextReader,
   signal: AbortSignal | undefined,
   skip: (code: CatalogSkipReasonCode) => void,
-): Promise<CatalogPlanItem | null> {
+): Promise<ClassifyCandidateResult> {
   if (!isSafeIndividualNotePath(relpath, config.configDir)) {
     skip("UNSAFE_PATH");
-    return null;
+    return { item: null, bytesRead: 0 };
   }
   if (runtimeFolder !== null && isWithinFolder(relpath, runtimeFolder)) {
     skip("UNSAFE_PATH");
-    return null;
+    return { item: null, bytesRead: 0 };
   }
 
   const readingIncluded = config.includeReadingAnnotations !== false;
@@ -277,11 +283,11 @@ async function classifyCandidate(
   // caller's ORDINARY `scopeFolders` independently cover it.
   if (!inOrdinaryScope && !isAnnotationShaped && !isIndexShaped) {
     skip("OUT_OF_SCOPE");
-    return null;
+    return { item: null, bytesRead: 0 };
   }
   if (isResearchCompanionPath(relpath)) {
     skip("RESEARCH_COMPANION");
-    return null;
+    return { item: null, bytesRead: 0 };
   }
 
   let text: string;
@@ -289,12 +295,13 @@ async function classifyCandidate(
     text = await reader.readText(relpath, signal);
   } catch {
     skip("READ_FAILED");
-    return null;
+    return { item: null, bytesRead: 0 };
   }
+  const bytesRead = Buffer.byteLength(text, "utf8");
 
   if (isIndexShaped && hasCompleteManagedIndexMarkers(text)) {
     skip("MANAGED_ARTIFACT");
-    return null;
+    return { item: null, bytesRead };
   }
 
   // Only a note both STRUCTURALLY shaped like a real annotation AND carrying the annotation
@@ -311,7 +318,7 @@ async function classifyCandidate(
   // as an ordinary note when it isn't a real annotation.
   if (isAnnotationShaped && !inOrdinaryScope && !annotation) {
     skip("OUT_OF_SCOPE");
-    return null;
+    return { item: null, bytesRead };
   }
   const body = bodyAfterFrontmatter(text);
   const minimum = minimumWordsForNote(text, config.minimumWords);
@@ -322,7 +329,7 @@ async function classifyCandidate(
   const wordCount = normalizedWordCount(body);
   if (wordCount < minimum) {
     skip("TOO_SHORT");
-    return null;
+    return { item: null, bytesRead };
   }
 
   try {
@@ -331,14 +338,14 @@ async function classifyCandidate(
       const annotationId = readAnnotationIdFrontmatter(text);
       if (!annotationId) {
         skip("MISSING_ANNOTATION_ID");
-        return null;
+        return { item: null, bytesRead };
       }
-      return { relpath, identity: stableNoteIdentity(canonical, annotationId), isAppleAnnotation: true, rawContent: text };
+      return { item: { relpath, identity: stableNoteIdentity(canonical, annotationId), isAppleAnnotation: true, rawContent: text }, bytesRead };
     }
-    return { relpath, identity: stableNoteIdentity(canonical), isAppleAnnotation: false, rawContent: text };
+    return { item: { relpath, identity: stableNoteIdentity(canonical), isAppleAnnotation: false, rawContent: text }, bytesRead };
   } catch {
     skip("IDENTITY_INVALID");
-    return null;
+    return { item: null, bytesRead };
   }
 }
 
@@ -363,7 +370,7 @@ export async function planCatalogSample(candidatePaths: readonly string[], confi
       aborted = true;
       break;
     }
-    const item = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
+    const { item } = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
     if (item) items.push(item);
   }
 
@@ -412,7 +419,7 @@ export async function planFullCatalogDiscovery(candidatePaths: readonly string[]
       aborted = true;
       break;
     }
-    const item = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
+    const { item } = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
     if (item) items.push(item);
   }
 
@@ -503,20 +510,19 @@ export async function streamFullCatalogDiscovery(
       aborted = true;
       break;
     }
-    const item = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
-    if (!item) continue;
-    // Item 4 (10A blocker pass): this candidate was actually READ -- its bytes count toward
-    // `totalBytesRead` regardless of whether it fits under `byteBound`, so the reported total
-    // always reflects every byte this pass actually pulled off disk. But a candidate whose OWN
-    // bytes would push the running total past `byteBound` is never itself accepted into `items`
-    // -- accepting it first and only checking the bound on the NEXT iteration would let a single
-    // oversized note blow through the budget by an unbounded amount before the walk ever noticed.
-    const itemBytes = Buffer.byteLength(item.rawContent, "utf8");
-    totalBytesRead += itemBytes;
+    // Item 4 (10B cutover): `classifyCandidate` reports `bytesRead` for EVERY candidate whose body
+    // was actually pulled off disk -- including one later skipped as ineligible (too short, a
+    // managed artifact, a non-matching annotation type, etc.) -- never only the ones that end up
+    // accepted into `items`. Those bytes count toward the budget regardless of the classification
+    // outcome, so a large run of skipped-but-read files can never blow through `byteBound`
+    // unnoticed just because none of them individually became an accepted item.
+    const { item, bytesRead } = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
+    totalBytesRead += bytesRead;
     if (totalBytesRead > byteBound) {
       aborted = true;
       break;
     }
+    if (!item) continue;
     const sourceHash = projectSource(item.identity, item.rawContent).sourceHash;
     items.push({ identity: item.identity, sourceHash });
     // `item`/`item.rawContent` fall out of scope here -- never accumulated across iterations.
@@ -557,7 +563,7 @@ export async function findCatalogItemByAnnotationId(
   for (const relpath of sorted) {
     if (considered >= bound) break;
     if (signal?.aborted) break;
-    const item = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
+    const { item } = await classifyCandidate(relpath, config, scopeFolders, runtimeFolder, reader, signal, skip);
     considered += 1;
     if (item && item.isAppleAnnotation && item.identity.appleAnnotationId === appleAnnotationId) {
       return { identity: item.identity, rawContent: item.rawContent };

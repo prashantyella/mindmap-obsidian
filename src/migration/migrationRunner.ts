@@ -58,7 +58,8 @@ export interface MigrationRunnerDeps {
   ingestBatchSize?: number;
 }
 
-const MIGRATION_SCOPE_ID = "migration:full-vault";
+/** Exported so the composition root (`ProductionEngine`) can register a matching entry in its scope registry -- migration's own full-vault-including-annotations discovery semantics must stay exactly what they always were, independent of the `"current"`/`"all"`/`"reading"` job-triggered scope ids. */
+export const MIGRATION_SCOPE_ID = "migration:full-vault";
 /** Review item 14: bounded per-call cap on how many abandoned run directories a single sweep touches -- keeps a sweep call itself O(1)-bounded rather than proportional to however many failed/cancelled runs have accumulated. Any remainder is picked up by the NEXT sweep (every fresh `start()`). */
 const MAX_ABANDONED_RUNS_SWEPT_PER_CALL = 5;
 

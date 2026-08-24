@@ -19,8 +19,20 @@ export interface StatusBarRuntimeSetupState {
   blocking: boolean;
 }
 
+/** Checkpoint 10B item 3: the TypeScript engine's migration status, surfaced through the SAME existing status bar menu (never a new UI surface) -- `undefined` when the production engine itself is unavailable. */
+export interface StatusBarMigrationState {
+  phase: string;
+  message: string;
+  discoveredCount: number;
+  processedCount: number;
+  canStart: boolean;
+  canRetry: boolean;
+  canCancel: boolean;
+}
+
 export interface StatusBarMenuState {
   runtimeSetup?: StatusBarRuntimeSetupState;
+  migration?: StatusBarMigrationState;
   pendingAvailable: boolean;
   currentPending: number;
   allPending: number;
@@ -53,6 +65,7 @@ export interface StatusBarMenuState {
 
 export interface StatusBarStateInput {
   runtimeSetup?: StatusBarRuntimeSetupState;
+  migration?: StatusBarMigrationState;
   pending: {
     available: boolean;
     current: { total: number; items: string[] };
@@ -126,6 +139,7 @@ export function buildStatusBarMenuState(input: StatusBarStateInput): StatusBarMe
   });
   return {
     runtimeSetup: input.runtimeSetup,
+    migration: input.migration,
     pendingAvailable: input.pending.available,
     currentPending: input.pending.current.total,
     allPending: input.pending.all.total,
@@ -182,6 +196,9 @@ export interface StatusBarMenuActions {
   startRuntimeSetup(): void | Promise<void>;
   cancelRuntimeSetup(): void | Promise<void>;
   openPythonDownload(): void | Promise<void>;
+  startMigration(): void | Promise<void>;
+  retryMigration(): void | Promise<void>;
+  cancelMigration(): void | Promise<void>;
 }
 
 export interface StatusBarPresentation {
@@ -353,8 +370,24 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
 
   const topRecoveryRow = runtimeSetupShown ? null : buildTopRecoveryRow(state, blocking);
 
+  // Item 3 (Checkpoint 10B): shown only once a migration record actually exists for this vault
+  // (`state.migration` is `undefined` when the production engine itself is unavailable). A
+  // terminal "complete"/"cancelled" state with nothing left to retry shows status only, no action
+  // row -- Start/Retry/Cancel appear exactly when `canStart`/`canRetry`/`canCancel` say so.
+  const migration = state.migration;
+  const migrationItems: StatusBarMenuItemDescriptor[] = migration
+    ? [
+      { title: "Mindmap engine (TypeScript)", label: true },
+      { title: `Migration: ${migration.message} (${migration.processedCount}/${migration.discoveredCount})`, icon: "database", disabled: true },
+      ...(migration.canStart ? [{ title: "Start migration", icon: "play" as IconName, action: "startMigration" as const }] : []),
+      ...(migration.canRetry ? [{ title: "Retry migration", icon: "refresh-cw" as IconName, action: "retryMigration" as const }] : []),
+      ...(migration.canCancel ? [{ title: "Cancel migration", icon: "x" as IconName, action: "cancelMigration" as const }] : []),
+    ]
+    : [];
+
   const items: StatusBarMenuItemDescriptor[] = [
     ...runtimeSetupItems,
+    ...migrationItems,
     ...(topRecoveryRow ? [topRecoveryRow] : []),
     { title: "Mode", label: true },
     {

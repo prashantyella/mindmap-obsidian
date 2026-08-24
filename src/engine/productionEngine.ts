@@ -6,7 +6,9 @@ import type { IndexFs } from "../index/indexFs";
 import { IndexStore } from "../index/indexStore";
 import { JobEngine, type JobEngineFault, type JobPhaseRunner } from "../jobs/jobEngine";
 import { JobStore } from "../jobs/jobStore";
-import { NoteJobRunner } from "../jobs/noteJob";
+import { NoteJobRunner, type NoteSourceReader } from "../jobs/noteJob";
+import { canonicalizePath, stableNoteIdentity, type JobTrigger } from "./contracts";
+import { projectSource } from "./sourceProjection";
 import { RebuildJobRunner } from "../jobs/rebuildJob";
 import { ScopeJobRunner } from "../jobs/scopeJob";
 import { CoreScheduler, type IntervalRegistrar, type SchedulerClock, type SchedulerFault } from "../scheduling/coreScheduler";
@@ -25,14 +27,46 @@ import {
   createProductionScopeDiscoverySeam,
   createProductionScopeEnqueueSeam,
   openRelatedNote,
+  type ScopeRegistry,
   type VaultFileClasses,
 } from "./productionVaultAdapter";
 import { createProductionNoteEmbeddingSeam, createProductionNoteMetadataSeam } from "./productionProviderSeams";
+import { selectRelatedCandidates, type RelatedCandidateScore } from "./relatedSelector";
+import type { CanonicalPath, RelatedCandidateKind } from "./contracts";
+import type { NoteEmbeddingSeam } from "../jobs/noteJob";
 import { NoteWriter } from "./noteWriter";
-import { MigrationRunner } from "../migration/migrationRunner";
+import { MigrationRunner, MIGRATION_SCOPE_ID } from "../migration/migrationRunner";
 import { MigrationStore } from "../migration/migrationStore";
 import type { MigrationStatusV1 } from "../migration/migrationContract";
 import { MigrationDriver } from "../migration/migrationDriver";
+
+/**
+ * Checkpoint 10B blocker resolution: the CLOSED set of scope ids a
+ * production job (never migration, which keeps its own separate
+ * `MIGRATION_SCOPE_ID` entry -- see `buildProductionScopeRegistry`) may
+ * ever be submitted with. `"current"`/`"all"` cover ordinary vault notes
+ * ONLY (`includeReadingAnnotations: false` for both -- Reading annotation
+ * sync is a wholly separate concern, never folded into an ordinary
+ * scope-refresh); `"reading"` is the mirror image, STRICT annotation-only
+ * discovery with zero ordinary scope widening (`scopeFolders: []`).
+ */
+export const PRODUCTION_SCOPE_CURRENT = "current";
+export const PRODUCTION_SCOPE_ALL = "all";
+export const PRODUCTION_SCOPE_READING = "reading";
+
+/** Exported for direct, focused testing of the exact registry `ProductionEngine` itself composes -- see `productionEngine.test.ts`'s own scope-registry regression tests. Never imported/used by any other production module. */
+export function buildProductionScopeRegistry(options: Pick<ProductionEngineOptions, "scopeFolders" | "currentScopeFolders">): ScopeRegistry {
+  const registry = new Map<string, { scopeFolders: readonly string[]; includeReadingAnnotations: boolean }>();
+  registry.set(PRODUCTION_SCOPE_CURRENT, { scopeFolders: options.currentScopeFolders, includeReadingAnnotations: false });
+  registry.set(PRODUCTION_SCOPE_ALL, { scopeFolders: options.scopeFolders, includeReadingAnnotations: false });
+  registry.set(PRODUCTION_SCOPE_READING, { scopeFolders: [], includeReadingAnnotations: true });
+  // Migration's own discovery semantics are UNCHANGED by this blocker resolution: full configured
+  // scope (`allPaths`) PLUS Reading annotations, exactly as before -- registered under its own
+  // dedicated id so migration is never accidentally affected by (or conflated with) the ordinary
+  // "current"/"all"/"reading" job-triggered scopes above.
+  registry.set(MIGRATION_SCOPE_ID, { scopeFolders: options.scopeFolders, includeReadingAnnotations: true });
+  return registry;
+}
 
 /**
  * Checkpoint 10A item 4: bounded, explicit Apple Books composition input --
@@ -84,6 +118,40 @@ export interface ProductionEngineProbes {
   backgroundScheduler?: PreflightProbe;
 }
 
+/** Mirrors `python/mindmap.py`'s `select_mindmap_links`/`query_related_for_text` config surface -- see `ProductionEngineOptions.relatedSelectionConfig`. */
+export interface RelatedSelectionConfig {
+  relatedLimit: number;
+  overreachCount: number;
+  creativeCount: number;
+  creativeMin: number;
+  creativeMax: number;
+  /** Candidate pool size `IndexStore.queryRelated` is asked for before selection narrows it -- mirrors Python's `related_candidate_limit`. */
+  candidateLimit: number;
+  minScore: number;
+}
+
+/**
+ * A read-API related result -- deliberately a WIDER kind union than the
+ * persisted `RelatedCandidateV1` contract (`RelatedCandidateKind` plus
+ * `"lookup"`, mirroring `query_related_for_text`'s own fixed `"lookup"`
+ * kind): these results are never written back into a note's frontmatter,
+ * so they are not held to that contract's closed kind set.
+ */
+export interface ProductionRelatedResult {
+  path: CanonicalPath;
+  score: number;
+  kind: RelatedCandidateKind | "lookup";
+}
+
+/** Result of `ProductionEngine.queryLiveRelated` -- see that method's own doc comment. */
+export interface ProductionLiveRelatedResult {
+  path: string;
+  sourceHash: string;
+  indexed: boolean;
+  stale: boolean;
+  related: ProductionRelatedResult[];
+}
+
 export interface ProductionEngineOptions {
   /** Absolute, plugin-owned data directory this whole engine instance is confined to. */
   dataRoot: string;
@@ -94,8 +162,8 @@ export interface ProductionEngineOptions {
   vault: Vault;
   /** Optional: only needed for `openRelatedNote`; omit in a headless/test composition. */
   workspace?: Workspace;
-  /** Item 3: real, injectable `TFile`/`TFolder` classes for every composed vault adapter -- omit to fall back to the structural shape guard (test-safe default; see `VaultFileClasses`). */
-  vaultFileClasses?: VaultFileClasses;
+  /** Item 3 (10A) / prerequisite 1 (10B cutover): the REAL `TFile`/`TFolder` classes, required -- `productionVaultAdapter.ts`'s own structural-shape fallback exists purely for that module's lower-level exported factories to stay test-friendly; the actual composition root (`ProductionEngine`, ultimately `main.ts`) must always supply the real classes so every vault-object guard in a live engine uses genuine `instanceof`, never a duck-typed approximation. A test composing `ProductionEngine` directly supplies its own fake classes (see `VaultFileClasses`) rather than omitting this field. */
+  vaultFileClasses: VaultFileClasses;
   clock?: SchedulerClock;
   backgroundScheduler?: BackgroundSchedulerOptions;
   /** `null` when Ollama embeddings are not configured -- `process-note`/`migrate-index` jobs can still be COMPOSED but the pump is never started while this is `null` (see `start()`'s gating). */
@@ -107,9 +175,13 @@ export interface ProductionEngineOptions {
   /** `null` when a local metadata provider is not configured. */
   metadataProvider: MetadataInferenceProvider | null;
   metadataPipelineConfig: MetadataPipelineConfig | null;
-  /** `ScopeSelection.allPaths` -- the FULL configured scope migration/scope-refresh discovery walks; never the smaller `.currentPaths` working set. */
+  /** `ScopeSelection.allPaths` -- the FULL configured scope. Backs the `"all"` scope registry entry AND migration discovery (which has always covered the full configured scope, independent of the `"current"`/`"all"` job-triggered ids -- see `PRODUCTION_SCOPE_REGISTRY_ENTRIES`). */
   scopeFolders: readonly string[];
+  /** `ScopeSelection.currentPaths` -- the smaller day-to-day working set. Backs ONLY the `"current"` scope registry entry; never used for migration or the `"all"`/`"reading"` entries. */
+  currentScopeFolders: readonly string[];
   minimumWords: number;
+  /** Checkpoint 10B SIDEBAR: config for `queryLiveRelated`'s core/overreach/creative/fill selection -- mirrors `select_mindmap_links`'s own config surface (`related_limit`/`related_overreach`/`related_creative`/`related_creative_min`/`related_creative_max`/`related_candidate_limit`/`related_min_score`). Required whenever `embeddingProvider` is configured; `queryLiveRelated`/`queryLookupRelated` throw `JOB_SHAPE_INVALID` without it. */
+  relatedSelectionConfig?: RelatedSelectionConfig;
   configDir?: string;
   /** Item 5: the plugin's own runtime-internal folder inside the vault (`<configDir>/plugins/<pluginId>`), when the plugin stores anything there -- threaded through to `openRelatedNote` so a related-note target inside it is rejected, exactly like a target inside `configDir` itself. */
   runtimeFolder?: string;
@@ -174,6 +246,12 @@ export class ProductionEngine {
   private pumpStarted = false;
   private schedulerStarted = false;
   private unsubscribeMigration: (() => void) | null = null;
+  /** Reused by `submitNoteForProcessing` -- the SAME `NoteSourceReader` `"process-note"` jobs themselves resolve identities through, never a second, parallel adapter. */
+  private readonly noteSourceReader: NoteSourceReader;
+  /** Checkpoint 10B SIDEBAR: the SAME strict embedding seam `NoteJobRunner`'s own `"embed"` phase uses -- `null` only when no embedding provider/model/chunkOptions is configured (mirrors `migrationEmbeddingSeam`'s own construction above). `queryLiveRelated`/`queryLookupRelated` throw a closed `JOB_SHAPE_INVALID` rather than silently falling back to a different embedding path when this is `null`. */
+  private readonly noteEmbeddingSeam: NoteEmbeddingSeam | null;
+  /** Checkpoint 10B PENDING: discovery is pure text/hash work (no embedding call), so this is constructed UNCONDITIONALLY -- unlike `noteEmbeddingSeam`, a pending-notes count must stay available even before any provider is configured. Reused by `getPendingCandidates` only; the `"scope-refresh"`/migration runners above keep their own separately-constructed seams unchanged. */
+  private readonly pendingDiscoverySeam: import("../jobs/scopeJob").ScopeDiscoverySeam;
 
   constructor(options: ProductionEngineOptions) {
     this.options = options;
@@ -198,10 +276,17 @@ export class ProductionEngine {
       },
     };
 
+    const scopeRegistry = buildProductionScopeRegistry(options);
     const runners: Partial<Record<import("./contracts").JobKind, JobPhaseRunner>> = {};
     const noteVaultAdapter = createProductionNoteVaultAdapter(options.vault, options.vaultFileClasses);
     const noteWriter = new NoteWriter(noteVaultAdapter);
     const sourceReader = createProductionNoteSourceReader({ vault: options.vault, scopeFolders: options.scopeFolders, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses });
+    this.noteSourceReader = sourceReader;
+    this.noteEmbeddingSeam =
+      options.embeddingProvider && options.embeddingModel && options.chunkOptions
+        ? createProductionNoteEmbeddingSeam(options.embeddingProvider, options.embeddingModel, options.chunkOptions)
+        : null;
+    this.pendingDiscoverySeam = createProductionScopeDiscoverySeam({ vault: options.vault, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses }, scopeRegistry, options.embeddingModel ?? "");
     // Item 6 (10A blocker pass): "reading-sync"/"scope-refresh" both ultimately ENQUEUE
     // "process-note" jobs (via `createProductionScopeEnqueueSeam` below) -- registering either one
     // without a "process-note" runner to actually dispatch those enqueued jobs would silently
@@ -225,7 +310,7 @@ export class ProductionEngine {
       // phase stays the explicit, documented no-op seam (`createDeferredScopeImportSeam`) --
       // pulling newly-read Apple Books annotations into the vault remains deferred past 10A.
       const scopeRunner = new ScopeJobRunner({
-        discovery: createProductionScopeDiscoverySeam({ vault: options.vault, scopeFolders: options.scopeFolders, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses }, options.embeddingModel),
+        discovery: createProductionScopeDiscoverySeam({ vault: options.vault, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses }, scopeRegistry, options.embeddingModel),
         import: createDeferredScopeImportSeam(),
         enqueue: createProductionScopeEnqueueSeam(lateJobSubmitter, "manual"),
       });
@@ -288,7 +373,7 @@ export class ProductionEngine {
         : { embed: (): never => { throw new Error("Migration ingestion invoked with no embedding provider configured."); } };
     this.migrationRunner = new MigrationRunner({
       store: this.migrationStore,
-      discovery: createProductionScopeDiscoverySeam({ vault: options.vault, scopeFolders: options.scopeFolders, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses }, options.embeddingModel ?? ""),
+      discovery: createProductionScopeDiscoverySeam({ vault: options.vault, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses }, scopeRegistry, options.embeddingModel ?? ""),
       ingestion: { sourceReader, embedding: migrationEmbeddingSeam },
       fs: options.fs,
       dataRoot: options.dataRoot,
@@ -469,6 +554,17 @@ export class ProductionEngine {
     if (this.pumpStarted && this.schedulerStarted) return;
 
     const migrationStatus = await this.migrationRunner.getStatus();
+    // Bugfix (10B cutover): nothing below can ever start while migration is not "complete" --
+    // bail out BEFORE running (and overwriting `lastPreflightReport` with) a redundant fresh
+    // preflight pass. Without this guard, `start()`'s own unconditional `tryStartOrdinaryWork()`
+    // call at the end of its sequence silently re-ran preflight a SECOND time on every single
+    // `start()` (even a fresh install with migration `"not-started"`) and clobbered the report
+    // `start()` itself was about to return with a microseconds-later one -- both wasteful and the
+    // exact cause of `ProductionEngine.start() is idempotent`'s intermittent `generatedAtIso`
+    // flake (a later `start()` call's early-return path returns THIS overwritten report, which
+    // could differ by a millisecond from the one the first call actually returned).
+    if (migrationStatus.phase !== "complete") return;
+
     const report = await runPreflight(this.buildPreflightDefinitions(), {
       signal: this.lifecycleAbort.signal,
       defaultTimeoutMs: this.options.preflightTimeoutMs,
@@ -703,6 +799,175 @@ export class ProductionEngine {
       throw new EngineError("IDENTITY_INVALID", "openRelatedNote requires ProductionEngineOptions.workspace to be configured.");
     }
     await openRelatedNote(this.options.workspace, notePath, { configDir: this.options.vault.configDir, runtimeFolder: this.options.runtimeFolder });
+  }
+
+  /**
+   * Checkpoint 10B item 2 (active-note processing): submits ONE
+   * `"process-note"` job for a single vault-relative path -- resolves the
+   * note's CURRENT content through the exact same `NoteSourceReader`
+   * `"process-note"` jobs themselves use, and computes `sourceHash`
+   * through the SAME `projectSource` normalization every other write path
+   * uses (never a raw-content hash, and never a caller-supplied hash that
+   * could be stale by the time this actually submits). Throws a closed
+   * `JOB_SHAPE_INVALID` if `"process-note"` was never registered (no full
+   * provider configuration -- see the constructor's own item-6 gate), or
+   * `SOURCE_STALE` if the path does not currently resolve to a note.
+   */
+  async submitNoteForProcessing(canonicalPath: string, trigger: JobTrigger = "manual"): Promise<void> {
+    if (!this.registeredRunners["process-note"] || !this.options.embeddingModel) {
+      throw new EngineError("JOB_SHAPE_INVALID", "submitNoteForProcessing requires process-note to be registered (full provider configuration).");
+    }
+    const canonical = canonicalizePath(canonicalPath);
+    const resolved = await this.noteSourceReader.read(stableNoteIdentity(canonical));
+    if (!resolved) {
+      throw new EngineError("SOURCE_STALE", "submitNoteForProcessing: the given path does not currently resolve to a note.");
+    }
+    const sourceHash = projectSource(resolved.identity, resolved.rawContent).sourceHash;
+    await this.jobEngine.submit({ trigger, kind: "process-note", identity: resolved.identity, sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion });
+  }
+
+  /**
+   * Checkpoint 10B item 2 (scope-wide runs): submits a `"scope-refresh"`
+   * job under the given scope id -- `"current"`/`"all"` are the ONLY ids
+   * this engine's own scope registry recognizes for ordinary runs (see
+   * `PRODUCTION_SCOPE_CURRENT`/`PRODUCTION_SCOPE_ALL`); an unrecognized id
+   * still submits (the job itself settles, harmlessly, against zero
+   * discovered items -- the registry's own closed fail-shut behavior, not
+   * a rejection here) rather than this method silently guessing a
+   * fallback scope.
+   */
+  async submitScopeRefresh(scopeId: string, trigger: JobTrigger = "manual"): Promise<void> {
+    if (!this.registeredRunners["scope-refresh"]) {
+      throw new EngineError("JOB_SHAPE_INVALID", "submitScopeRefresh requires scope-refresh to be registered (full provider configuration).");
+    }
+    await this.jobEngine.submit({ trigger, kind: "scope-refresh", scopeId, pipelineVersion: this.options.pipelineVersion });
+  }
+
+  /** Checkpoint 10B item 6: submits a `"reading-sync"` job under the fixed `PRODUCTION_SCOPE_READING` id -- the ONLY scope id `"reading-sync"` is ever submitted with in production. */
+  async submitReadingSync(trigger: JobTrigger = "manual"): Promise<void> {
+    if (!this.registeredRunners["reading-sync"]) {
+      throw new EngineError("JOB_SHAPE_INVALID", "submitReadingSync requires reading-sync to be registered (full provider configuration).");
+    }
+    await this.jobEngine.submit({ trigger, kind: "reading-sync", scopeId: PRODUCTION_SCOPE_READING, pipelineVersion: this.options.pipelineVersion });
+  }
+
+  /**
+   * Checkpoint 10B FORCE COMMANDS: submits one `"rebuild-index"` job --
+   * the TS mapping for the retired `rebuildAll` Python run profile
+   * (`--all --refresh-all --rebuild --apply`). `RebuildJobRunner` is
+   * registered UNCONDITIONALLY (never gated on embedding/metadata
+   * provider configuration -- see the constructor above), so this never
+   * throws `JOB_SHAPE_INVALID` in practice; the guard is kept only for
+   * defensive symmetry with every other `submit*` method on this class.
+   */
+  async submitRebuild(trigger: JobTrigger = "manual"): Promise<void> {
+    if (!this.registeredRunners["rebuild-index"]) {
+      throw new EngineError("JOB_SHAPE_INVALID", "submitRebuild requires rebuild-index to be registered.");
+    }
+    await this.jobEngine.submit({ trigger, kind: "rebuild-index", pipelineVersion: this.options.pipelineVersion });
+  }
+
+  /**
+   * Checkpoint 10B SIDEBAR: resolves the CURRENT text of the note at
+   * `canonicalPath` through the same `NoteSourceReader` "process-note"
+   * jobs use, projects it through `projectSource` (never a raw-content
+   * hash), and reports whether `IndexStore`'s committed view currently
+   * holds a matching record. When `ensureIndex` is true and the record is
+   * absent or its `sourceHash` has drifted, submits the EXACT same
+   * `process-note` job `submitNoteForProcessing` would (never a daemon,
+   * never a synchronous inline embed-then-index like the retired Python
+   * worker) and returns immediately with the SAME "not yet indexed"
+   * loading/empty semantics the UI already renders for `indexed: false`/
+   * `stale: true` -- the caller is expected to re-query once the
+   * submitted job completes, exactly like polling any other job result.
+   * Related candidates are only ever computed against an ALREADY
+   * indexed, non-stale-at-submission-time record: `related` mirrors
+   * `query_related_for_note`'s selection (`selectRelatedCandidates`), and
+   * the note's own vector for ranking is a FRESH embed through
+   * `noteEmbeddingSeam` -- never a stored vector pulled back out of the
+   * index -- so ranking always reflects the note's current on-disk text.
+   */
+  async queryLiveRelated(canonicalPathInput: string, ensureIndex: boolean): Promise<ProductionLiveRelatedResult> {
+    if (!this.noteEmbeddingSeam || !this.options.embeddingModel || !this.options.relatedSelectionConfig) {
+      throw new EngineError("JOB_SHAPE_INVALID", "queryLiveRelated requires an embedding provider/model and relatedSelectionConfig to be configured.");
+    }
+    const canonical = canonicalizePath(canonicalPathInput);
+    const identity = stableNoteIdentity(canonical);
+    const resolved = await this.noteSourceReader.read(identity);
+    if (!resolved) {
+      throw new EngineError("SOURCE_STALE", "queryLiveRelated: the given path does not currently resolve to a note.");
+    }
+    const projection = projectSource(resolved.identity, resolved.rawContent);
+    const record = await this.indexStore.getRecord(resolved.identity);
+    const indexed = record !== null;
+    const stale = !indexed || record.sourceHash !== projection.sourceHash;
+
+    if (ensureIndex && stale && this.registeredRunners["process-note"]) {
+      await this.jobEngine
+        .submit({ trigger: "manual", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion })
+        .catch(() => undefined);
+      return { path: canonical, sourceHash: projection.sourceHash, indexed, stale, related: [] };
+    }
+
+    if (!indexed) {
+      return { path: canonical, sourceHash: projection.sourceHash, indexed, stale, related: [] };
+    }
+
+    const embedded = await this.noteEmbeddingSeam.embed(projection, this.lifecycleAbort.signal);
+    const config = this.options.relatedSelectionConfig;
+    const candidates = await this.indexStore.queryRelated({
+      queryVector: embedded.noteVector,
+      queryChunkVectors: embedded.chunkVectors,
+      excludePath: canonical,
+      limit: config.candidateLimit,
+    });
+    const related = selectRelatedCandidates(
+      candidates.map((c): RelatedCandidateScore => ({ path: c.path, score: c.score })),
+      { selfPath: canonical, relatedLimit: config.relatedLimit, overreachCount: config.overreachCount, creativeCount: config.creativeCount, creativeMin: config.creativeMin, creativeMax: config.creativeMax, minScore: config.minScore },
+    );
+    return { path: canonical, sourceHash: projection.sourceHash, indexed, stale, related };
+  }
+
+  /**
+   * Checkpoint 10B SIDEBAR: projects the raw lookup query text through the
+   * SAME `projectSource`/`noteEmbeddingSeam` pipeline (a synthetic,
+   * never-persisted `"path"` identity -- this text is never written or
+   * indexed as a note) and ranks `IndexStore`'s committed view against
+   * the result. Unlike `queryLiveRelated`, results are the PLAIN
+   * score-descending top-`limit` (mirroring `query_related_for_text`,
+   * which never runs core/overreach/creative selection) -- every result
+   * carries `kind: "lookup"`.
+   */
+  async queryLookupRelated(queryText: string, limit: number): Promise<ProductionRelatedResult[]> {
+    if (!this.noteEmbeddingSeam || !this.options.relatedSelectionConfig) {
+      throw new EngineError("JOB_SHAPE_INVALID", "queryLookupRelated requires an embedding provider/model and relatedSelectionConfig to be configured.");
+    }
+    const trimmed = queryText.trim();
+    if (trimmed === "") return [];
+    const identity = stableNoteIdentity(canonicalizePath("__lookup-query__"));
+    const projection = projectSource(identity, trimmed);
+    const embedded = await this.noteEmbeddingSeam.embed(projection, this.lifecycleAbort.signal);
+    const boundedLimit = Math.max(1, limit);
+    const candidateLimit = Math.max(boundedLimit, this.options.relatedSelectionConfig.candidateLimit);
+    const candidates = await this.indexStore.queryRelated({ queryVector: embedded.noteVector, queryChunkVectors: embedded.chunkVectors, limit: candidateLimit });
+    return candidates.slice(0, boundedLimit).map((c) => ({ schemaVersion: 1, path: c.path, score: c.score, kind: "lookup" }));
+  }
+
+  /**
+   * Checkpoint 10B PENDING: the ONLY entry point a pending-notes scanner
+   * (`productionPendingScan.ts`) needs into this engine -- discovers every
+   * currently-eligible `{identity, sourceHash}` pair under `scopeId`
+   * (`PRODUCTION_SCOPE_CURRENT`/`PRODUCTION_SCOPE_ALL`) through the SAME
+   * `streamFullCatalogDiscovery` pass (and therefore the SAME strict
+   * Reading-artifact exclusions) `"scope-refresh"` jobs themselves
+   * discover against, content-free (never retains a note body). Available
+   * regardless of whether embedding/metadata providers are configured --
+   * discovery is pure text/hash work, so "N notes pending" must stay
+   * meaningful even before a vault's providers are set up.
+   */
+  async getPendingCandidates(scopeId: string, signal?: AbortSignal): Promise<{ identity: import("./contracts").NoteIdentityV1; sourceHash: string }[]> {
+    const items = await this.pendingDiscoverySeam.discover(scopeId, signal ?? this.lifecycleAbort.signal);
+    return items.map((item) => ({ identity: item.identity, sourceHash: item.sourceHash }));
   }
 
   private emptyPreflightReport(nowIso: string = new Date().toISOString()): PreflightReportV1 {
