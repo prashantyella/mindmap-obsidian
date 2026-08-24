@@ -159,6 +159,19 @@ void test("workspace view does not define a dedicated loading screen", () => {
   assert.equal(stylesSource.includes("mindmap-loading-state"), false);
 });
 
+void test("heatmap SVG classes are added as individual DOM tokens", () => {
+  const sourceRoot = process.cwd();
+  const workspaceViewSource = fs.readFileSync(path.join(sourceRoot, "src", "workspaceView.ts"), "utf8");
+
+  assert.match(workspaceViewSource, /cls: "mindmap-heatmap-hit"/);
+  assert.match(workspaceViewSource, /marker\.addClass\("is-selected"\)/);
+  assert.match(workspaceViewSource, /cls: "mindmap-heatmap-line"/);
+  assert.match(workspaceViewSource, /line\.addClass\(`is-\$\{metric\.key\}`\)/);
+  assert.match(workspaceViewSource, /cls: "mindmap-heatmap-point"/);
+  assert.match(workspaceViewSource, /point\.addClass\(`is-\$\{metric\.key\}`\)/);
+  assert.doesNotMatch(workspaceViewSource, /cls: `mindmap-heatmap-(?:hit|line|point)[^`]*\s+is-/);
+});
+
 void test("open mindmap command docks into the existing right sidebar tab group", () => {
   const sourceRoot = process.cwd();
   const mainSource = fs.readFileSync(path.join(sourceRoot, "src", "main.ts"), "utf8");
