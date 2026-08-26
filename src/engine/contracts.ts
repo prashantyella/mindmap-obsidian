@@ -430,6 +430,10 @@ export interface QueueJobV1 {
   pipelineVersion: number;
   phase: JobPhase;
   idempotencyKey: string;
+  /** Durable bulk-ledger ownership. Present only on process-note children. */
+  batchId?: string;
+  /** Stable slot in a bulk ledger; survives coalescing and replacement. */
+  batchItemId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -619,6 +623,15 @@ export function parseQueueJobV1(value: unknown): QueueJobV1 {
   }
   const phase = value.phase as JobPhase;
   const idempotencyKey = assertIdentifier(value.idempotencyKey, "idempotencyKey", contractName);
+  let batchId: string | undefined;
+  let batchItemId: string | undefined;
+  if (value.batchId !== undefined || value.batchItemId !== undefined) {
+    if (value.batchId === undefined || (kind === "process-note" && value.batchItemId === undefined) || (kind !== "process-note" && value.batchItemId !== undefined)) {
+      throw new EngineError("CONTRACT_SHAPE_INVALID", `${contractName}.batch fields are invalid for this job kind.`, { contractName });
+    }
+    batchId = assertIdentifier(value.batchId, "batchId", contractName);
+    if (value.batchItemId !== undefined) { assertHex64(value.batchItemId, "batchItemId", contractName); batchItemId = value.batchItemId; }
+  }
   assertIsoTimestamp(value.createdAt, "createdAt", contractName);
   assertIsoTimestamp(value.updatedAt, "updatedAt", contractName);
 
@@ -638,6 +651,8 @@ export function parseQueueJobV1(value: unknown): QueueJobV1 {
     pipelineVersion: value.pipelineVersion,
     phase,
     idempotencyKey,
+    batchId,
+    batchItemId,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
   };

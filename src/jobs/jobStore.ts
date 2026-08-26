@@ -10,6 +10,7 @@ import {
   MAX_STORE_SERIALIZED_BYTES,
   parseJobStoreDocumentV1,
   type JobStoreDocumentV1,
+  type BulkBatchV1,
   type PersistedJobV1,
   type ProviderPauseV1,
   type ScheduledOccurrenceRecordV1,
@@ -87,7 +88,7 @@ export class JobStore {
   private async loadOrInit(): Promise<JobStoreDocumentV1> {
     if (this.cached) return this.cached;
     const loaded = await this.store.load();
-    const doc = loaded ?? { schemaVersion: 1 as const, jobs: [], providerPause: { active: false }, scheduledOccurrences: [] };
+    const doc = loaded ?? { schemaVersion: 1 as const, jobs: [], providerPause: { active: false }, scheduledOccurrences: [], bulkBatches: [] };
     this.cached = deepFreeze(doc);
     return this.cached;
   }
@@ -157,6 +158,74 @@ export class JobStore {
   async getProviderPause(): Promise<ProviderPauseV1> {
     const doc = await this.loadOrInit();
     return doc.providerPause;
+  }
+
+  async getBulkBatches(): Promise<readonly BulkBatchV1[]> {
+    return (await this.loadOrInit()).bulkBatches;
+  }
+
+  /** Atomically creates the one active batch and its root job. */
+  createBulkBatch(batch: BulkBatchV1, root: PersistedJobV1, occurrenceId?: string): Promise<PersistedJobV1> {
+    return this.mutate((doc) => {
+      const existingOccurrence = occurrenceId === undefined ? undefined : doc.scheduledOccurrences.find((entry) => entry.occurrenceId === occurrenceId);
+      if (existingOccurrence) return { doc, resultOf: (verified) => verified.jobs.find((entry) => entry.job.jobId === existingOccurrence.jobId)! };
+      if (doc.bulkBatches.some((entry) => entry.status === "active") || doc.jobs.some((entry) => (entry.job.kind === "scope-refresh" || entry.job.kind === "rebuild-index") && !isTerminalJobStatus(entry.status))) {
+        throw new EngineError("BULK_BATCH_ACTIVE", "A bulk batch is already active.", {});
+      }
+      if (doc.jobs.some((entry) => entry.job.jobId === root.job.jobId)) throw new EngineError("JOB_SHAPE_INVALID", "Duplicate bulk root job id.", {});
+      const pruned = this.pruneForCap(doc, 1);
+      const occurrence = occurrenceId === undefined ? pruned.scheduledOccurrences : this.withinOccurrenceCap([...pruned.scheduledOccurrences, { schemaVersion: 1, occurrenceId, idempotencyKey: root.job.idempotencyKey, jobId: root.job.jobId, acknowledged: false, createdAt: root.job.createdAt }]);
+      return { doc: { ...doc, jobs: [...pruned.jobs, root], scheduledOccurrences: occurrence, bulkBatches: this.pruneBatches([...doc.bulkBatches, batch]) }, resultOf: (verified) => verified.jobs.find((job) => job.job.jobId === root.job.jobId)! };
+    });
+  }
+
+  /** Atomically adopts a process-note job into the active batch, coalescing when possible. */
+  appendOrAdoptBatchChild(batchId: string, job: PersistedJobV1): Promise<PersistedJobV1 | null> {
+    return this.mutate((doc) => {
+      const batch = doc.bulkBatches.find((entry) => entry.batchId === batchId && entry.status === "active");
+      if (!batch) throw new EngineError("JOB_NOT_FOUND", "No active bulk batch.", {});
+      const itemId = job.job.batchItemId!;
+      const already = batch.items.find((item) => item.batchItemId === itemId);
+      if (already) {
+        const current = doc.jobs.find((entry) => entry.job.jobId === already.jobId);
+        if (!current || current.job.idempotencyKey === job.job.idempotencyKey) return { doc, resultOf: (verified) => verified.jobs.find((entry) => entry.job.jobId === already.jobId) ?? null };
+        // Source-change replacement occupies the same stable item slot. The old job remains
+        // durable until its caller atomically marks it obsolete; only the ledger pointer moves.
+        const pruned = this.pruneForCap(doc, 1, new Set([current.job.jobId]));
+        const jobs = [...pruned.jobs, job];
+        const bulkBatches = doc.bulkBatches.map((entry) => entry.batchId === batchId ? { ...entry, updatedAt: job.job.updatedAt > entry.updatedAt ? job.job.updatedAt : entry.updatedAt, items: entry.items.map((item) => item.batchItemId === itemId ? { ...item, jobId: job.job.jobId, status: job.status } : item) } : entry);
+        return { doc: { ...doc, jobs, scheduledOccurrences: pruned.scheduledOccurrences, bulkBatches }, resultOf: (verified) => verified.jobs.find((entry) => entry.job.jobId === job.job.jobId)! };
+      }
+      const existing = doc.jobs.find((entry) => entry.job.idempotencyKey === job.job.idempotencyKey && !isTerminalJobStatus(entry.status));
+      const child = existing ? { ...existing, job: { ...existing.job, batchId, batchItemId: itemId } } : job;
+      const pruned = existing ? undefined : this.pruneForCap(doc, 1);
+      const jobs = existing ? doc.jobs.map((entry) => entry.job.jobId === child.job.jobId ? child : entry) : [...pruned!.jobs, child];
+      const batches = doc.bulkBatches.map((entry) => entry.batchId === batchId ? { ...entry, updatedAt: job.job.updatedAt > entry.updatedAt ? job.job.updatedAt : entry.updatedAt, items: [...entry.items, { batchItemId: itemId, jobId: child.job.jobId, status: child.status }] } : entry);
+      return { doc: { ...doc, jobs, scheduledOccurrences: pruned?.scheduledOccurrences ?? doc.scheduledOccurrences, bulkBatches: batches }, resultOf: (verified) => verified.jobs.find((entry) => entry.job.jobId === child.job.jobId) ?? null };
+    });
+  }
+
+  private pruneBatches(batches: BulkBatchV1[]): BulkBatchV1[] {
+    const active = batches.filter((entry) => entry.status === "active");
+    const latestTerminal = batches.filter((entry) => entry.status !== "active").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+    return latestTerminal === undefined ? active : [...active, latestTerminal];
+  }
+
+  private syncBatches(doc: JobStoreDocumentV1, jobs: PersistedJobV1[]): BulkBatchV1[] {
+    return this.pruneBatches(doc.bulkBatches.map((batch) => {
+      const root = jobs.find((entry) => entry.job.jobId === batch.rootJobId);
+      const items = batch.items.map((item) => {
+        const child = jobs.find((entry) => entry.job.jobId === item.jobId);
+        return child ? { ...item, status: child.status } : item;
+      });
+      const discoveredTotal = root?.receipt?.kind === "scope" ? root.receipt.discoveredCount : batch.discoveredTotal;
+      if (root && batch.status === "active" && (root.status === "failed" || root.status === "cancelled")) {
+        return { ...batch, discoveredTotal, items, status: root.status, updatedAt: root.job.updatedAt > batch.updatedAt ? root.job.updatedAt : batch.updatedAt };
+      }
+      if (!root || batch.status !== "active" || discoveredTotal === undefined || items.length !== discoveredTotal || !isTerminalJobStatus(root.status) || items.some((item) => !isTerminalJobStatus(item.status))) return { ...batch, discoveredTotal, items };
+      const status = root.status === "cancelled" ? "cancelled" : root.status === "failed" ? "failed" : items.some((item) => item.status === "failed" || item.status === "cancelled") ? "completed-with-failures" : "completed";
+      return { ...batch, discoveredTotal, items, status, updatedAt: root.job.updatedAt > batch.updatedAt ? root.job.updatedAt : batch.updatedAt };
+    }));
   }
 
   setProviderPause(pause: ProviderPauseV1): Promise<void> {
@@ -257,7 +326,8 @@ export class JobStore {
     let jobs = [...doc.jobs];
     let scheduledOccurrences = doc.scheduledOccurrences;
     if (jobs.length + additionalJobs > MAX_PERSISTED_JOBS) {
-      const protectedJobIds = new Set([...this.jobIdsProtectedByPendingOccurrences(doc), ...extraProtectedJobIds]);
+      const activeBatchRoots = doc.bulkBatches.filter((batch) => batch.status === "active").map((batch) => batch.rootJobId);
+      const protectedJobIds = new Set([...this.jobIdsProtectedByPendingOccurrences(doc), ...activeBatchRoots, ...extraProtectedJobIds]);
       const terminal = jobs.filter((entry) => isTerminalJobStatus(entry.status) && !protectedJobIds.has(entry.job.jobId)).sort((a, b) => a.job.updatedAt.localeCompare(b.job.updatedAt));
       const nonTerminal = jobs.filter((entry) => !isTerminalJobStatus(entry.status) || protectedJobIds.has(entry.job.jobId));
       const keepTerminalCount = Math.max(0, terminal.length - (jobs.length + additionalJobs - MAX_PERSISTED_JOBS));
@@ -445,7 +515,7 @@ export class JobStore {
       }
       const jobs = [...doc.jobs];
       jobs[index] = next;
-      return { doc: { ...doc, jobs }, resultOf: (verified) => verified.jobs.find((entry) => entry.job.jobId === jobId)! };
+      return { doc: { ...doc, jobs, bulkBatches: this.syncBatches(doc, jobs) }, resultOf: (verified) => verified.jobs.find((entry) => entry.job.jobId === jobId)! };
     });
   }
 
@@ -515,7 +585,8 @@ export class JobStore {
           successor: verified.jobs.find((entry) => entry.job.jobId === existingId)!,
           coalesced: true,
         });
-        return { doc: { ...doc, jobs }, resultOf };
+        const bulkBatches = oldCurrent.job.batchId === undefined ? this.syncBatches(doc, jobs) : this.syncBatches({ ...doc, bulkBatches: doc.bulkBatches.map((batch) => batch.batchId !== oldCurrent.job.batchId ? batch : oldCurrent.job.batchItemId === undefined ? { ...batch, rootJobId: existingId } : { ...batch, items: batch.items.map((item) => item.batchItemId === oldCurrent.job.batchItemId ? { ...item, jobId: existingId, status: jobs[existingIndex].status } : item) }) }, jobs);
+        return { doc: { ...doc, jobs, bulkBatches }, resultOf };
       }
       if (jobs.some((entry) => entry.job.jobId === successor.job.jobId)) {
         throw new EngineError("JOB_SHAPE_INVALID", `Duplicate jobId "${successor.job.jobId}".`, {});
@@ -534,7 +605,8 @@ export class JobStore {
         successor: verified.jobs.find((entry) => entry.job.jobId === newSuccessorId)!,
         coalesced: false,
       });
-      return { doc: { ...doc, jobs, scheduledOccurrences }, resultOf };
+      const bulkBatches = oldCurrent.job.batchId === undefined ? this.syncBatches(doc, jobs) : this.syncBatches({ ...doc, bulkBatches: doc.bulkBatches.map((batch) => batch.batchId !== oldCurrent.job.batchId ? batch : oldCurrent.job.batchItemId === undefined ? { ...batch, rootJobId: newSuccessorId } : { ...batch, items: batch.items.map((item) => item.batchItemId === oldCurrent.job.batchItemId ? { ...item, jobId: newSuccessorId, status: successor.status } : item) }) }, jobs);
+      return { doc: { ...doc, jobs, scheduledOccurrences, bulkBatches }, resultOf };
     });
   }
 
@@ -559,7 +631,7 @@ export class JobStore {
         recovered += 1;
         return { ...entry, status: "queued" as const };
       });
-      return { doc: { ...doc, jobs }, resultOf: () => recovered };
+      return { doc: { ...doc, jobs, bulkBatches: this.syncBatches(doc, jobs) }, resultOf: () => recovered };
     });
   }
 }

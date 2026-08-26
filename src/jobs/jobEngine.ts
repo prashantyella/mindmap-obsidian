@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   computeJobIdempotencyKey,
@@ -22,6 +22,7 @@ import {
   toFailureCode,
   type JobReceiptV1,
   type PersistedJobV1,
+  type BulkBatchV1,
 } from "./jobTypes";
 
 /**
@@ -142,6 +143,10 @@ export type SubmitJobInput =
   | { trigger: JobTrigger; kind: "process-note"; identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number }
   | { trigger: JobTrigger; kind: "reading-sync" | "scope-refresh"; scopeId: string; pipelineVersion: number }
   | { trigger: JobTrigger; kind: "rebuild-index" | "migrate-index"; pipelineVersion: number };
+
+type BulkSubmitInput =
+  | { trigger: JobTrigger; kind: "scope-refresh"; scopeId: string; pipelineVersion: number }
+  | { trigger: JobTrigger; kind: "rebuild-index"; pipelineVersion: number };
 
 function buildTarget(input: SubmitJobInput): JobTargetV1 {
   if (input.kind === "process-note") return { schemaVersion: 1, kind: "note", identity: input.identity };
@@ -280,6 +285,8 @@ export class JobEngine {
     if (this.disposed) {
       throw new EngineError("JOB_SHAPE_INVALID", "Cannot submit a job: JobEngine has been disposed.", {});
     }
+    if (input.kind === "scope-refresh") return this.submitBulk(input as BulkSubmitInput);
+    if (input.kind === "rebuild-index") return this.submitBulk(input as BulkSubmitInput);
     const target = buildTarget(input);
     const sourceHash = input.kind === "process-note" ? input.sourceHash : undefined;
     const embeddingModel = input.kind === "process-note" ? input.embeddingModel : undefined;
@@ -302,6 +309,30 @@ export class JobEngine {
     };
     const persisted: PersistedJobV1 = { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false };
     const { job: result } = await this.store.appendOrCoalesce(persisted);
+    this.kick();
+    return result;
+  }
+
+  private async submitBulk(input: BulkSubmitInput, occurrenceId?: string): Promise<PersistedJobV1> {
+    const target = buildTarget(input);
+    const nowIso = this.nowIso();
+    const rootJobId = randomUUID();
+    const batchId = randomUUID();
+    const job: QueueJobV1 = { schemaVersion: 1, jobId: rootJobId, trigger: input.trigger, kind: input.kind, target, pipelineVersion: input.pipelineVersion, phase: JOB_KIND_PHASES[input.kind][0], idempotencyKey: computeJobIdempotencyKey(input.kind, target, input.pipelineVersion), batchId, createdAt: nowIso, updatedAt: nowIso };
+    const root: PersistedJobV1 = { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false };
+    const batch: BulkBatchV1 = { schemaVersion: 1, batchId, rootJobId, trigger: input.trigger, scopeId: target.kind === "scope" ? target.scopeId : undefined, occurrenceId, status: "active", discoveredTotal: target.kind === "global" ? 0 : undefined, createdAt: nowIso, updatedAt: nowIso, items: [] };
+    const result = await this.store.createBulkBatch(batch, root, occurrenceId);
+    this.kick();
+    return result;
+  }
+
+  /** Stable item identity is derived from the batch and stable discovered-note identity. */
+  async submitBulkChild(batchId: string, input: Extract<SubmitJobInput, { kind: "process-note" }> & { batchItemId?: string }): Promise<PersistedJobV1 | null> {
+    const target = buildTarget(input);
+    const nowIso = this.nowIso();
+    const batchItemId = input.batchItemId ?? createHash("sha256").update(JSON.stringify({ batchId, identity: input.identity.kind === "path" ? input.identity.canonicalPath : input.identity.appleAnnotationId })).digest("hex");
+    const job: QueueJobV1 = { schemaVersion: 1, jobId: randomUUID(), trigger: input.trigger, kind: "process-note", target, sourceHash: input.sourceHash, embeddingModel: input.embeddingModel, pipelineVersion: input.pipelineVersion, phase: "discover", idempotencyKey: computeJobIdempotencyKey("process-note", target, input.pipelineVersion, input.sourceHash, input.embeddingModel), batchId, batchItemId, createdAt: nowIso, updatedAt: nowIso };
+    const result = await this.store.appendOrAdoptBatchChild(batchId, { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false });
     this.kick();
     return result;
   }
@@ -332,6 +363,9 @@ export class JobEngine {
       throw new EngineError("JOB_SHAPE_INVALID", 'submitScheduledOccurrence requires input.trigger === "scheduled".', {});
     }
     assertScheduledOccurrenceId(occurrenceId);
+
+    if (input.kind === "scope-refresh") return this.submitBulk(input as BulkSubmitInput, occurrenceId);
+    if (input.kind === "rebuild-index") return this.submitBulk(input as BulkSubmitInput, occurrenceId);
 
     const target = buildTarget(input);
     const sourceHash = input.kind === "process-note" ? input.sourceHash : undefined;
@@ -675,6 +709,8 @@ export class JobEngine {
           pipelineVersion: entry.job.pipelineVersion,
           phase: JOB_KIND_PHASES[entry.job.kind][0],
           idempotencyKey: entry.job.idempotencyKey,
+          batchId: entry.job.batchId,
+          batchItemId: entry.job.batchItemId,
           createdAt: nowIso,
           updatedAt: nowIso,
         };

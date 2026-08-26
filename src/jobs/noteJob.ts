@@ -81,7 +81,7 @@ export interface UpsertNoteOverlaySeam {
  * detected at more than one phase) safe.
  */
 export interface NoteReplacementSeam {
-  enqueueReplacement(input: { identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number }): Promise<void>;
+  enqueueReplacement(input: { identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number; batchId?: string; batchItemId?: string }): Promise<void>;
 }
 
 export interface NoteJobDeps {
@@ -105,6 +105,8 @@ interface NoteJobMemory {
   resolvedIdentity?: NoteIdentityV1;
   /** Set ONLY after `NoteReplacementSeam.enqueueReplacement` has actually SUCCEEDED (never before -- final-closure requirement 6) -- guards it to at most one successful call per job, even if source staleness is independently detected at more than one phase-step. */
   replacementEnqueued?: boolean;
+  batchId?: string;
+  batchItemId?: string;
 }
 
 /** Bounds the in-memory (never persisted) per-job scratch cache -- oldest entry evicted once the cap is reached, so a pile-up of jobs that never reach a terminal outcome cannot grow this unboundedly. */
@@ -213,6 +215,9 @@ export class NoteJobRunner implements JobPhaseRunner {
       throw new EngineError("JOB_SHAPE_INVALID", "process-note job is missing sourceHash/embeddingModel.", {});
     }
     const jobId = persisted.job.jobId;
+    const memory = this.memoryFor(jobId);
+    memory.batchId = persisted.job.batchId;
+    memory.batchItemId = persisted.job.batchItemId;
     const pipelineVersion = persisted.job.pipelineVersion;
 
     try {
@@ -272,7 +277,8 @@ export class NoteJobRunner implements JobPhaseRunner {
     const mem = this.memoryFor(jobId);
     if (mem.replacementEnqueued) return undefined;
     try {
-      await this.deps.replacement.enqueueReplacement({ identity, sourceHash, embeddingModel, pipelineVersion });
+      const memory = this.memoryFor(jobId);
+      await this.deps.replacement.enqueueReplacement({ identity, sourceHash, embeddingModel, pipelineVersion, batchId: memory.batchId, batchItemId: memory.batchItemId });
     } catch (error) {
       return { type: "retry", failureCode: toFailureCode(error) };
     }

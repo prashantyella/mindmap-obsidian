@@ -279,13 +279,18 @@ export function createDeferredScopeImportSeam(): ScopeImportSeam {
 
 export interface JobSubmitter {
   submit(input: { trigger: JobTrigger; kind: "process-note"; identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number }): Promise<unknown>;
+  submitBulkChild?(batchId: string, input: { trigger: JobTrigger; kind: "process-note"; identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number; batchItemId?: string }): Promise<unknown>;
 }
 
 /** Submits (or coalesces onto) one `"process-note"` job per discovered item, backed by the real `JobEngine.submit` -- see `ScopeEnqueueSeam`'s own doc comment on why re-submitting an already-queued identical item is always safe. */
 export function createProductionScopeEnqueueSeam(jobEngine: JobSubmitter, trigger: JobTrigger): ScopeEnqueueSeam {
   return {
-    async enqueueProcessNote(item: ScopeDiscoveryItem, pipelineVersion: number): Promise<void> {
-      await jobEngine.submit({ trigger, kind: "process-note", identity: item.identity, sourceHash: item.sourceHash, embeddingModel: item.embeddingModel, pipelineVersion });
+    async enqueueProcessNote(item: ScopeDiscoveryItem, pipelineVersion: number, _signal: AbortSignal, batchId?: string): Promise<void> {
+      const input = { trigger, kind: "process-note" as const, identity: item.identity, sourceHash: item.sourceHash, embeddingModel: item.embeddingModel, pipelineVersion };
+      if (batchId !== undefined) {
+        if (!jobEngine.submitBulkChild) throw new EngineError("JOB_SHAPE_INVALID", "Batch child submission requires submitBulkChild.", {});
+        await jobEngine.submitBulkChild(batchId, input);
+      } else await jobEngine.submit(input);
     },
   };
 }
@@ -293,8 +298,12 @@ export function createProductionScopeEnqueueSeam(jobEngine: JobSubmitter, trigge
 /** Backed by the real `JobEngine.submit` -- see `NoteReplacementSeam`'s own doc comment (Checkpoint 7 final-closure requirement 6: a source-change-in-flight must always produce a real replacement job, never a swallowed edit). */
 export function createProductionNoteReplacementSeam(jobEngine: JobSubmitter, trigger: JobTrigger): NoteReplacementSeam {
   return {
-    async enqueueReplacement(input: { identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number }): Promise<void> {
-      await jobEngine.submit({ trigger, kind: "process-note", identity: input.identity, sourceHash: input.sourceHash, embeddingModel: input.embeddingModel, pipelineVersion: input.pipelineVersion });
+    async enqueueReplacement(input: { identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number; batchId?: string; batchItemId?: string }): Promise<void> {
+      const replacement = { trigger, kind: "process-note" as const, identity: input.identity, sourceHash: input.sourceHash, embeddingModel: input.embeddingModel, pipelineVersion: input.pipelineVersion, ...(input.batchItemId === undefined ? {} : { batchItemId: input.batchItemId }) };
+      if (input.batchId !== undefined) {
+        if (!jobEngine.submitBulkChild) throw new EngineError("JOB_SHAPE_INVALID", "Batch replacement submission requires submitBulkChild.", {});
+        await jobEngine.submitBulkChild(input.batchId, replacement);
+      } else await jobEngine.submit(replacement);
     },
   };
 }

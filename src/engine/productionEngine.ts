@@ -272,6 +272,10 @@ export class ProductionEngine {
         if (!jobEngineRef.current) throw new Error("ProductionEngine.jobEngine used before construction completed.");
         return jobEngineRef.current.submit(input);
       },
+      submitBulkChild: (batchId: string, input: Parameters<JobEngine["submitBulkChild"]>[1]) => {
+        if (!jobEngineRef.current) throw new Error("ProductionEngine.jobEngine used before construction completed.");
+        return jobEngineRef.current.submitBulkChild(batchId, input);
+      },
       requestCancel: (jobId: string) => {
         if (!jobEngineRef.current) throw new Error("ProductionEngine.jobEngine used before construction completed.");
         return jobEngineRef.current.requestCancel(jobId);

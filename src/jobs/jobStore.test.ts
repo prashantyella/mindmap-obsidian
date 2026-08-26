@@ -6,7 +6,7 @@ import type { AtomicStoreFs } from "../engine/atomicStore";
 import { canonicalizePath, computeJobIdempotencyKey, stableNoteIdentity, type QueueJobV1 } from "../engine/contracts";
 import { isEngineError } from "../engine/errors";
 import { JobStore } from "./jobStore";
-import type { PersistedJobV1 } from "./jobTypes";
+import type { BulkBatchV1, PersistedJobV1 } from "./jobTypes";
 
 type FaultPoint = "writeFile" | "fsync" | "rename" | "readFile" | "unlink" | "fsyncDir";
 
@@ -106,6 +106,33 @@ function buildPersisted(overrides: Partial<PersistedJobV1> & { path?: string; tr
     receipt: overrides.receipt,
   };
 }
+
+function buildBulkRoot(): { root: PersistedJobV1; batch: BulkBatchV1 } {
+  const target = { schemaVersion: 1 as const, kind: "scope" as const, scopeId: "all" };
+  const batchId = "batch-root";
+  const job = { schemaVersion: 1 as const, jobId: "bulk-root", trigger: "manual" as const, kind: "scope-refresh" as const, target, pipelineVersion: 1, phase: "discover" as const, idempotencyKey: computeJobIdempotencyKey("scope-refresh", target, 1), batchId, createdAt: "2026-08-23T00:00:00.000Z", updatedAt: "2026-08-23T00:00:00.000Z" };
+  return { root: { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false }, batch: { schemaVersion: 1, batchId, rootJobId: job.jobId, trigger: "manual", scopeId: "all", status: "active", createdAt: job.createdAt, updatedAt: job.updatedAt, items: [] } };
+}
+
+void test("createBulkBatch atomically links its scheduled occurrence to its ledger root", async () => {
+  const store = new JobStore(new FakeFs(), "/root");
+  const { root, batch } = buildBulkRoot();
+  const occurrenceId = "a".repeat(64);
+  await store.createBulkBatch({ ...batch, trigger: "scheduled", occurrenceId }, { ...root, job: { ...root.job, trigger: "scheduled" } }, occurrenceId);
+  assert.equal((await store.getScheduledOccurrence(occurrenceId))?.jobId, root.job.jobId);
+  assert.equal((await store.getBulkBatches())[0]?.rootJobId, root.job.jobId);
+});
+
+void test("superseding a batched root moves the active batch root pointer atomically", async () => {
+  const store = new JobStore(new FakeFs(), "/root");
+  const { root, batch } = buildBulkRoot();
+  await store.createBulkBatch(batch, root);
+  const successor: PersistedJobV1 = { ...root, job: { ...root.job, jobId: "bulk-successor", phase: "discover", createdAt: "2026-08-23T00:01:00.000Z", updatedAt: "2026-08-23T00:01:00.000Z" }, status: "queued", attempt: 0, cancelRequested: false };
+  await store.supersedeWithSuccessor(root.job.jobId, (current) => ({ ...current, status: "cancelled", lastFailureCode: "SCOPE_SUPERSEDED", lastFailureClass: "terminal" }), successor);
+  const active = (await store.getBulkBatches())[0]!;
+  assert.equal(active.status, "active");
+  assert.equal(active.rootJobId, successor.job.jobId);
+});
 
 void test("appendJob then list returns the job in insertion order", async () => {
   const fs = new FakeFs();
