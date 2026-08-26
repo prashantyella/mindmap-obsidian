@@ -184,7 +184,8 @@ export class JobStore {
     return this.mutate((doc) => {
       const batch = doc.bulkBatches.find((entry) => entry.batchId === batchId && entry.status === "active");
       if (!batch) throw new EngineError("JOB_NOT_FOUND", "No active bulk batch.", {});
-      const itemId = job.job.batchItemId!;
+      if (job.job.kind !== "process-note" || job.job.batchId !== batchId || job.job.batchItemId === undefined) throw new EngineError("JOB_SHAPE_INVALID", "Batch child must carry the active batch id and item id.", {});
+      const itemId = job.job.batchItemId;
       const already = batch.items.find((item) => item.batchItemId === itemId);
       if (already) {
         const current = doc.jobs.find((entry) => entry.job.jobId === already.jobId);
@@ -197,6 +198,7 @@ export class JobStore {
         return { doc: { ...doc, jobs, scheduledOccurrences: pruned.scheduledOccurrences, bulkBatches }, resultOf: (verified) => verified.jobs.find((entry) => entry.job.jobId === job.job.jobId)! };
       }
       const existing = doc.jobs.find((entry) => entry.job.idempotencyKey === job.job.idempotencyKey && !isTerminalJobStatus(entry.status));
+      if (existing && existing.job.batchId !== undefined && existing.job.batchId !== batchId) throw new EngineError("BULK_BATCH_ACTIVE", "The child job belongs to another active batch.", {});
       const child = existing ? { ...existing, job: { ...existing.job, batchId, batchItemId: itemId } } : job;
       const pruned = existing ? undefined : this.pruneForCap(doc, 1);
       const jobs = existing ? doc.jobs.map((entry) => entry.job.jobId === child.job.jobId ? child : entry) : [...pruned!.jobs, child];
@@ -228,6 +230,10 @@ export class JobStore {
     }));
   }
 
+  private repointBatch(doc: JobStoreDocumentV1, batchId: string, oldItemId: string | undefined, newJobId: string): BulkBatchV1[] {
+    return doc.bulkBatches.map((batch) => batch.batchId !== batchId ? batch : oldItemId === undefined ? { ...batch, rootJobId: newJobId } : { ...batch, items: batch.items.map((item) => item.batchItemId === oldItemId ? { ...item, jobId: newJobId } : item) });
+  }
+
   setProviderPause(pause: ProviderPauseV1): Promise<void> {
     return this.mutate((doc) => ({ doc: { ...doc, providerPause: deepClone(pause) }, resultOf: () => undefined }));
   }
@@ -248,7 +254,7 @@ export class JobStore {
         throw new EngineError("JOB_SHAPE_INVALID", `Duplicate active idempotencyKey "${job.job.idempotencyKey}".`, {});
       }
       const { jobs, scheduledOccurrences } = this.pruneForCap(doc, 1);
-      return { doc: { ...doc, jobs: [...jobs, job], scheduledOccurrences }, resultOf: () => undefined };
+      return { doc: { ...doc, jobs: [...jobs, job], scheduledOccurrences, bulkBatches: this.pruneBatches(doc.bulkBatches) }, resultOf: () => undefined };
     });
   }
 
@@ -292,7 +298,7 @@ export class JobStore {
         job: verified.jobs.find((entry) => entry.job.jobId === newJobId)!,
         coalesced: false,
       });
-      return { doc: { ...doc, jobs: [...jobs, job], scheduledOccurrences }, resultOf };
+      return { doc: { ...doc, jobs: [...jobs, job], scheduledOccurrences, bulkBatches: this.pruneBatches(doc.bulkBatches) }, resultOf };
     });
   }
 
@@ -326,7 +332,8 @@ export class JobStore {
     let jobs = [...doc.jobs];
     let scheduledOccurrences = doc.scheduledOccurrences;
     if (jobs.length + additionalJobs > MAX_PERSISTED_JOBS) {
-      const activeBatchRoots = doc.bulkBatches.filter((batch) => batch.status === "active").map((batch) => batch.rootJobId);
+      const retainedBatches = this.pruneBatches(doc.bulkBatches);
+      const activeBatchRoots = retainedBatches.map((batch) => batch.rootJobId);
       const protectedJobIds = new Set([...this.jobIdsProtectedByPendingOccurrences(doc), ...activeBatchRoots, ...extraProtectedJobIds]);
       const terminal = jobs.filter((entry) => isTerminalJobStatus(entry.status) && !protectedJobIds.has(entry.job.jobId)).sort((a, b) => a.job.updatedAt.localeCompare(b.job.updatedAt));
       const nonTerminal = jobs.filter((entry) => !isTerminalJobStatus(entry.status) || protectedJobIds.has(entry.job.jobId));
@@ -439,7 +446,7 @@ export class JobStore {
         job: verified.jobs.find((entry) => entry.job.jobId === newJobId)!,
         linked: "new",
       });
-      return { doc: { ...doc, jobs: [...jobs, job], scheduledOccurrences }, resultOf };
+      return { doc: { ...doc, jobs: [...jobs, job], scheduledOccurrences, bulkBatches: this.pruneBatches(doc.bulkBatches) }, resultOf };
     });
   }
 
@@ -585,7 +592,7 @@ export class JobStore {
           successor: verified.jobs.find((entry) => entry.job.jobId === existingId)!,
           coalesced: true,
         });
-        const bulkBatches = oldCurrent.job.batchId === undefined ? this.syncBatches(doc, jobs) : this.syncBatches({ ...doc, bulkBatches: doc.bulkBatches.map((batch) => batch.batchId !== oldCurrent.job.batchId ? batch : oldCurrent.job.batchItemId === undefined ? { ...batch, rootJobId: existingId } : { ...batch, items: batch.items.map((item) => item.batchItemId === oldCurrent.job.batchItemId ? { ...item, jobId: existingId, status: jobs[existingIndex].status } : item) }) }, jobs);
+        const bulkBatches = oldCurrent.job.batchId === undefined ? this.syncBatches(doc, jobs) : this.syncBatches({ ...doc, bulkBatches: this.repointBatch(doc, oldCurrent.job.batchId, oldCurrent.job.batchItemId, existingId) }, jobs);
         return { doc: { ...doc, jobs, bulkBatches }, resultOf };
       }
       if (jobs.some((entry) => entry.job.jobId === successor.job.jobId)) {
@@ -605,7 +612,7 @@ export class JobStore {
         successor: verified.jobs.find((entry) => entry.job.jobId === newSuccessorId)!,
         coalesced: false,
       });
-      const bulkBatches = oldCurrent.job.batchId === undefined ? this.syncBatches(doc, jobs) : this.syncBatches({ ...doc, bulkBatches: doc.bulkBatches.map((batch) => batch.batchId !== oldCurrent.job.batchId ? batch : oldCurrent.job.batchItemId === undefined ? { ...batch, rootJobId: newSuccessorId } : { ...batch, items: batch.items.map((item) => item.batchItemId === oldCurrent.job.batchItemId ? { ...item, jobId: newSuccessorId, status: successor.status } : item) }) }, jobs);
+      const bulkBatches = oldCurrent.job.batchId === undefined ? this.syncBatches(doc, jobs) : this.syncBatches({ ...doc, bulkBatches: this.repointBatch(doc, oldCurrent.job.batchId, oldCurrent.job.batchItemId, newSuccessorId) }, jobs);
       return { doc: { ...doc, jobs, scheduledOccurrences, bulkBatches }, resultOf };
     });
   }

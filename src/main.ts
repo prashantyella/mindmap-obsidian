@@ -1904,6 +1904,10 @@ export default class MindmapPlugin extends Plugin {
    * as "quietly running Python again."
    */
   private async startProductionEngine(): Promise<void> {
+    this.unsubscribeActivity?.();
+    this.unsubscribeActivity = null;
+    this.engineActivity = null;
+    this.updateStatusBar();
     if (this.productionEngine) {
       await this.productionEngine.dispose();
       this.productionEngine = null;
@@ -1914,8 +1918,8 @@ export default class MindmapPlugin extends Plugin {
     try {
       const engine = new ProductionEngine(options);
       this.productionEngine = engine;
-      this.unsubscribeActivity?.();
       this.unsubscribeActivity = engine.subscribeActivity((snapshot) => {
+        if (this.productionEngine !== engine) return;
         this.engineActivity = snapshot;
         this.updateStatusBar();
       });
@@ -1924,6 +1928,10 @@ export default class MindmapPlugin extends Plugin {
       this.appendLog(`[production-engine] start() failed: ${error instanceof Error ? error.message : "unknown error"}`);
       await this.productionEngine?.dispose();
       this.productionEngine = null;
+      this.unsubscribeActivity?.();
+      this.unsubscribeActivity = null;
+      this.engineActivity = null;
+      this.updateStatusBar();
       this.productionEngineFailed = true;
       new Notice("The Mindmap TypeScript engine failed to start for this vault. Automated runs, preflight, and sidebar search are unavailable until this is resolved.", 12000);
     }

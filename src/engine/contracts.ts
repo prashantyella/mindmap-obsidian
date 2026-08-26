@@ -430,15 +430,18 @@ export interface QueueJobV1 {
   pipelineVersion: number;
   phase: JobPhase;
   idempotencyKey: string;
-  /** Durable bulk-ledger ownership. Present only on process-note children. */
+  /** Durable bulk-ledger ownership. Present on a bulk root or process-note child. */
   batchId?: string;
-  /** Stable slot in a bulk ledger; survives coalescing and replacement. */
+  /** Stable slot in a bulk ledger; present on process-note children and survives coalescing/replacement. */
   batchItemId?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-const JOB_TRIGGERS: readonly JobTrigger[] = ["manual", "reading", "scheduled", "startup"];
+// Adding a new JobTrigger requires a conscious bulk-ledger compatibility decision before it is
+// added here; trigger provenance and bulk overlap semantics must remain aligned.
+const JOB_TRIGGER_SET: Record<JobTrigger, true> = { manual: true, reading: true, scheduled: true, startup: true };
+export function isJobTrigger(value: unknown): value is JobTrigger { return typeof value === "string" && Object.prototype.hasOwnProperty.call(JOB_TRIGGER_SET, value); }
 const JOB_KINDS: readonly JobKind[] = ["process-note", "reading-sync", "scope-refresh", "rebuild-index", "migrate-index"];
 
 /** The single source of truth for which target shape each job kind requires. Kept in one place so the parser's compatibility check and any future job-construction code cannot drift apart. */
@@ -573,13 +576,13 @@ export function parseQueueJobV1(value: unknown): QueueJobV1 {
   assertPlainObject(value, contractName);
   assertSchemaVersion(value.schemaVersion, 1, contractName);
   const jobId = assertIdentifier(value.jobId, "jobId", contractName);
-  if (typeof value.trigger !== "string" || !JOB_TRIGGERS.includes(value.trigger as JobTrigger)) {
+  if (!isJobTrigger(value.trigger)) {
     throw new EngineError("CONTRACT_SHAPE_INVALID", `${contractName}.trigger is not a recognized job trigger.`, { contractName });
   }
   if (typeof value.kind !== "string" || !JOB_KINDS.includes(value.kind as JobKind)) {
     throw new EngineError("CONTRACT_SHAPE_INVALID", `${contractName}.kind is not a recognized job kind.`, { contractName });
   }
-  const trigger = value.trigger as JobTrigger;
+  const trigger = value.trigger;
   const kind = value.kind as JobKind;
   if (!JOB_TRIGGER_KINDS[trigger].includes(kind)) {
     throw new EngineError(

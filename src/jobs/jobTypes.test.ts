@@ -84,6 +84,16 @@ void test("bulk batch parser rejects malformed timestamps, root kinds, and item 
   assert.throws(() => parseJobStoreDocumentV1({ ...base, jobs: [{ schemaVersion: 1, job: note, status: "queued", attempt: 0, cancelRequested: false }], bulkBatches: [{ ...batch, createdAt: "2026-08-23T00:00:00.000Z" }] }), (error: unknown) => isEngineError(error) && error.code === "JOB_STORE_CORRUPT");
 });
 
+void test("strict trigger/status membership rejects prototype property names", () => {
+  for (const value of ["toString", "constructor", "__proto__"]) {
+    const triggerJob = JSON.parse(JSON.stringify({ schemaVersion: 1, job: { ...noteJob(), trigger: value }, status: "queued", attempt: 0, cancelRequested: false }));
+    assert.throws(() => parsePersistedJobV1(triggerJob), (error: unknown) => isEngineError(error));
+    const statusJob = JSON.parse(JSON.stringify({ schemaVersion: 1, job: noteJob(), status: value, attempt: 0, cancelRequested: false }));
+    assert.throws(() => parsePersistedJobV1(statusJob), (error: unknown) => isEngineError(error));
+    assert.throws(() => parseJobStoreDocumentV1({ schemaVersion: 1, jobs: [], providerPause: { active: false }, scheduledOccurrences: [], bulkBatches: [{ schemaVersion: 1, batchId: "b", rootJobId: "r", trigger: "manual", status: value, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", items: [] }] }), (error: unknown) => isEngineError(error));
+  }
+});
+
 void test("toFailureCode returns an EngineError's own code verbatim", () => {
   const error = new EngineError("EMBEDDING_TIMEOUT", "timed out", {});
   assert.equal(toFailureCode(error), "EMBEDDING_TIMEOUT");

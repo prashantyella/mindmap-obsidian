@@ -94,7 +94,8 @@ void test("bulk submission creates one atomic root/batch, rejects overlap, and a
 });
 
 void test("activity subscription emits active before a controlled runner releases and then settles idle", async () => {
-  const gate = new Promise<void>((resolve) => { (globalThis as { release?: () => void }).release = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
   const runner = new ScriptedRunner(async () => { await gate; return { type: "advance", nextPhase: "embed" }; });
   const { engine, store } = makeEngine({ "process-note": runner });
   const snapshots: string[] = [];
@@ -103,7 +104,7 @@ void test("activity subscription emits active before a controlled runner release
   const dispatch = engine.runOnce();
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(snapshots.includes("running"));
-  (globalThis as { release?: () => void }).release?.();
+  release();
   await dispatch;
   assert.equal(snapshots[snapshots.length - 1], "running");
   const jobs = await store.list();

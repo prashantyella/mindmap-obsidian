@@ -134,6 +134,34 @@ void test("superseding a batched root moves the active batch root pointer atomic
   assert.equal(active.rootJobId, successor.job.jobId);
 });
 
+void test("batch child adoption rejects missing ids and cross-batch active jobs", async () => {
+  const store = new JobStore(new FakeFs(), "/root");
+  const { root, batch } = buildBulkRoot();
+  await store.createBulkBatch(batch, root);
+  const childJob = { ...buildJob({ path: "Notes/child.md" }), batchId: batch.batchId };
+  const child: PersistedJobV1 = { schemaVersion: 1, job: childJob, status: "queued", attempt: 0, cancelRequested: false };
+  await assert.rejects(() => store.appendOrAdoptBatchChild(batch.batchId, child), { code: "JOB_SHAPE_INVALID" });
+  const itemId = "a".repeat(64);
+  const otherJob: PersistedJobV1 = { schemaVersion: 1, job: { ...buildJob({ path: "Notes/other.md" }), batchId: "other", batchItemId: itemId }, status: "queued", attempt: 0, cancelRequested: false };
+  await store.appendJob(otherJob);
+  await assert.rejects(() => store.appendOrAdoptBatchChild(batch.batchId, { ...otherJob, job: { ...otherJob.job, batchId: batch.batchId, batchItemId: itemId } }), { code: "BULK_BATCH_ACTIVE" });
+});
+
+void test("cap pressure protects the retained terminal batch root and acknowledged occurrence linkage", async () => {
+  const fs = new FakeFs();
+  const { root, batch } = buildBulkRoot();
+  const completedRoot: PersistedJobV1 = { ...root, status: "completed", job: { ...root.job, phase: "complete" }, receipt: { kind: "scope", discovered: true, discoveredCount: 0, discoveryFingerprint: "d".repeat(64), enqueuedCount: 0 } };
+  const completedBatch: BulkBatchV1 = { ...batch, status: "completed", discoveredTotal: 0, updatedAt: "2026-08-23T00:01:00.000Z" };
+  const occurrenceId = occurrenceIdFor("retained-batch");
+  const filler = Array.from({ length: 4999 }, (_, index) => ({ ...completedRoot, job: { ...completedRoot.job, jobId: `filler-${index}` } }));
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: { schemaVersion: 1, jobs: [completedRoot, ...filler], providerPause: { active: false }, scheduledOccurrences: [{ schemaVersion: 1, occurrenceId, idempotencyKey: completedRoot.job.idempotencyKey, jobId: completedRoot.job.jobId, acknowledged: true, createdAt: "2026-08-23T00:00:00.000Z", acknowledgedAt: "2026-08-23T00:01:00.000Z" }], bulkBatches: [completedBatch] } }));
+  const store = new JobStore(fs, "/root");
+  try { await store.appendJob({ ...buildPersisted({ path: "Notes/new.md" }), status: "queued" }); } catch (error) { assert.fail(JSON.stringify(error)); }
+  assert.ok(await store.getById(completedRoot.job.jobId));
+  assert.ok(await store.getScheduledOccurrence(occurrenceId));
+  assert.equal((await store.getBulkBatches())[0]?.rootJobId, completedRoot.job.jobId);
+});
+
 void test("appendJob then list returns the job in insertion order", async () => {
   const fs = new FakeFs();
   const store = new JobStore(fs, "/root");
