@@ -79,6 +79,67 @@ function makeEngine(runners: Partial<Record<"process-note" | "rebuild-index" | "
   return { store, engine, clock };
 }
 
+void test("bulk submission creates one atomic root/batch, rejects overlap, and adopts stable children", async () => {
+  const { engine, store } = makeEngine({});
+  const first = await engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "all", pipelineVersion: 1 });
+  await assert.rejects(() => engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "all", pipelineVersion: 1 }), (error: unknown) => (error as { code?: string }).code === "BULK_BATCH_ACTIVE");
+  const batch = (await store.getBulkBatches())[0]!;
+  assert.equal(batch.rootJobId, first.job.jobId);
+  const identity = stableNoteIdentity(canonicalizePath("Notes/A.md"));
+  const child = await engine.submitBulkChild(batch.batchId, { trigger: "manual", kind: "process-note", identity, sourceHash: "a".repeat(64), embeddingModel: "m", pipelineVersion: 1 });
+  const duplicate = await engine.submitBulkChild(batch.batchId, { trigger: "manual", kind: "process-note", identity, sourceHash: "a".repeat(64), embeddingModel: "m", pipelineVersion: 1 });
+  assert.ok(child); assert.ok(duplicate);
+  assert.equal(child.job.jobId, duplicate.job.jobId);
+  assert.equal((await store.getBulkBatches())[0]!.items.length, 1);
+});
+
+void test("activity subscription emits active before a controlled runner releases and then settles idle", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const runner = new ScriptedRunner(async () => { await gate; return { type: "advance", nextPhase: "embed" }; });
+  const { engine, store } = makeEngine({ "process-note": runner });
+  const snapshots: string[] = [];
+  const unsubscribe = engine.subscribeActivity((snapshot) => snapshots.push(snapshot.state));
+  await engine.submit({ trigger: "manual", kind: "process-note", identity: noteIdentity("Notes/A.md"), sourceHash: "a".repeat(64), embeddingModel: "m1", pipelineVersion: 1 });
+  const dispatch = engine.runOnce();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(snapshots.includes("running"));
+  release();
+  await dispatch;
+  assert.equal(snapshots[snapshots.length - 1], "running");
+  const jobs = await store.list();
+  await engine.requestCancel(jobs[0].job.jobId);
+  await engine.runOnce();
+  assert.equal(snapshots[snapshots.length - 1], "idle");
+  unsubscribe();
+});
+
+void test("bulk denominator comes only from the committed scope discovery receipt and blocks premature settlement", async () => {
+  const { engine, store } = makeEngine({});
+  const root = await engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "all", pipelineVersion: 1 });
+  await store.updateJob(root.job.jobId, (current) => ({ ...current, job: { ...current.job, phase: "enqueue" }, receipt: { kind: "scope", discovered: true, discoveredCount: 2, discoveryFingerprint: "b".repeat(64) } }));
+  assert.equal((await store.getBulkBatches())[0]!.discoveredTotal, 2);
+  await store.updateJob(root.job.jobId, (current) => ({ ...current, status: "completed", job: { ...current.job, phase: "complete" }, receipt: { kind: "scope", discovered: true, discoveredCount: 2, discoveryFingerprint: "b".repeat(64), enqueuedCount: 2 } }));
+  const batch = (await store.getBulkBatches())[0]!;
+  assert.equal(batch.status, "active");
+  assert.equal(batch.discoveredTotal, 2);
+});
+
+void test("failed bulk root settles before discovery without inventing a denominator", async () => {
+  const { engine, store } = makeEngine({});
+  const root = await engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "all", pipelineVersion: 1 });
+  await store.updateJob(root.job.jobId, (current) => ({ ...current, status: "failed", lastFailureCode: "JOB_SHAPE_INVALID", lastFailureClass: "terminal" }));
+  const batch = (await store.getBulkBatches())[0]!;
+  assert.equal(batch.status, "failed");
+  assert.equal(batch.discoveredTotal, undefined);
+});
+
+void test("a different scheduled occurrence is blocked by an active manual batch", async () => {
+  const { engine } = makeEngine({});
+  await engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "all", pipelineVersion: 1 });
+  await assert.rejects(() => engine.submitScheduledOccurrence({ trigger: "scheduled", kind: "scope-refresh", scopeId: "all", pipelineVersion: 1 }, "d".repeat(64)), (error: unknown) => (error as { code?: string }).code === "BULK_BATCH_ACTIVE");
+});
+
 function noteIdentity(path: string) {
   return stableNoteIdentity(canonicalizePath(path));
 }
@@ -742,13 +803,13 @@ void test("submitScheduledOccurrence: a DIFFERENT occurrenceId for the same work
   assert.equal((await store.list()).length, 2);
 });
 
-void test("submitScheduledOccurrence: a manual submit racing a scheduled occurrence for identical work links the occurrence to whichever job wins, never duplicating", async () => {
+void test("submitScheduledOccurrence blocks a new scheduled bulk run behind an active manual batch", async () => {
   const runner = new ScriptedRunner(linearAdvanceScript("rebuild-index"));
   const { engine, store } = makeEngine({ "rebuild-index": runner });
 
   const manual = await engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 });
-  const scheduled = await engine.submitScheduledOccurrence({ trigger: "scheduled", kind: "rebuild-index", pipelineVersion: 1 }, OCCURRENCE_ID_A);
-  assert.equal(scheduled.job.jobId, manual.job.jobId, "the occurrence links to the already-existing manual job rather than duplicating it");
+  assert.ok(manual);
+  await assert.rejects(() => engine.submitScheduledOccurrence({ trigger: "scheduled", kind: "rebuild-index", pipelineVersion: 1 }, OCCURRENCE_ID_A), { code: "BULK_BATCH_ACTIVE" });
   assert.equal((await store.list()).length, 1);
 });
 

@@ -4,6 +4,7 @@ import { DAILY_LAUNCH_AGENT_LABEL, WEEKLY_LAUNCH_AGENT_LABEL, type LaunchAgentHe
 import type { ActiveNoteEligibility } from "./individualNote";
 import type { ReadingActivity, ReadingMode } from "./readingMode";
 import type { AutomaticPauseReason } from "./automaticResearchPolicy";
+import type { EngineActivitySnapshot } from "./jobs/jobActivity";
 
 export interface StatusBarSchedulerDetail {
   label: string;
@@ -30,6 +31,7 @@ export interface StatusBarMenuState {
   pendingPaths: string[];
   running: boolean;
   runStatus: string | null;
+  activity?: EngineActivitySnapshot | null;
   preflightInProgress: boolean;
   preflightOk: boolean | null;
   scopeReady: boolean;
@@ -63,6 +65,7 @@ export interface StatusBarStateInput {
   };
   running: boolean;
   runStatus: string | null;
+  activity?: EngineActivitySnapshot | null;
   preflightInProgress: boolean;
   preflightOk: boolean | null;
   scopeReady: boolean;
@@ -135,6 +138,7 @@ export function buildStatusBarMenuState(input: StatusBarStateInput): StatusBarMe
     pendingPaths: [...new Set([...input.pending.current.items, ...input.pending.all.items])].slice(0, 5),
     running: input.running,
     runStatus: input.runStatus,
+    activity: input.activity ?? null,
     preflightInProgress: input.preflightInProgress,
     preflightOk: input.preflightOk,
     scopeReady: input.scopeReady,
@@ -199,24 +203,41 @@ export interface StatusBarPresentation {
 }
 
 const ACTIONABLE_HEALTH = new Set<LaunchAgentHealth>(["overdue", "failing"]);
+function batchFailureSummary(batch: NonNullable<EngineActivitySnapshot["latestFailureBatch"]>): string {
+  return batch.status === "completed-with-failures" ? `${batch.failed} failed` : batch.status === "failed" ? "root failed" : "cancelled";
+}
 
 export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBarPresentation {
+  const activity = state.activity;
   const schedulerActionable = state.schedulerHealth !== null && ACTIONABLE_HEALTH.has(state.schedulerHealth);
   const readingActionable = state.readingMode === "reading" && (state.readingActivity === "error" || Boolean(state.readingError));
   const automaticPaused = state.webResearchMode === "automatic-reading" && state.automaticResearchPauseReason !== null;
   const webResearchActionable = state.webResearchActivity === "error" || Boolean(state.webResearchError) || automaticPaused;
   const researchBusy = ["deriving", "searching", "writing"].includes(state.webResearchActivity);
-  const busy = state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy;
-  const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable || webResearchActionable;
-  const label = state.readingMode === "reading"
+  const busy = state.running || activity?.state === "running" || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy;
+  const readingBusy = state.readingMode === "reading" && (state.readingActivity === "syncing" || state.readingActivity === "processing");
+  const activeEngineWork = Boolean(activity?.batch) || Boolean(activity && (activity.queuedCount > 0 || activity.activeCount > 0));
+  const visibleLatestFailure = Boolean(activity?.latestFailureBatch) && !readingBusy && !researchBusy && !activeEngineWork && activity?.state !== "faulted" && activity?.state !== "paused";
+  const engineBusy = activeEngineWork && !readingBusy && !researchBusy;
+  const engineAlert = activity?.state === "faulted" || activity?.state === "paused" || visibleLatestFailure;
+  const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable || webResearchActionable || engineAlert;
+  const label = activity?.state === "faulted" ? "Mindmap · fault"
+    : activity?.state === "paused" ? "Mindmap · paused"
+    : readingBusy
     ? state.readingActivity === "syncing" || state.readingActivity === "processing"
       ? `Reading · ${state.readingActivity}`
       : `Reading · ${state.readingPending}`
     : researchBusy
     ? `Research · ${state.webResearchActivity}`
+    : activity?.batch?.total === undefined && activity?.batch ? "Mindmap · preparing"
+    : activity?.batch?.total !== undefined ? `Mindmap · ${activity.batch.processed}/${activity.batch.total}`
+    : activity && activity.queuedCount > 0 ? `Mindmap · ${activity.queuedCount} queued`
+    : visibleLatestFailure && activity?.latestFailureBatch ? `Mindmap · ${batchFailureSummary(activity.latestFailureBatch)}`
     : state.running
-    ? "Mindmap · running"
-    : state.preflightInProgress
+    ? `Mindmap · ${state.runStatus ?? "running"}`
+      : state.readingMode === "reading"
+        ? `Reading · ${state.readingPending}`
+      : state.preflightInProgress
       ? "Mindmap · checking"
       : state.pendingAvailable
         ? `Mindmap · ${state.currentPending}`
@@ -230,8 +251,13 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
         : state.currentPending > 0
           ? `${state.currentPending} pending note${state.currentPending === 1 ? "" : "s"}`
           : "ready";
-  const status = state.running ? state.runStatus ?? "running" : attention;
-  const ariaLabel = readingActionable
+  const status = activity?.state === "faulted" ? "fault" : activity?.state === "paused" ? "paused" : visibleLatestFailure && activity?.latestFailureBatch ? batchFailureSummary(activity.latestFailureBatch) : state.running ? state.runStatus ?? "running" : attention;
+  const engineDetail = activity ? `${activity.current?.phase ?? "idle"}${activity.current?.path ? `, ${activity.current.path}` : ""}, ${activity.queuedCount} queued${visibleLatestFailure && activity.latestFailureBatch ? `, ${batchFailureSummary(activity.latestFailureBatch)}` : ""}` : "";
+  const ariaLabel = engineAlert
+    ? `Mindmap engine ${status}. ${engineDetail}. Activate to open the Mindmap menu.`
+    : engineBusy
+      ? `Mindmap engine ${activity?.batch?.total !== undefined ? `${activity.batch.processed}/${activity.batch.total}` : activity?.batch ? "preparing" : `${activity?.queuedCount ?? 0} queued`}. ${engineDetail}. Activate to open the Mindmap menu.`
+    : readingActionable
     ? `Mindmap Reading Mode: ${state.readingError ?? state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
     : webResearchActionable
       ? `Mindmap Web Research: ${state.webResearchError ?? (automaticPaused ? `Automatic research paused: ${state.automaticResearchPauseReason}.` : state.webResearchActivity)} Activate to open the Mindmap menu.`
@@ -240,7 +266,7 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
       : state.readingMode === "reading"
         ? `Mindmap Reading Mode: ${state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
         : `Mindmap standard mode: ${status}. ${state.pendingAvailable ? `${state.currentPending} current-scope pending, ${state.allPending} all-scope pending.` : "Pending scan unavailable."} Activate to open the Mindmap menu.`;
-  const icon = readingActionable || webResearchActionable ? "triangle-alert" : busy ? "loader-circle" : state.readingMode === "reading" ? "book-open" : actionable ? "triangle-alert" : "orbit";
+  const icon = engineAlert || readingActionable || webResearchActionable ? "triangle-alert" : busy ? "loader-circle" : state.readingMode === "reading" ? "book-open" : actionable ? "triangle-alert" : "orbit";
   return {
     label,
     ariaLabel,
@@ -302,7 +328,11 @@ function buildTopRecoveryRow(state: StatusBarMenuState): StatusBarMenuItemDescri
 }
 
 export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMenuItemDescriptor[] {
+  const bulkBlocked = state.activity?.bulkBlocked ?? state.running;
   const researchBusy = ["deriving", "searching", "writing"].includes(state.webResearchActivity);
+  const readingBusy = state.readingMode === "reading" && (state.readingActivity === "syncing" || state.readingActivity === "processing");
+  const activeEngineWork = Boolean(state.activity?.batch) || Boolean(state.activity && (state.activity.queuedCount > 0 || state.activity.activeCount > 0));
+  const visibleLatestFailure = Boolean(state.activity?.latestFailureBatch) && !readingBusy && !researchBusy && !activeEngineWork && state.activity?.state !== "faulted" && state.activity?.state !== "paused";
   const automaticActive = state.webResearchMode === "automatic-reading";
   const automaticTransientPause = automaticActive && state.automaticResearchPauseReason !== null && state.automaticResearchPauseReason !== "daily-limit";
   const automaticPausedCopy = state.automaticResearchPauseReason === "daily-limit"
@@ -333,6 +363,11 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
   const items: StatusBarMenuItemDescriptor[] = [
     ...migrationItems,
     ...(topRecoveryRow ? [topRecoveryRow] : []),
+    ...(state.activity && (state.activity.state !== "idle" || visibleLatestFailure) ? [{
+      title: `Engine: ${state.activity.current?.phase ?? state.activity.state}${state.activity.current?.path ? ` · ${state.activity.current.path}` : ""} · ${state.activity.queuedCount} queued${visibleLatestFailure && state.activity.latestFailureBatch ? ` · ${batchFailureSummary(state.activity.latestFailureBatch)}` : ""}`,
+      icon: "info" as IconName,
+      disabled: true,
+    }] : []),
     { title: "Mode", label: true },
     {
       title: "Standard Mode",
@@ -350,21 +385,21 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     },
     { title: "Run", label: true },
     ...(state.activeNote.eligible ? [{
-      title: state.running ? "Run active note (Mindmap is already running.)" : "Run Mindmap for active note",
+      title: "Run Mindmap for active note",
       icon: "file-play" as IconName,
-      disabled: state.running || researchBusy || !state.scopeReady,
-      action: state.running ? undefined : "runActiveNote" as const,
+      disabled: researchBusy || !state.scopeReady,
+      action: "runActiveNote" as const,
     }] : []),
     {
       title: state.running ? `Run current scope${state.runStatus ? `: ${state.runStatus}` : ""}` : "Run current scope",
       icon: state.running ? "loader-circle" : "play",
-      disabled: state.running || researchBusy || !state.scopeReady,
-      action: state.running ? undefined : "runCurrent",
+      disabled: bulkBlocked || researchBusy || !state.scopeReady,
+      action: bulkBlocked ? undefined : "runCurrent",
     },
     ...(state.pendingAvailable && state.allPending > 0 ? [{
       title: `Process pending notes (${state.allPending})`,
       icon: "list-checks" as IconName,
-      disabled: state.running || researchBusy || !state.scopeReady,
+      disabled: bulkBlocked || researchBusy || !state.scopeReady,
       action: "runAll" as const,
     }] : []),
     ...(state.readingMode === "reading" ? [
@@ -374,7 +409,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
         title: `Process Reading backlog (${state.readingPending})`,
         icon: "list-checks" as IconName,
         action: "processReadingBacklog" as const,
-        disabled: state.running || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy,
+        disabled: bulkBlocked || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy,
       }] : []),
     ] : []),
     { title: "Research", label: true },

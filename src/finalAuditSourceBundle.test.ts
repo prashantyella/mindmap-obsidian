@@ -109,3 +109,18 @@ void test("source audit: runMindmap/runPreflight/queryLiveRelated/queryLookupRel
     assert.match(mainSource, guardedMethod);
   }
 });
+
+void test("source audit: activity cleanup is lifecycle-registered and retired process fields are absent", () => {
+  const source = readSource("src/main.ts");
+  assert.doesNotMatch(source, /currentProcess|activeRunStatus/);
+  assert.match(source, /this\.register\(\(\) => \{[\s\S]*unsubscribeActivity/);
+  assert.match(source, /statusRenderTimer = null/);
+});
+
+void test("source audit: replacing or failing a ProductionEngine clears activity subscription and cached activity", () => {
+  const source = readSource("src/main.ts");
+  const method = source.match(/private async startProductionEngine\(\): Promise<void> \{[\s\S]*?\n\x20{2}\}/)?.[0] ?? "";
+  assert.match(method, /this\.unsubscribeActivity\?\.\(\);/);
+  assert.match(method, /this\.engineActivity = null;/);
+  assert.match(method, /this\.updateStatusBar\(\);/);
+});

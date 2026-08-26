@@ -269,12 +269,27 @@ void test("createProductionScopeEnqueueSeam forwards to the injected job submitt
   assert.deepEqual(submitted, [{ trigger: "reading", kind: "process-note", identity: { schemaVersion: 1, kind: "path", canonicalPath: "Notes/a.md" }, sourceHash: "a".repeat(64), embeddingModel: "m", pipelineVersion: 3 }]);
 });
 
+void test("createProductionScopeEnqueueSeam fails closed when a batch cannot be preserved", async () => {
+  const seam = createProductionScopeEnqueueSeam({ submit: async () => undefined }, "manual");
+  await assert.rejects(() => seam.enqueueProcessNote({ identity: { schemaVersion: 1, kind: "path", canonicalPath: "Notes/a.md" as never }, sourceHash: "a".repeat(64), embeddingModel: "m" }, 1, new AbortController().signal, "batch"), (error: unknown) => isEngineError(error) && error.code === "JOB_SHAPE_INVALID");
+});
+
 void test("createProductionNoteReplacementSeam forwards to the injected job submitter", async () => {
   const submitted: unknown[] = [];
   const fakeJobEngine = { submit: async (input: unknown) => { submitted.push(input); return input; } };
   const seam = createProductionNoteReplacementSeam(fakeJobEngine, "manual");
   await seam.enqueueReplacement({ identity: { schemaVersion: 1, kind: "path", canonicalPath: "Notes/a.md" as never }, sourceHash: "b".repeat(64), embeddingModel: "m", pipelineVersion: 2 });
   assert.deepEqual(submitted, [{ trigger: "manual", kind: "process-note", identity: { schemaVersion: 1, kind: "path", canonicalPath: "Notes/a.md" }, sourceHash: "b".repeat(64), embeddingModel: "m", pipelineVersion: 2 }]);
+});
+
+void test("createProductionNoteReplacementSeam preserves an explicit batch item id and fails closed without bulk support", async () => {
+  const submitted: unknown[] = [];
+  const fakeJobEngine = { submit: async () => { throw new Error("must not use unbatched submit"); }, submitBulkChild: async (batchId: string, input: unknown) => { submitted.push({ batchId, input }); } };
+  const seam = createProductionNoteReplacementSeam(fakeJobEngine, "manual");
+  await seam.enqueueReplacement({ identity: { schemaVersion: 1, kind: "path", canonicalPath: "Renamed/a.md" as never }, sourceHash: "b".repeat(64), embeddingModel: "m", pipelineVersion: 2, batchId: "batch", batchItemId: "c".repeat(64) });
+  assert.deepEqual(submitted, [{ batchId: "batch", input: { trigger: "manual", kind: "process-note", identity: { schemaVersion: 1, kind: "path", canonicalPath: "Renamed/a.md" }, sourceHash: "b".repeat(64), embeddingModel: "m", pipelineVersion: 2, batchItemId: "c".repeat(64) } }]);
+  const unsupported = createProductionNoteReplacementSeam({ submit: async () => undefined }, "manual");
+  await assert.rejects(() => unsupported.enqueueReplacement({ identity: { schemaVersion: 1, kind: "path", canonicalPath: "Notes/a.md" as never }, sourceHash: "b".repeat(64), embeddingModel: "m", pipelineVersion: 2, batchId: "batch", batchItemId: "c".repeat(64) }), (error: unknown) => isEngineError(error) && error.code === "JOB_SHAPE_INVALID");
 });
 
 function fakeWorkspace(): { workspace: Workspace; calls: unknown[] } {

@@ -5,6 +5,7 @@ import { EngineError, isEngineError } from "./errors";
 import type { IndexFs } from "../index/indexFs";
 import { IndexStore } from "../index/indexStore";
 import { JobEngine, type JobEngineFault, type JobPhaseRunner } from "../jobs/jobEngine";
+import type { EngineActivitySnapshot } from "../jobs/jobActivity";
 import { JobStore } from "../jobs/jobStore";
 import { NoteJobRunner, type NoteSourceReader } from "../jobs/noteJob";
 import { canonicalizePath, stableNoteIdentity, type JobTrigger } from "./contracts";
@@ -271,6 +272,10 @@ export class ProductionEngine {
       submit: (input: Parameters<JobEngine["submit"]>[0]) => {
         if (!jobEngineRef.current) throw new Error("ProductionEngine.jobEngine used before construction completed.");
         return jobEngineRef.current.submit(input);
+      },
+      submitBulkChild: (batchId: string, input: Parameters<JobEngine["submitBulkChild"]>[1]) => {
+        if (!jobEngineRef.current) throw new Error("ProductionEngine.jobEngine used before construction completed.");
+        return jobEngineRef.current.submitBulkChild(batchId, input);
       },
       requestCancel: (jobId: string) => {
         if (!jobEngineRef.current) throw new Error("ProductionEngine.jobEngine used before construction completed.");
@@ -644,7 +649,7 @@ export class ProductionEngine {
       await this.safely("SCHEDULE_STORE", () => this.scheduleStore.cleanupStaleTempFiles().then(() => undefined));
       if (this.disposeRequested) return this.lastPreflightReport ?? this.emptyPreflightReport();
 
-      await this.safely("JOB_STORE", () => this.jobStore.recoverInterruptedJobs().then(() => undefined));
+      await this.safely("JOB_STORE", () => this.jobEngine.recoverInterruptedJobs().then(() => undefined));
       if (this.disposeRequested) return this.lastPreflightReport ?? this.emptyPreflightReport();
 
       await this.safely("MIGRATION_STORE", () => this.migrationStore.cleanupStaleTempFiles().then(() => undefined));
@@ -1018,6 +1023,10 @@ export class ProductionEngine {
 
   getCapabilityFaults(): ReadonlyMap<string, string> {
     return this.capabilityFaults;
+  }
+
+  subscribeActivity(listener: (snapshot: EngineActivitySnapshot) => void): () => void {
+    return this.jobEngine.subscribeActivity(listener);
   }
 }
 

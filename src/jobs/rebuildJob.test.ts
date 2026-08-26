@@ -103,14 +103,13 @@ void test("a full rebuild with no prior generation builds, verifies, and activat
   assert.equal(results[0].path, "A.md");
 });
 
-void test("rebuild picks currentGeneration+1 as its target id and coalesces a duplicate manual rebuild trigger", async () => {
+void test("rebuild picks currentGeneration+1 and rejects a duplicate active manual rebuild trigger", async () => {
   const h = buildHarness();
   await buildGeneration(h.indexFs, "/root", { generationId: 1, embeddingModel: MODEL, dimension: DIM, notes: [makeNote("A.md")] });
   await switchCurrentGeneration(h.indexFs, "/root", 1);
 
   const first = await h.engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 });
-  const second = await h.engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 });
-  assert.equal(first.job.jobId, second.job.jobId, "duplicate manual rebuild triggers must coalesce");
+  await assert.rejects(() => h.engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 }), (error: unknown) => (error as { code?: string }).code === "BULK_BATCH_ACTIVE");
 
   await h.engine.drain();
   const final = await h.store.getById(first.job.jobId);
@@ -118,9 +117,14 @@ void test("rebuild picks currentGeneration+1 as its target id and coalesces a du
   assert.equal(await loadCurrentGenerationId(h.indexFs, "/root"), 2);
 });
 
-void test("a different pipelineVersion produces a distinct (non-coalesced) rebuild job", async () => {
+void test("a different pipelineVersion is rejected while active, then creates a fresh job after terminal completion", async () => {
   const h = buildHarness();
+  await buildGeneration(h.indexFs, "/root", { generationId: 1, embeddingModel: MODEL, dimension: DIM, notes: [makeNote("A.md")] });
+  await switchCurrentGeneration(h.indexFs, "/root", 1);
   const first = await h.engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 });
+  await assert.rejects(() => h.engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 2 }), (error: unknown) => (error as { code?: string }).code === "BULK_BATCH_ACTIVE");
+  await h.engine.drain();
+  assert.equal((await h.store.getById(first.job.jobId))?.status, "completed");
   const second = await h.engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 2 });
   assert.notEqual(first.job.jobId, second.job.jobId);
 });

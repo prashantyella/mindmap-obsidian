@@ -35,7 +35,7 @@ export interface ScopeImportSeam {
 
 /** Submits (or coalesces onto an already-queued) one `"process-note"` job per discovered item -- expected to be backed by `JobEngine.submit`, whose own idempotency-key coalescing is what makes re-running the whole `enqueue` phase after a restart safe: re-submitting an identical item is always a no-op onto the same existing job, never a duplicate. */
 export interface ScopeEnqueueSeam {
-  enqueueProcessNote(item: ScopeDiscoveryItem, pipelineVersion: number, signal: AbortSignal): Promise<void>;
+  enqueueProcessNote(item: ScopeDiscoveryItem, pipelineVersion: number, signal: AbortSignal, batchId?: string): Promise<void>;
 }
 
 export interface ScopeJobDeps {
@@ -170,7 +170,7 @@ export class ScopeJobRunner implements JobPhaseRunner {
           }
           return await this.stepImport(scopeId, priorReceipt, signal);
         case "enqueue":
-          return await this.stepEnqueue(scopeId, persisted.job.pipelineVersion, priorReceipt, signal);
+          return await this.stepEnqueue(scopeId, persisted.job.pipelineVersion, priorReceipt, signal, persisted.job.batchId);
         default:
           throw new EngineError("JOB_TRANSITION_INVALID", `ScopeJobRunner cannot execute phase "${persisted.job.phase}".`, {});
       }
@@ -214,7 +214,7 @@ export class ScopeJobRunner implements JobPhaseRunner {
     return { type: "advance", nextPhase: "enqueue", receipt };
   }
 
-  private async stepEnqueue(scopeId: string, pipelineVersion: number, priorReceipt: ScopeReceipt | undefined, signal: AbortSignal): Promise<PhaseStepOutcome> {
+  private async stepEnqueue(scopeId: string, pipelineVersion: number, priorReceipt: ScopeReceipt | undefined, signal: AbortSignal, batchId?: string): Promise<PhaseStepOutcome> {
     const items = await this.discoverValidated(scopeId, signal);
     const fingerprint = computeDiscoveryFingerprint(items);
     // Same drift check as stepImport -- prevents importing set B (or skipping import for
@@ -232,7 +232,7 @@ export class ScopeJobRunner implements JobPhaseRunner {
       if (signal.aborted) {
         return { type: "cancelled" };
       }
-      await this.deps.enqueue.enqueueProcessNote(item, pipelineVersion, signal);
+      await this.deps.enqueue.enqueueProcessNote(item, pipelineVersion, signal, batchId);
     }
     const receipt: ScopeReceipt = {
       kind: "scope",

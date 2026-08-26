@@ -606,7 +606,7 @@ void test("restart recovery: a persisted mid-retry schedule resumes retrying the
   assert.equal(afterRestart!.state.consecutiveFailures, 2);
 });
 
-void test("startup/timer/manual submits for the same schedule coalesce through the real JobEngine's idempotency key (Checkpoint 7)", async () => {
+void test("an active scheduled bulk batch blocks new manual/startup bulk submits", async () => {
   const jobStore = new JobStore(new InMemoryFs(), "/jobs-root");
   const engine = new JobEngine(jobStore, {});
   const scheduleStore = new ScheduleStore(new InMemoryFs(), "/schedule-root");
@@ -617,13 +617,11 @@ void test("startup/timer/manual submits for the same schedule coalesce through t
 
   // Scheduled catch-up submit.
   await scheduler.start();
-  // A concurrent "manual" submit for the exact same target/pipelineVersion.
-  await engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 });
-  // A concurrent "startup" submit too.
-  await engine.submit({ trigger: "startup", kind: "rebuild-index", pipelineVersion: 1 });
+  await assert.rejects(() => engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 }), { code: "BULK_BATCH_ACTIVE" });
+  await assert.rejects(() => engine.submit({ trigger: "startup", kind: "rebuild-index", pipelineVersion: 1 }), { code: "BULK_BATCH_ACTIVE" });
 
   const jobs = await jobStore.list();
-  assert.equal(jobs.length, 1, "all three submits for identical work must coalesce onto a single job");
+  assert.equal(jobs.length, 1, "only the scheduled batch root is persisted");
   assert.equal(jobs[0].job.trigger, "scheduled", "the FIRST trigger observed (the scheduler's) is kept as provenance");
 });
 

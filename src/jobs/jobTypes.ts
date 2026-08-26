@@ -3,8 +3,10 @@ import {
   JOB_KIND_TARGET_KIND,
   JOB_TRIGGER_KINDS,
   parseQueueJobV1,
+  isJobTrigger,
   type JobKind,
   type JobPhase,
+  type JobTrigger,
   type NoteIdentityV1,
   type QueueJobV1,
   type SchemaVersion,
@@ -81,7 +83,8 @@ const HEX_64_PATTERN = /^[0-9a-f]{64}$/;
 /** No `"paused"` member -- Checkpoint 7's engine never produces one (a provider-wide pause blocks DISPATCH via `ProviderPauseV1`, it never sets a job's own status), so an unused, never-modeled status is not carried in the type at all. */
 export type JobStatus = "queued" | "active" | "failed" | "cancelled" | "completed";
 
-const JOB_STATUSES: readonly JobStatus[] = ["queued", "active", "failed", "cancelled", "completed"];
+const JOB_STATUS_SET: Record<JobStatus, true> = { queued: true, active: true, failed: true, cancelled: true, completed: true };
+function isJobStatus(value: unknown): value is JobStatus { return typeof value === "string" && Object.prototype.hasOwnProperty.call(JOB_STATUS_SET, value); }
 const TERMINAL_STATUSES: ReadonlySet<JobStatus> = new Set(["failed", "cancelled", "completed"]);
 
 export function isTerminalJobStatus(status: JobStatus): boolean {
@@ -694,10 +697,10 @@ export function parsePersistedJobV1(value: unknown): PersistedJobV1 {
     throw new EngineError("JOB_SHAPE_INVALID", "PersistedJobV1.schemaVersion must be 1.", { received: record.schemaVersion });
   }
   const job = parseQueueJobV1(record.job);
-  if (typeof record.status !== "string" || !JOB_STATUSES.includes(record.status as JobStatus)) {
+  if (!isJobStatus(record.status)) {
     throw new EngineError("JOB_SHAPE_INVALID", "PersistedJobV1.status is not a recognized job status.", {});
   }
-  const status = record.status as JobStatus;
+  const status = record.status;
   if (typeof record.attempt !== "number" || !Number.isInteger(record.attempt) || record.attempt < 0 || record.attempt > MAX_ATTEMPT_COUNT) {
     throw new EngineError("JOB_SHAPE_INVALID", `PersistedJobV1.attempt must be an integer in [0, ${MAX_ATTEMPT_COUNT}].`, {});
   }
@@ -876,6 +879,83 @@ export interface JobStoreDocumentV1 {
   providerPause: ProviderPauseV1;
   /** Absent on a document persisted before Checkpoint 8's occurrence registry existed -- `parseJobStoreDocumentV1` defaults it to `[]` explicitly (a genuine migration path, never a silent pass-through of some OTHER malformed value: present-but-not-an-array, or present-with-a-malformed-entry, still fails closed). */
   scheduledOccurrences: ScheduledOccurrenceRecordV1[];
+  bulkBatches: BulkBatchV1[];
+}
+
+export type BulkBatchStatusV1 = "active" | "completed" | "completed-with-failures" | "failed" | "cancelled";
+export interface BulkBatchItemV1 {
+  batchItemId: string;
+  jobId: string;
+  status: JobStatus;
+}
+/** Bounded, content-free progress ledger for one scope/global bulk root. */
+export interface BulkBatchV1 {
+  schemaVersion: SchemaVersion;
+  batchId: string;
+  rootJobId: string;
+  trigger: JobTrigger;
+  scopeId?: string;
+  occurrenceId?: string;
+  status: BulkBatchStatusV1;
+  /** Set atomically when scope discovery commits; never inferred from children. */
+  discoveredTotal?: number;
+  createdAt: string;
+  updatedAt: string;
+  items: BulkBatchItemV1[];
+}
+export const MAX_BULK_BATCHES = 16;
+const BULK_BATCH_STATUS_SET: Record<BulkBatchStatusV1, true> = { active: true, completed: true, "completed-with-failures": true, failed: true, cancelled: true };
+function isBulkBatchStatus(value: unknown): value is BulkBatchStatusV1 { return typeof value === "string" && Object.prototype.hasOwnProperty.call(BULK_BATCH_STATUS_SET, value); }
+
+function parseBulkBatchV1(value: unknown, jobsById: ReadonlyMap<string, PersistedJobV1>): BulkBatchV1 {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1 must be a JSON object.", {});
+  const record = value as Record<string, unknown>;
+  if (record.schemaVersion !== 1) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1.schemaVersion must be 1.", {});
+  assertBoundedControlFreeIdentifier(record.batchId, MAX_JOB_ID_LENGTH, "BulkBatchV1.batchId", "JOB_STORE_CORRUPT");
+  const batchId = record.batchId;
+  assertBoundedControlFreeIdentifier(record.rootJobId, MAX_JOB_ID_LENGTH, "BulkBatchV1.rootJobId", "JOB_STORE_CORRUPT");
+  const rootJobId = record.rootJobId;
+  const root = jobsById.get(rootJobId);
+  if (!isBulkBatchStatus(record.status)) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1.status is invalid.", {});
+  const status = record.status;
+  if ((!root && record.status === "active") || (root && ((root.job.kind !== "scope-refresh" && root.job.kind !== "rebuild-index") || root.job.batchId !== batchId))) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1.rootJobId must reference its bulk root job.", {});
+  if (!isJobTrigger(record.trigger) || (root && record.trigger !== root.job.trigger)) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1.trigger must match its root job.", {});
+  const trigger = record.trigger;
+  if (record.scopeId !== undefined) assertBoundedControlFreeIdentifier(record.scopeId, 200, "BulkBatchV1.scopeId", "JOB_STORE_CORRUPT");
+  if (root?.job.target.kind === "scope" && record.scopeId !== root.job.target.scopeId) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1.scopeId must match its scope root.", {});
+  if (root && root.job.target.kind !== "scope" && record.scopeId !== undefined) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1.scopeId is only valid for a scope root.", {});
+  if (record.occurrenceId !== undefined) assertScheduledOccurrenceId(record.occurrenceId);
+  if (record.discoveredTotal !== undefined && (typeof record.discoveredTotal !== "number" || !Number.isInteger(record.discoveredTotal) || record.discoveredTotal < 0 || record.discoveredTotal > MAX_SCOPE_DISCOVERY_ITEMS)) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1.discoveredTotal is invalid.", {});
+  if (root?.receipt?.kind === "scope" && root.receipt.discoveredCount !== undefined && record.discoveredTotal !== root.receipt.discoveredCount) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1.discoveredTotal must match root discovery.", {});
+  if (typeof record.createdAt !== "string" || typeof record.updatedAt !== "string") throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1 timestamps must be strings.", {});
+  const createdAt = new Date(record.createdAt); const updatedAt = new Date(record.updatedAt);
+  if (Number.isNaN(createdAt.getTime()) || createdAt.toISOString() !== record.createdAt || Number.isNaN(updatedAt.getTime()) || updatedAt.toISOString() !== record.updatedAt || updatedAt < createdAt) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1 timestamps must be canonical and ordered.", {});
+  if (!Array.isArray(record.items) || record.items.length > MAX_SCOPE_DISCOVERY_ITEMS) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1.items must be a bounded array.", {});
+  const seen = new Set<string>();
+  const items = record.items.map((value): BulkBatchItemV1 => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1 item must be an object.", {});
+    const item = value as Record<string, unknown>;
+    if (typeof item.batchItemId !== "string" || !HEX_64_PATTERN.test(item.batchItemId) || seen.has(item.batchItemId)) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1 item id is invalid.", {});
+    seen.add(item.batchItemId);
+    assertBoundedControlFreeIdentifier(item.jobId, MAX_JOB_ID_LENGTH, "BulkBatchV1.item.jobId", "JOB_STORE_CORRUPT");
+    const jobId = item.jobId;
+  if (!isJobStatus(item.status)) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1 item status is invalid.", {});
+    const itemStatus = item.status;
+    const job = jobsById.get(jobId);
+    // Terminal children may be pruned from the queue after their last status is copied into
+    // this ledger. Non-terminal work must always remain addressable.
+    if ((!job && !isTerminalJobStatus(itemStatus)) || (job && (job.job.batchId !== batchId || job.job.batchItemId !== item.batchItemId || job.status !== itemStatus))) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1 item must match its child job.", {});
+    return { batchItemId: item.batchItemId, jobId, status: itemStatus };
+  });
+  if ((status === "completed" || status === "completed-with-failures") && (record.discoveredTotal === undefined || items.length !== record.discoveredTotal || items.some((item) => !isTerminalJobStatus(item.status)))) throw new EngineError("JOB_STORE_CORRUPT", "Completed BulkBatchV1 must have a complete terminal item ledger.", {});
+  if (root) {
+    if (status === "active" && (root.status === "failed" || root.status === "cancelled")) throw new EngineError("JOB_STORE_CORRUPT", "An active batch cannot retain a failed/cancelled root.", {});
+    if ((status === "failed" || status === "cancelled") && root.status !== status) throw new EngineError("JOB_STORE_CORRUPT", "Terminal batch status must match its root.", {});
+    if ((status === "completed" || status === "completed-with-failures") && root.status !== "completed") throw new EngineError("JOB_STORE_CORRUPT", "Completed batch status requires a completed root.", {});
+  }
+  if (status === "completed" && items.some((item) => item.status !== "completed")) throw new EngineError("JOB_STORE_CORRUPT", "Completed batch items must all be completed.", {});
+  if (status === "completed-with-failures" && !items.some((item) => item.status === "failed" || item.status === "cancelled")) throw new EngineError("JOB_STORE_CORRUPT", "Completed-with-failures requires a failed/cancelled item.", {});
+  return { schemaVersion: 1, batchId, rootJobId, trigger, scopeId: record.scopeId, occurrenceId: record.occurrenceId, status, discoveredTotal: record.discoveredTotal, createdAt: record.createdAt, updatedAt: record.updatedAt, items };
 }
 
 export function parseJobStoreDocumentV1(value: unknown): JobStoreDocumentV1 {
@@ -940,8 +1020,23 @@ export function parseJobStoreDocumentV1(value: unknown): JobStoreDocumentV1 {
     }
   }
 
+  let bulkBatches: BulkBatchV1[];
+  if (record.bulkBatches === undefined) bulkBatches = [];
+  else {
+    if (!Array.isArray(record.bulkBatches) || record.bulkBatches.length > MAX_BULK_BATCHES) throw new EngineError("JOB_STORE_CORRUPT", "JobStoreDocumentV1.bulkBatches must be a bounded array.", {});
+    bulkBatches = record.bulkBatches.map((entry) => parseBulkBatchV1(entry, jobsById));
+    if (new Set(bulkBatches.map((batch) => batch.batchId)).size !== bulkBatches.length) throw new EngineError("JOB_STORE_CORRUPT", "Duplicate bulk batch id.", {});
+    if (bulkBatches.filter((batch) => batch.status === "active").length > 1) throw new EngineError("JOB_STORE_CORRUPT", "Only one bulk batch may be active.", {});
+    for (const batch of bulkBatches) {
+      if (batch.occurrenceId !== undefined) {
+        const occurrence = scheduledOccurrences.find((entry) => entry.occurrenceId === batch.occurrenceId);
+        if (!occurrence || occurrence.jobId !== batch.rootJobId) throw new EngineError("JOB_STORE_CORRUPT", "Bulk batch occurrence must reference its root.", {});
+      }
+    }
+  }
+
   const providerPause = parseProviderPauseV1(record.providerPause);
-  return { schemaVersion: 1, jobs, providerPause, scheduledOccurrences };
+  return { schemaVersion: 1, jobs, providerPause, scheduledOccurrences, bulkBatches };
 }
 
 /**

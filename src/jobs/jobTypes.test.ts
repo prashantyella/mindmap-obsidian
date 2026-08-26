@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { canonicalizePath, computeJobIdempotencyKey, stableNoteIdentity, type QueueJobV1 } from "../engine/contracts";
 import { ENGINE_ERROR_CODES, EngineError, isEngineError } from "../engine/errors";
-import { parsePersistedJobV1, parseProviderPauseV1, sanitizeFailureCode, toFailureCode } from "./jobTypes";
+import { parseJobStoreDocumentV1, parsePersistedJobV1, parseProviderPauseV1, sanitizeFailureCode, toFailureCode } from "./jobTypes";
 
 const HASH_A = "a".repeat(64);
 
@@ -69,6 +69,30 @@ function scopeJob(kind: "reading-sync" | "scope-refresh", phase: QueueJobV1["pha
 function assertShapeInvalid(value: unknown): void {
   assert.throws(() => parsePersistedJobV1(value), (error: unknown) => isEngineError(error) && error.code === "JOB_SHAPE_INVALID");
 }
+
+void test("bulk batch schema remains compatible with queue documents missing bulkBatches", () => {
+  const parsed = parseJobStoreDocumentV1({ schemaVersion: 1, jobs: [], providerPause: { active: false }, scheduledOccurrences: [] });
+  assert.deepEqual(parsed.bulkBatches, []);
+});
+
+void test("bulk batch parser rejects malformed timestamps, root kinds, and item references", () => {
+  const root = { ...scopeJob("scope-refresh"), jobId: "bulk-root", batchId: "batch" };
+  const base = { schemaVersion: 1, jobs: [{ schemaVersion: 1, job: root, status: "queued", attempt: 0, cancelRequested: false }], providerPause: { active: false }, scheduledOccurrences: [] };
+  const batch = { schemaVersion: 1, batchId: "batch", rootJobId: "bulk-root", trigger: "manual", scopeId: "vault-scope", status: "active", createdAt: "not-a-date", updatedAt: "2026-08-23T00:00:00.000Z", items: [] };
+  assert.throws(() => parseJobStoreDocumentV1({ ...base, bulkBatches: [batch] }), (error: unknown) => isEngineError(error) && error.code === "JOB_STORE_CORRUPT");
+  const note = { ...noteJob(), jobId: "bulk-root", batchId: "batch", batchItemId: "a".repeat(64) };
+  assert.throws(() => parseJobStoreDocumentV1({ ...base, jobs: [{ schemaVersion: 1, job: note, status: "queued", attempt: 0, cancelRequested: false }], bulkBatches: [{ ...batch, createdAt: "2026-08-23T00:00:00.000Z" }] }), (error: unknown) => isEngineError(error) && error.code === "JOB_STORE_CORRUPT");
+});
+
+void test("strict trigger/status membership rejects prototype property names", () => {
+  for (const value of ["toString", "constructor", "__proto__"]) {
+    const triggerJob = JSON.parse(JSON.stringify({ schemaVersion: 1, job: { ...noteJob(), trigger: value }, status: "queued", attempt: 0, cancelRequested: false }));
+    assert.throws(() => parsePersistedJobV1(triggerJob), (error: unknown) => isEngineError(error));
+    const statusJob = JSON.parse(JSON.stringify({ schemaVersion: 1, job: noteJob(), status: value, attempt: 0, cancelRequested: false }));
+    assert.throws(() => parsePersistedJobV1(statusJob), (error: unknown) => isEngineError(error));
+    assert.throws(() => parseJobStoreDocumentV1({ schemaVersion: 1, jobs: [], providerPause: { active: false }, scheduledOccurrences: [], bulkBatches: [{ schemaVersion: 1, batchId: "b", rootJobId: "r", trigger: "manual", status: value, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", items: [] }] }), (error: unknown) => isEngineError(error));
+  }
+});
 
 void test("toFailureCode returns an EngineError's own code verbatim", () => {
   const error = new EngineError("EMBEDDING_TIMEOUT", "timed out", {});

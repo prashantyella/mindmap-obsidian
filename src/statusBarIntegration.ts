@@ -3,10 +3,12 @@ import type { App } from "obsidian";
 import type MindmapPlugin from "./main";
 import { openStatusBarMenu } from "./statusBarMenu";
 import { buildStatusBarMenuState, type StatusBarMenuActions, type StatusBarMenuState } from "./statusBarState";
+import type { EngineActivitySnapshot } from "./jobs/jobActivity";
 
 export interface StatusBarInternalState {
   running: boolean;
   runStatus: string | null;
+  activity: EngineActivitySnapshot | null;
   preflightInProgress: boolean;
   preflightOk: boolean | null;
   schedulerHealth: StatusBarMenuState["schedulerHealth"];
@@ -35,6 +37,7 @@ export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: Stat
     pending: plugin.getPendingSnapshot(),
     running: internal.running,
     runStatus: internal.runStatus,
+    activity: internal.activity,
     preflightInProgress: internal.preflightInProgress,
     preflightOk: internal.preflightOk,
     scopeReady: plugin.getScopeSetupStatus().complete,
