@@ -109,3 +109,10 @@ void test("source audit: runMindmap/runPreflight/queryLiveRelated/queryLookupRel
     assert.match(mainSource, guardedMethod);
   }
 });
+
+void test("source audit: activity cleanup is lifecycle-registered and retired process fields are absent", () => {
+  const source = readSource("src/main.ts");
+  assert.doesNotMatch(source, /currentProcess|activeRunStatus/);
+  assert.match(source, /this\.register\(\(\) => \{[\s\S]*unsubscribeActivity/);
+  assert.match(source, /statusRenderTimer = null/);
+});

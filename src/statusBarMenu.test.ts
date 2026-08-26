@@ -104,6 +104,57 @@ void test("status presentation gives real work a loader while warnings retain pr
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.mindmap-status\.is-animating \.mindmap-status-icon svg/);
 });
 
+void test("activity-driven presentation uses approved alert/progress/queued labels and basename-only detail", () => {
+  const base = state({ activity: { state: "paused", queuedCount: 2, activeCount: 0, processNoteCount: 1, bulkBlocked: true, latestFailureBatch: { status: "completed-with-failures", failed: 1 } } });
+  const paused = buildStatusBarPresentation(base);
+  assert.equal(paused.icon, "triangle-alert");
+  assert.match(paused.ariaLabel, /paused/);
+  assert.doesNotMatch(paused.ariaLabel, /\//);
+  const progress = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", processed: 2, total: 4, failed: 0 } } }));
+  assert.equal(progress.label, "Mindmap · 2/4");
+  assert.equal(progress.icon, "loader-circle");
+});
+
+void test("active engine work takes priority over passive Reading count", () => {
+  const presentation = buildStatusBarPresentation(state({ readingMode: "reading", readingActivity: "ready", readingPending: 9, activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", processed: 1, total: 3, failed: 0 } } }));
+  assert.equal(presentation.label, "Mindmap · 1/3");
+  assert.equal(presentation.icon, "loader-circle");
+});
+
+void test("current work hides a retained prior failure, while idle exposes it", () => {
+  const prior = { status: "completed-with-failures" as const, failed: 2 };
+  const active = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", processed: 1, total: 2, failed: 0 }, latestFailureBatch: prior } }));
+  assert.equal(active.label, "Mindmap · 1/2");
+  assert.equal(active.icon, "loader-circle");
+  assert.match(active.ariaLabel, /queued/);
+  const reading = buildStatusBarPresentation(state({ readingMode: "reading", readingActivity: "processing", activity: { state: "idle", queuedCount: 0, activeCount: 0, processNoteCount: 0, bulkBlocked: false, latestFailureBatch: prior } }));
+  assert.equal(reading.label, "Reading · processing");
+  assert.equal(reading.icon, "loader-circle");
+  const idle = buildStatusBarPresentation(state({ activity: { state: "idle", queuedCount: 0, activeCount: 0, processNoteCount: 0, bulkBlocked: false, latestFailureBatch: prior } }));
+  assert.equal(idle.label, "Mindmap · 2 failed");
+  assert.equal(idle.icon, "triangle-alert");
+});
+
+void test("idle terminal batch statuses have exact accessible failure wording", () => {
+  for (const [status, expected] of [["completed-with-failures", "Mindmap · 2 failed"], ["failed", "Mindmap · root failed"], ["cancelled", "Mindmap · cancelled"]] as const) {
+    const presentation = buildStatusBarPresentation(state({ activity: { state: "idle", queuedCount: 0, activeCount: 0, processNoteCount: 0, bulkBlocked: false, latestFailureBatch: { status, failed: 2 } } }));
+    assert.equal(presentation.label, expected);
+    assert.match(presentation.ariaLabel, new RegExp(expected.replace("Mindmap · ", "")));
+    assert.match(presentation.title, new RegExp(expected.replace("Mindmap · ", "")));
+    assert.equal(presentation.icon, "triangle-alert");
+  }
+});
+
+void test("activity detail row is bounded, disabled, and privacy-safe", () => {
+  const items = buildStatusBarMenuItems(state({ activity: { state: "running", queuedCount: 2, activeCount: 1, processNoteCount: 1, bulkBlocked: true, current: { kind: "process-note", phase: "embed", path: "Note.md", attempt: 1 }, latestFailureBatch: { status: "failed", failed: 0 } } }));
+  const detail = items.find((item) => item.title.startsWith("Engine: "));
+  assert.ok(detail);
+  assert.equal(detail?.disabled, true);
+  assert.match(detail?.title ?? "", /embed/);
+  assert.match(detail?.title ?? "", /Note\.md/);
+  assert.doesNotMatch(detail?.title ?? "", /\//);
+});
+
 void test("actionable scheduler health is announced without contradictory schedule copy", () => {
   const presentation = buildStatusBarPresentation(state({
     currentPending: 2,
@@ -239,9 +290,9 @@ void test("Run active note is present only when the active note is eligible", ()
     running: true,
     activeNote: { path: "Notes/one.md", eligible: true, reason: "", code: "eligible" },
   }));
-  const runningAction = runningWhileEligible.find((item) => item.title.startsWith("Run active note"));
-  assert.equal(runningAction?.disabled, true);
-  assert.equal(runningAction?.action, undefined);
+  const runningAction = runningWhileEligible.find((item) => item.title === "Run Mindmap for active note");
+  assert.equal(runningAction?.disabled, false);
+  assert.equal(runningAction?.action, "runActiveNote");
 });
 
 void test("Run current scope is always present", () => {

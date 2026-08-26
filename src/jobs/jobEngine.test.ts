@@ -93,6 +93,26 @@ void test("bulk submission creates one atomic root/batch, rejects overlap, and a
   assert.equal((await store.getBulkBatches())[0]!.items.length, 1);
 });
 
+void test("activity subscription emits active before a controlled runner releases and then settles idle", async () => {
+  const gate = new Promise<void>((resolve) => { (globalThis as { release?: () => void }).release = resolve; });
+  const runner = new ScriptedRunner(async () => { await gate; return { type: "advance", nextPhase: "embed" }; });
+  const { engine, store } = makeEngine({ "process-note": runner });
+  const snapshots: string[] = [];
+  const unsubscribe = engine.subscribeActivity((snapshot) => snapshots.push(snapshot.state));
+  await engine.submit({ trigger: "manual", kind: "process-note", identity: noteIdentity("Notes/A.md"), sourceHash: "a".repeat(64), embeddingModel: "m1", pipelineVersion: 1 });
+  const dispatch = engine.runOnce();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(snapshots.includes("running"));
+  (globalThis as { release?: () => void }).release?.();
+  await dispatch;
+  assert.equal(snapshots[snapshots.length - 1], "running");
+  const jobs = await store.list();
+  await engine.requestCancel(jobs[0].job.jobId);
+  await engine.runOnce();
+  assert.equal(snapshots[snapshots.length - 1], "idle");
+  unsubscribe();
+});
+
 void test("bulk denominator comes only from the committed scope discovery receipt and blocks premature settlement", async () => {
   const { engine, store } = makeEngine({});
   const root = await engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "all", pipelineVersion: 1 });

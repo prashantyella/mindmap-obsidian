@@ -12,6 +12,7 @@ import {
 } from "../engine/contracts";
 import { EngineError, isEngineError } from "../engine/errors";
 import type { JobStore } from "./jobStore";
+import { deriveEngineActivity, type EngineActivitySnapshot } from "./jobActivity";
 import {
   assertScheduledOccurrenceId,
   classifyFailureCode,
@@ -204,6 +205,8 @@ export class JobEngine {
   private readonly abortController = new AbortController();
   private readonly clock: JobEngineClock;
   private readonly onError?: (fault: JobEngineFault) => void;
+  private readonly activityListeners = new Set<(snapshot: EngineActivitySnapshot) => void>();
+  private activityRevision = 0;
 
   constructor(
     private readonly store: JobStore,
@@ -222,6 +225,19 @@ export class JobEngine {
   /** The fault (a `JobStore` failure surfaced from the background pump) that stopped this engine, if any -- `null` while healthy. Never thrown/rethrown automatically; a caller/health-check inspects this explicitly. */
   getFault(): JobEngineFault | null {
     return this.fault;
+  }
+
+  subscribeActivity(listener: (snapshot: EngineActivitySnapshot) => void): () => void {
+    this.activityListeners.add(listener);
+    void this.emitActivity();
+    return () => this.activityListeners.delete(listener);
+  }
+
+  private async emitActivity(): Promise<void> {
+    const revision = ++this.activityRevision;
+    const snapshot = deriveEngineActivity(await this.store.list(), await this.store.getBulkBatches(), await this.store.getProviderPause(), this.running || this.explicitDispatchCount > 0, this.disposed, this.fault?.code);
+    if (revision !== this.activityRevision) return;
+    for (const listener of this.activityListeners) { try { listener(snapshot); } catch { /* isolated observer */ } }
   }
 
   /**
@@ -252,6 +268,7 @@ export class JobEngine {
   resetFault(): boolean {
     if (this.pumping || this.explicitDispatchCount > 0) return false;
     this.fault = null;
+    void this.emitActivity();
     return true;
   }
 
@@ -310,6 +327,7 @@ export class JobEngine {
     const persisted: PersistedJobV1 = { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false };
     const { job: result } = await this.store.appendOrCoalesce(persisted);
     this.kick();
+    void this.emitActivity();
     return result;
   }
 
@@ -323,6 +341,7 @@ export class JobEngine {
     const batch: BulkBatchV1 = { schemaVersion: 1, batchId, rootJobId, trigger: input.trigger, scopeId: target.kind === "scope" ? target.scopeId : undefined, occurrenceId, status: "active", discoveredTotal: target.kind === "global" ? 0 : undefined, createdAt: nowIso, updatedAt: nowIso, items: [] };
     const result = await this.store.createBulkBatch(batch, root, occurrenceId);
     this.kick();
+    void this.emitActivity();
     return result;
   }
 
@@ -334,6 +353,7 @@ export class JobEngine {
     const job: QueueJobV1 = { schemaVersion: 1, jobId: randomUUID(), trigger: input.trigger, kind: "process-note", target, sourceHash: input.sourceHash, embeddingModel: input.embeddingModel, pipelineVersion: input.pipelineVersion, phase: "discover", idempotencyKey: computeJobIdempotencyKey("process-note", target, input.pipelineVersion, input.sourceHash, input.embeddingModel), batchId, batchItemId, createdAt: nowIso, updatedAt: nowIso };
     const result = await this.store.appendOrAdoptBatchChild(batchId, { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false });
     this.kick();
+    void this.emitActivity();
     return result;
   }
 
@@ -390,6 +410,7 @@ export class JobEngine {
     const persisted: PersistedJobV1 = { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false };
     const { job: result } = await this.store.submitScheduledOccurrence(occurrenceId, persisted, nowIso);
     this.kick();
+    void this.emitActivity();
     return result;
   }
 
@@ -412,7 +433,14 @@ export class JobEngine {
   async requestCancel(jobId: string): Promise<PersistedJobV1> {
     const result = await this.store.updateJob(jobId, (current) => (isTerminalJobStatus(current.status) ? current : { ...current, cancelRequested: true }));
     this.kick();
+    void this.emitActivity();
     return result;
+  }
+
+  async recoverInterruptedJobs(): Promise<number> {
+    const recovered = await this.store.recoverInterruptedJobs();
+    await this.emitActivity();
+    return recovered;
   }
 
   /**
@@ -427,11 +455,13 @@ export class JobEngine {
     if (this.disposed || this.fault) return;
     this.running = true;
     this.kick();
+    void this.emitActivity();
   }
 
   /** Stops kicking new work; does not interrupt an in-flight phase-step. Idempotent. */
   stop(): void {
     this.running = false;
+    void this.emitActivity();
   }
 
   /**
@@ -476,6 +506,7 @@ export class JobEngine {
         const fault: JobEngineFault = { code: toFailureCode(error), atMs: this.clock.now() };
         this.fault = fault;
         this.running = false;
+        await this.emitActivity();
         this.onError?.(fault);
         return;
       }
@@ -516,6 +547,7 @@ export class JobEngine {
     const eligible = jobs.find((entry) => this.isEligibleNow(entry, pause, now));
     if (!eligible) return "idle";
     await this.runPhaseStep(eligible);
+    await this.emitActivity();
     return "processed";
   }
 
@@ -565,6 +597,7 @@ export class JobEngine {
     this.disposed = true;
     this.running = false;
     this.abortController.abort();
+    void this.emitActivity();
   }
 
   private async runPhaseStep(entry: PersistedJobV1): Promise<void> {
@@ -586,6 +619,7 @@ export class JobEngine {
       job: { ...current.job, updatedAt: this.nowIso() },
       nextAttemptAtMs: undefined,
     }));
+    await this.emitActivity();
 
     const runner = this.runners[active.job.kind];
     if (!runner) {
@@ -749,6 +783,7 @@ export class JobEngine {
         // set here) so that once resumeProvider() clears the pause, this job is immediately
         // eligible again rather than also waiting out a redundant per-job backoff.
         await this.store.setProviderPause({ active: true, code, pausedAtMs: this.clock.now() });
+        await this.emitActivity();
         await this.store.updateJob(entry.job.jobId, (current) => ({
           ...current,
           status: "queued",
@@ -790,5 +825,6 @@ export class JobEngine {
   async resumeProvider(): Promise<void> {
     await this.store.setProviderPause({ active: false });
     this.kick();
+    void this.emitActivity();
   }
 }

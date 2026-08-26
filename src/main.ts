@@ -71,6 +71,7 @@ import { buildStatusSummary } from "./statusBarState";
 import type { LaunchAgentDetail } from "./launchAgentHealth";
 import { registerVaultRefreshEvents } from "./vaultRefreshEvents";
 import { ProductionEngine, type ProductionEngineOptions, type ProductionRelatedResult, PRODUCTION_SCOPE_CURRENT, PRODUCTION_SCOPE_ALL, PRODUCTION_SCOPE_READING } from "./engine/productionEngine";
+import type { EngineActivitySnapshot } from "./jobs/jobActivity";
 import { createNodeBackgroundSchedulerFs, createNodeBackgroundSchedulerProcessRunner, createNodeLegacyLaunchAgentCleanupFs } from "./scheduling/backgroundSchedulerNodeAdapters";
 import { toSystemLocalWakeCadence, type WakeCadence } from "./scheduling/backgroundScheduler";
 import { parseScheduleDefinitionV1 } from "./scheduling/scheduleTypes";
@@ -168,8 +169,6 @@ interface DiagnosticsState extends DiagnosticsSummaryState {
 export default class MindmapPlugin extends Plugin {
   settings: MindmapSettings = DEFAULT_SETTINGS;
 
-  /** Checkpoint 11: never populated anymore -- `runMindmap` submits jobs to the TypeScript `ProductionEngine`, never spawns a subprocess. Kept as an always-null busy flag so the "Mindmap is already running" guards elsewhere stay structurally intact for a future async-run-in-flight signal. */
-  private currentProcess: { kill(): void } | null = null;
   private schedulerTimer: unknown = null;
   private launchAgentManagedThisSession = false;
   private launchAgentSyncId = 0;
@@ -190,7 +189,9 @@ export default class MindmapPlugin extends Plugin {
   };
   private readonly recentLog: string[] = [];
   statusBarEl: HTMLElement | null = null;
-  private activeRunStatus: string | null = null;
+  private engineActivity: EngineActivitySnapshot | null = null;
+  private unsubscribeActivity: (() => void) | null = null;
+  private statusRenderTimer: number | null = null;
   private activeNoteEligibility: ActiveNoteEligibility = NO_ACTIVE_NOTE;
   private pendingScanService: ProductionPendingScanService | null = null;
   private readingModeController: ReadingModeController | null = null;
@@ -239,6 +240,13 @@ export default class MindmapPlugin extends Plugin {
 
     this.statusBarEl = this.addStatusBarItem();
     configureStatusBarElement(this.statusBarEl, (event) => this.openStatusMenu(event));
+    this.register(() => {
+      this.unsubscribeActivity?.();
+      this.unsubscribeActivity = null;
+      if (this.statusRenderTimer !== null) window.clearTimeout(this.statusRenderTimer);
+      this.statusRenderTimer = null;
+      this.statusBarEl = null;
+    });
     this.readingStateStore = createReadingStateStore(path.join(this.getRuntimeContext().pluginDir, "data", "reading-state.json"));
     this.automaticResearchPolicyStore = createAutomaticResearchPolicyStore(path.join(this.getRuntimeContext().pluginDir, "data", "automatic-research-policy.json"), {
       mkdir: async (directory, options) => { await fs.promises.mkdir(directory, options); },
@@ -283,12 +291,6 @@ export default class MindmapPlugin extends Plugin {
     this.pendingScanService?.dispose();
     void this.readingModeController?.dispose();
     this.stopScheduler("Plugin unloaded. Internal scheduler stopped.");
-    if (this.currentProcess) {
-      this.appendLog("Stopping active Mindmap run because the plugin is unloading.");
-      this.currentProcess.kill();
-      this.currentProcess = null;
-      this.activeRunStatus = null;
-    }
   }
 
   async loadSettings(): Promise<void> {
@@ -406,8 +408,11 @@ export default class MindmapPlugin extends Plugin {
 
   getStatusBarInternalState(): StatusBarInternalState {
     return {
-      running: this.currentProcess !== null,
-      runStatus: this.activeRunStatus,
+      running: this.engineActivity?.state === "running",
+      runStatus: this.engineActivity?.batch?.total === undefined
+        ? this.engineActivity?.current?.phase ?? null
+        : `${this.engineActivity.batch.processed}/${this.engineActivity.batch.total}`,
+      activity: this.engineActivity,
       preflightInProgress: this.diagnosticsState.inProgress,
       preflightOk: this.diagnosticsState.result?.ok ?? null,
       schedulerHealth: this.schedulerState.launchAgentHealth,
@@ -691,7 +696,7 @@ export default class MindmapPlugin extends Plugin {
       new Notice("Reading mode is updating notes; try web research again when the sync finishes.", 8000);
       return { ok: false, code: "READING_BUSY", message: "Reading Mode is updating notes." };
     }
-    if (this.currentProcess) {
+    if ((this.engineActivity?.processNoteCount ?? 0) > 0) {
       if (origin === "manual") new Notice("Mindmap is already running. Web research will not start.", 8000);
       return { ok: false, code: "MINDMAP_BUSY", message: "Mindmap is already running." };
     }
@@ -1348,7 +1353,7 @@ export default class MindmapPlugin extends Plugin {
 
   private async handleScheduledTick(): Promise<void> {
     this.schedulerTimer = null;
-    const action = getSchedulerAction(this.getSchedulerConfig(), this.currentProcess !== null);
+    const action = getSchedulerAction(this.getSchedulerConfig(), this.engineActivity?.bulkBlocked ?? false);
 
     if (action === "skip-disabled") {
       this.schedulerState.lastMessage = "Scheduled tick ignored because scheduling is disabled.";
@@ -1678,7 +1683,11 @@ export default class MindmapPlugin extends Plugin {
 
     const pendingSnapshot = this.getPendingSnapshot();
     this.schedulerState.pendingAllCount = pendingSnapshot.available ? pendingSnapshot.all.total : null;
-    renderStatusBarElement(this.statusBarEl, buildMindmapStatusBarState(this, this.getStatusBarInternalState()));
+    if (this.statusRenderTimer !== null) return;
+    this.statusRenderTimer = window.setTimeout(() => {
+      this.statusRenderTimer = null;
+      if (this.statusBarEl) renderStatusBarElement(this.statusBarEl, buildMindmapStatusBarState(this, this.getStatusBarInternalState()));
+    }, 250);
   }
 
   private getRuntimeContext(): RuntimeContext {
@@ -1905,6 +1914,11 @@ export default class MindmapPlugin extends Plugin {
     try {
       const engine = new ProductionEngine(options);
       this.productionEngine = engine;
+      this.unsubscribeActivity?.();
+      this.unsubscribeActivity = engine.subscribeActivity((snapshot) => {
+        this.engineActivity = snapshot;
+        this.updateStatusBar();
+      });
       await engine.start();
     } catch (error) {
       this.appendLog(`[production-engine] start() failed: ${error instanceof Error ? error.message : "unknown error"}`);
