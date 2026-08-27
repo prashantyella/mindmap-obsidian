@@ -117,6 +117,14 @@ void test("source audit: activity cleanup is lifecycle-registered and retired pr
   assert.match(source, /statusRenderTimer = null/);
 });
 
+void test("source audit: operator pause never aborts or kills active work", () => {
+  const source = readSource("src/jobs/jobEngine.ts");
+  const pauseMethod = source.match(/async pauseProcessing\(\): Promise<void> \{[\s\S]*?\n\x20{2}\}/)?.[0] ?? "";
+  assert.doesNotMatch(pauseMethod, /abort|kill/);
+  assert.match(pauseMethod, /this\.nowIso\(\)/);
+  assert.match(pauseMethod, /setOperatorPause\(true/);
+});
+
 void test("source audit: replacing or failing a ProductionEngine clears activity subscription and cached activity", () => {
   const source = readSource("src/main.ts");
   const method = source.match(/private async startProductionEngine\(\): Promise<void> \{[\s\S]*?\n\x20{2}\}/)?.[0] ?? "";

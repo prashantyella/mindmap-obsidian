@@ -67,6 +67,8 @@ export function buildMindmapStatusBarState(plugin: MindmapPlugin, internal: Stat
 
 export function buildMindmapStatusBarActions(plugin: MindmapPlugin): StatusBarMenuActions {
   return {
+    pauseProcessing: async () => { await plugin.productionEngine?.pauseProcessing(); },
+    resumeProcessing: async () => { await plugin.productionEngine?.resumeProcessing(); },
     runCurrent: async () => { await plugin.runMindmap("manual", "current"); },
     runActiveNote: () => plugin.runActiveNote(),
     runAll: async () => { await plugin.runMindmap("manual", "all"); },

@@ -168,6 +168,8 @@ export function buildStatusBarMenuState(input: StatusBarStateInput): StatusBarMe
 }
 
 export interface StatusBarMenuActions {
+  pauseProcessing(): void | Promise<void>;
+  resumeProcessing(): void | Promise<void>;
   runCurrent(): void | Promise<void>;
   runActiveNote(): void | Promise<void>;
   runAll(): void | Promise<void>;
@@ -189,6 +191,12 @@ export interface StatusBarMenuActions {
   startMigration(): void | Promise<void>;
   retryMigration(): void | Promise<void>;
   cancelMigration(): void | Promise<void>;
+}
+
+export function dispatchStatusBarAction(action: keyof StatusBarMenuActions, actions: StatusBarMenuActions): void | Promise<void> {
+  if (action === "pauseProcessing") return actions.pauseProcessing();
+  if (action === "resumeProcessing") return actions.resumeProcessing();
+  return;
 }
 
 export interface StatusBarPresentation {
@@ -219,10 +227,10 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
   const activeEngineWork = Boolean(activity?.batch) || Boolean(activity && (activity.queuedCount > 0 || activity.activeCount > 0));
   const visibleLatestFailure = Boolean(activity?.latestFailureBatch) && !readingBusy && !researchBusy && !activeEngineWork && activity?.state !== "faulted" && activity?.state !== "paused";
   const engineBusy = activeEngineWork && !readingBusy && !researchBusy;
-  const engineAlert = activity?.state === "faulted" || activity?.state === "paused" || visibleLatestFailure;
+  const engineAlert = activity?.state === "faulted" || activity?.state === "operator-paused" || activity?.state === "paused" || visibleLatestFailure;
   const actionable = state.preflightOk === false || !state.scopeReady || schedulerActionable || readingActionable || webResearchActionable || engineAlert;
   const label = activity?.state === "faulted" ? "Mindmap · fault"
-    : activity?.state === "paused" ? "Mindmap · paused"
+    : activity?.state === "operator-paused" || activity?.state === "paused" ? "Mindmap · paused"
     : readingBusy
     ? state.readingActivity === "syncing" || state.readingActivity === "processing"
       ? `Reading · ${state.readingActivity}`
@@ -251,7 +259,7 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
         : state.currentPending > 0
           ? `${state.currentPending} pending note${state.currentPending === 1 ? "" : "s"}`
           : "ready";
-  const status = activity?.state === "faulted" ? "fault" : activity?.state === "paused" ? "paused" : visibleLatestFailure && activity?.latestFailureBatch ? batchFailureSummary(activity.latestFailureBatch) : state.running ? state.runStatus ?? "running" : attention;
+  const status = activity?.state === "faulted" ? "fault" : activity?.state === "operator-paused" ? "paused" : activity?.state === "paused" ? "provider paused" : visibleLatestFailure && activity?.latestFailureBatch ? batchFailureSummary(activity.latestFailureBatch) : state.running ? state.runStatus ?? "running" : attention;
   const engineDetail = activity ? `${activity.current?.phase ?? "idle"}${activity.current?.path ? `, ${activity.current.path}` : ""}, ${activity.queuedCount} queued${visibleLatestFailure && activity.latestFailureBatch ? `, ${batchFailureSummary(activity.latestFailureBatch)}` : ""}` : "";
   const ariaLabel = engineAlert
     ? `Mindmap engine ${status}. ${engineDetail}. Activate to open the Mindmap menu.`
@@ -363,6 +371,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
   const items: StatusBarMenuItemDescriptor[] = [
     ...migrationItems,
     ...(topRecoveryRow ? [topRecoveryRow] : []),
+    ...(state.activity?.operatorPause ? [{ title: "Resume processing", icon: "play" as IconName, action: "resumeProcessing" as const }] : state.activity && state.activity.state !== "idle" ? [{ title: "Pause processing", icon: "pause" as IconName, action: "pauseProcessing" as const }] : []),
     ...(state.activity && (state.activity.state !== "idle" || visibleLatestFailure) ? [{
       title: `Engine: ${state.activity.current?.phase ?? state.activity.state}${state.activity.current?.path ? ` · ${state.activity.current.path}` : ""} · ${state.activity.queuedCount} queued${visibleLatestFailure && state.activity.latestFailureBatch ? ` · ${batchFailureSummary(state.activity.latestFailureBatch)}` : ""}`,
       icon: "info" as IconName,

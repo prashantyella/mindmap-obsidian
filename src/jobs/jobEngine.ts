@@ -207,6 +207,7 @@ export class JobEngine {
   private readonly onError?: (fault: JobEngineFault) => void;
   private readonly activityListeners = new Set<(snapshot: EngineActivitySnapshot) => void>();
   private activityRevision = 0;
+  private storeOperatorPaused = false;
 
   constructor(
     private readonly store: JobStore,
@@ -235,7 +236,7 @@ export class JobEngine {
 
   private async emitActivity(): Promise<void> {
     const revision = ++this.activityRevision;
-    const snapshot = deriveEngineActivity(await this.store.list(), await this.store.getBulkBatches(), await this.store.getProviderPause(), this.running || this.explicitDispatchCount > 0, this.disposed, this.fault?.code);
+    const snapshot = deriveEngineActivity(await this.store.list(), await this.store.getBulkBatches(), await this.store.getProviderPause(), await this.store.getOperatorPause(), this.running || this.explicitDispatchCount > 0, this.disposed, this.fault?.code);
     if (revision !== this.activityRevision) return;
     for (const listener of this.activityListeners) { try { listener(snapshot); } catch { /* isolated observer */ } }
   }
@@ -437,6 +438,9 @@ export class JobEngine {
     return result;
   }
 
+  async pauseProcessing(): Promise<void> { await this.store.setOperatorPause(true, this.nowIso()); await this.emitActivity(); }
+  async resumeProcessing(): Promise<void> { await this.store.setOperatorPause(false); this.kick(); await this.emitActivity(); }
+
   async recoverInterruptedJobs(): Promise<number> {
     const recovered = await this.store.recoverInterruptedJobs();
     await this.emitActivity();
@@ -543,9 +547,12 @@ export class JobEngine {
     if (this.disposed) return "idle";
     const jobs = await this.store.list();
     const pause = await this.store.getProviderPause();
+    this.storeOperatorPaused = (await this.store.getOperatorPause()).active;
     const now = this.clock.now();
     const eligible = jobs.find((entry) => this.isEligibleNow(entry, pause, now));
     if (!eligible) return "idle";
+    this.storeOperatorPaused = (await this.store.getOperatorPause()).active;
+    if (this.storeOperatorPaused) { await this.emitActivity(); return "idle"; }
     await this.runPhaseStep(eligible);
     await this.emitActivity();
     return "processed";
@@ -555,6 +562,7 @@ export class JobEngine {
     if (entry.status !== "queued") return false;
     if (entry.nextAttemptAtMs !== undefined && entry.nextAttemptAtMs > now) return false;
     if (pause.active && entry.job.kind === "process-note") return false;
+    if (this.storeOperatorPaused) return false;
     return true;
   }
 

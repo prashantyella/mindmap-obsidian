@@ -1,4 +1,4 @@
-import { Menu, setIcon } from "obsidian";
+import { Menu, Notice, setIcon } from "obsidian";
 
 import {
   buildStatusBarMenuItems,
@@ -7,6 +7,7 @@ import {
   type StatusBarMenuItemDescriptor,
   type StatusBarMenuState,
   type StatusBarPresentation,
+  dispatchStatusBarAction,
 } from "./statusBarState";
 
 export type {
@@ -63,7 +64,11 @@ function addMenuItem(menu: Menu, descriptor: StatusBarMenuItemDescriptor, action
     const action = descriptor.action;
     if (action) {
       item.onClick(() => {
-        if (action === "openNote" && descriptor.path) {
+        if (action === "pauseProcessing") {
+          void Promise.resolve(dispatchStatusBarAction(action, actions)).catch(() => new Notice("Mindmap action failed. Check the engine status and try again.", 8000));
+        } else if (action === "resumeProcessing") {
+          void Promise.resolve(dispatchStatusBarAction(action, actions)).catch(() => new Notice("Mindmap action failed. Check the engine status and try again.", 8000));
+        } else if (action === "openNote" && descriptor.path) {
           void actions.openNote(descriptor.path);
         } else if (action === "runCurrent") {
           void actions.runCurrent();

@@ -88,7 +88,7 @@ export class JobStore {
   private async loadOrInit(): Promise<JobStoreDocumentV1> {
     if (this.cached) return this.cached;
     const loaded = await this.store.load();
-    const doc = loaded ?? { schemaVersion: 1 as const, jobs: [], providerPause: { active: false }, scheduledOccurrences: [], bulkBatches: [] };
+    const doc = loaded ?? { schemaVersion: 1 as const, jobs: [], providerPause: { active: false }, scheduledOccurrences: [], bulkBatches: [], operatorPause: { active: false } };
     this.cached = deepFreeze(doc);
     return this.cached;
   }
@@ -159,6 +159,8 @@ export class JobStore {
     const doc = await this.loadOrInit();
     return doc.providerPause;
   }
+  async getOperatorPause(): Promise<{ active: boolean; pausedAt?: string }> { return (await this.loadOrInit()).operatorPause; }
+  setOperatorPause(active: boolean, pausedAt = new Date().toISOString()): Promise<void> { return this.mutate((doc) => doc.operatorPause.active === active ? { doc, resultOf: () => undefined } : { doc: { ...doc, operatorPause: active ? { active: true, pausedAt } : { active: false } }, resultOf: () => undefined }); }
 
   async getBulkBatches(): Promise<readonly BulkBatchV1[]> {
     return (await this.loadOrInit()).bulkBatches;

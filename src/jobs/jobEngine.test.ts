@@ -114,6 +114,67 @@ void test("activity subscription emits active before a controlled runner release
   unsubscribe();
 });
 
+void test("operator pause is durable, gates the next phase, and resume kicks after restart", async () => {
+  const runner = new ScriptedRunner((job) => ({ type: "advance", nextPhase: job.job.phase === "discover" ? "embed" : "extract-metadata" }));
+  const h = makeEngine({ "process-note": runner });
+  const job = await h.engine.submit({ trigger: "manual", kind: "process-note", identity: noteIdentity("Notes/Pause.md"), sourceHash: "a".repeat(64), embeddingModel: "m1", pipelineVersion: 1 });
+  await h.engine.pauseProcessing();
+  assert.equal((await h.store.getOperatorPause()).active, true);
+  assert.equal(await h.engine.runOnce(), "idle");
+  await h.engine.resumeProcessing();
+  assert.equal(await h.engine.runOnce(), "processed");
+  assert.equal((await h.store.getById(job.job.jobId))?.job.phase, "embed");
+});
+
+void test("pausing during an active phase lets it commit once, then blocks the next phase until resume", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const runner = new ScriptedRunner(async (job) => { if (job.job.phase === "discover") await gate; return { type: "advance", nextPhase: job.job.phase === "discover" ? "embed" : "extract-metadata" }; });
+  const h = makeEngine({ "process-note": runner });
+  const job = await h.engine.submit({ trigger: "manual", kind: "process-note", identity: noteIdentity("Notes/Race.md"), sourceHash: "a".repeat(64), embeddingModel: "m1", pipelineVersion: 1 });
+  const dispatch = h.engine.runOnce();
+  await new Promise((resolve) => setImmediate(resolve));
+  await h.engine.pauseProcessing();
+  release();
+  await dispatch;
+  assert.equal(runner.calls.length, 1);
+  assert.equal(await h.engine.runOnce(), "idle");
+  await h.engine.resumeProcessing();
+  assert.equal(await h.engine.runOnce(), "processed");
+  assert.equal((await h.store.getById(job.job.jobId))?.job.phase, "extract-metadata");
+});
+
+void test("a fresh engine remains paused across restart until resumed", async () => {
+  const runner = new ScriptedRunner((job: PersistedJobV1) => ({ type: "advance" as const, nextPhase: job.job.phase === "discover" ? "embed" as const : "extract-metadata" as const }));
+  const h = makeEngine({ "process-note": runner });
+  await h.engine.pauseProcessing();
+  await h.engine.submit({ trigger: "manual", kind: "process-note", identity: noteIdentity("Notes/Restart.md"), sourceHash: "a".repeat(64), embeddingModel: "m1", pipelineVersion: 1 });
+  const fresh = new JobEngine(h.store, { "process-note": runner });
+  assert.equal(await fresh.runOnce(), "idle");
+  await fresh.resumeProcessing();
+  assert.equal(await fresh.runOnce(), "processed");
+});
+
+void test("repeated operator pause/resume is idempotent and clears pausedAt", async () => {
+  const h = makeEngine({});
+  await h.engine.pauseProcessing();
+  const first = await h.store.getOperatorPause();
+  await h.engine.pauseProcessing();
+  assert.equal((await h.store.getOperatorPause()).pausedAt, first.pausedAt);
+  await h.engine.resumeProcessing();
+  await h.engine.resumeProcessing();
+  assert.deepEqual(await h.store.getOperatorPause(), { active: false });
+});
+
+void test("provider pause remains independent when operator pause resumes", async () => {
+  const h = makeEngine({});
+  await h.store.setProviderPause({ active: true, code: "EMBEDDING_TIMEOUT", pausedAtMs: 1 });
+  await h.engine.pauseProcessing();
+  await h.engine.resumeProcessing();
+  assert.equal((await h.store.getOperatorPause()).active, false);
+  assert.equal((await h.store.getProviderPause()).active, true);
+});
+
 void test("bulk denominator comes only from the committed scope discovery receipt and blocks premature settlement", async () => {
   const { engine, store } = makeEngine({});
   const root = await engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "all", pipelineVersion: 1 });

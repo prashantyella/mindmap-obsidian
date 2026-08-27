@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 import { buildStatusBarMenuItems, buildStatusBarPresentation, buildStatusSummary, type StatusBarMenuActions, type StatusBarMenuState } from "./statusBarState";
+import { dispatchStatusBarAction } from "./statusBarState";
 import { NO_ACTIVE_NOTE } from "./individualNote";
 import { registerMindmapCommands } from "./pluginCommands";
 
@@ -46,6 +47,8 @@ function labelTitles(items: ReturnType<typeof buildStatusBarMenuItems>): string[
 
 // A full ACTIONS implementation for compile-time proof every action key is actually wired end to end.
 const ALL_ACTIONS_STUB: StatusBarMenuActions = {
+  pauseProcessing: () => undefined,
+  resumeProcessing: () => undefined,
   runCurrent: () => undefined,
   runActiveNote: () => undefined,
   runAll: () => undefined,
@@ -113,6 +116,31 @@ void test("activity-driven presentation uses approved alert/progress/queued labe
   const progress = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", processed: 2, total: 4, failed: 0 } } }));
   assert.equal(progress.label, "Mindmap · 2/4");
   assert.equal(progress.icon, "loader-circle");
+});
+
+void test("pause/resume menu actions dispatch to their callbacks", async () => {
+  const calls: string[] = [];
+  const actions = { ...ALL_ACTIONS_STUB, pauseProcessing: () => { calls.push("pause"); }, resumeProcessing: () => { calls.push("resume"); } };
+  await dispatchStatusBarAction("pauseProcessing", actions);
+  await dispatchStatusBarAction("resumeProcessing", actions);
+  assert.deepEqual(calls, ["pause", "resume"]);
+  assert.equal(buildStatusBarMenuItems(state({ activity: { state: "running", queuedCount: 1, activeCount: 0, processNoteCount: 0, bulkBlocked: true } })).some((item) => item.action === "pauseProcessing"), true);
+  assert.equal(buildStatusBarMenuItems(state({ activity: { state: "operator-paused", operatorPause: true, queuedCount: 1, activeCount: 0, processNoteCount: 0, bulkBlocked: true } })).some((item) => item.action === "resumeProcessing"), true);
+  assert.equal(buildStatusBarMenuItems(state()).some((item) => item.action === "pauseProcessing" || item.action === "resumeProcessing"), false);
+});
+
+void test("operator pause has distinct accessible presentation and only Resume action", () => {
+  const paused = state({ activity: { state: "operator-paused", operatorPause: true, queuedCount: 3, activeCount: 0, processNoteCount: 0, bulkBlocked: true } });
+  const presentation = buildStatusBarPresentation(paused);
+  assert.equal(presentation.label, "Mindmap · paused");
+  assert.equal(presentation.icon, "triangle-alert");
+  assert.match(presentation.ariaLabel, /paused/);
+  assert.match(presentation.ariaLabel, /queued/);
+  assert.doesNotMatch(presentation.ariaLabel, /\//);
+  const actions = buildStatusBarMenuItems(paused).filter((item) => item.action === "pauseProcessing" || item.action === "resumeProcessing");
+  assert.deepEqual(actions.map((item) => item.action), ["resumeProcessing"]);
+  const provider = buildStatusBarPresentation(state({ activity: { state: "paused", queuedCount: 1, activeCount: 0, processNoteCount: 0, bulkBlocked: true } }));
+  assert.match(provider.ariaLabel, /provider paused/);
 });
 
 void test("active engine work takes priority over passive Reading count", () => {
