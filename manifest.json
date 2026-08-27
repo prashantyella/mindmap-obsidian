@@ -1,7 +1,7 @@
 {
   "id": "mindmap-ai",
   "name": "Mindmap AI",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "minAppVersion": "1.7.2",
   "description": "Summarize notes, suggest tags and links, and research Apple Books highlights with a local, private AI workflow.",
   "author": "yella",

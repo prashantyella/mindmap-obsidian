@@ -9,6 +9,16 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.1
+
+### Added
+- The Mindmap status menu now includes durable **Pause processing** and **Resume processing** controls. Pausing lets the current atomic phase finish, prevents subsequent queued phases from starting, and remains in effect across Obsidian restarts until resumed.
+
+### Changed
+- The status bar now distinguishes a user-requested pause from an automatic provider pause while retaining queue and batch progress detail.
+
+`minAppVersion` remains `1.7.2`.
+
 ## 0.3.0
 
 ### Changed
