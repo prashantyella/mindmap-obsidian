@@ -15,7 +15,7 @@ Add an `operatorPause` record to `JobStoreDocumentV1`:
 - `active: boolean`
 - `pausedAt` only when active, as a canonical ISO timestamp
 
-Older queue documents without the field load as `{ active: false }`. The record is validated, bounded, and written through the existing atomic `JobStore` mutation lane.
+Older queue documents without the field load as `{ active: false }`. The record is validated, bounded, and written through the existing atomic `JobStore` mutation lane. `pausedAt` is required and canonical only when active, and is cleared on resume.
 
 Provider pause and operator pause are independent. Provider pause represents an automatic provider-wide failure; operator pause represents the user’s explicit choice. Both can be active at once. Resume clears only operator pause.
 

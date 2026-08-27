@@ -1028,6 +1028,8 @@ export class ProductionEngine {
   subscribeActivity(listener: (snapshot: EngineActivitySnapshot) => void): () => void {
     return this.jobEngine.subscribeActivity(listener);
   }
+  pauseProcessing(): Promise<void> { return this.jobEngine.pauseProcessing(); }
+  resumeProcessing(): Promise<void> { return this.jobEngine.resumeProcessing(); }
 }
 
 export { PREFLIGHT_CHECK_CODES };

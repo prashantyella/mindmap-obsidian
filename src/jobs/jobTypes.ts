@@ -880,6 +880,7 @@ export interface JobStoreDocumentV1 {
   /** Absent on a document persisted before Checkpoint 8's occurrence registry existed -- `parseJobStoreDocumentV1` defaults it to `[]` explicitly (a genuine migration path, never a silent pass-through of some OTHER malformed value: present-but-not-an-array, or present-with-a-malformed-entry, still fails closed). */
   scheduledOccurrences: ScheduledOccurrenceRecordV1[];
   bulkBatches: BulkBatchV1[];
+  operatorPause: { active: boolean; pausedAt?: string };
 }
 
 export type BulkBatchStatusV1 = "active" | "completed" | "completed-with-failures" | "failed" | "cancelled";
@@ -1036,7 +1037,20 @@ export function parseJobStoreDocumentV1(value: unknown): JobStoreDocumentV1 {
   }
 
   const providerPause = parseProviderPauseV1(record.providerPause);
-  return { schemaVersion: 1, jobs, providerPause, scheduledOccurrences, bulkBatches };
+  let operatorPause: { active: boolean; pausedAt?: string } = { active: false };
+  if (record.operatorPause !== undefined) {
+    if (typeof record.operatorPause !== "object" || record.operatorPause === null || Array.isArray(record.operatorPause)) throw new EngineError("JOB_STORE_CORRUPT", "JobStoreDocumentV1.operatorPause must be an object.", {});
+    const pause = record.operatorPause as Record<string, unknown>;
+    if (typeof pause.active !== "boolean") throw new EngineError("JOB_STORE_CORRUPT", "operatorPause.active must be a boolean.", {});
+    if (pause.active) {
+      if (typeof pause.pausedAt !== "string") throw new EngineError("JOB_STORE_CORRUPT", "operatorPause.pausedAt must be canonical ISO-8601.", {});
+      let canonicalPausedAt: string;
+      try { canonicalPausedAt = new Date(pause.pausedAt).toISOString(); } catch { throw new EngineError("JOB_STORE_CORRUPT", "operatorPause.pausedAt must be canonical ISO-8601.", {}); }
+      if (canonicalPausedAt !== pause.pausedAt) throw new EngineError("JOB_STORE_CORRUPT", "operatorPause.pausedAt must be canonical ISO-8601.", {});
+      operatorPause = { active: true, pausedAt: pause.pausedAt };
+    } else if (pause.pausedAt !== undefined) throw new EngineError("JOB_STORE_CORRUPT", "Inactive operatorPause must not carry pausedAt.", {});
+  }
+  return { schemaVersion: 1, jobs, providerPause, scheduledOccurrences, bulkBatches, operatorPause };
 }
 
 /**

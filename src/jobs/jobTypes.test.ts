@@ -75,6 +75,19 @@ void test("bulk batch schema remains compatible with queue documents missing bul
   assert.deepEqual(parsed.bulkBatches, []);
 });
 
+void test("operatorPause defaults false and malformed values fail closed", () => {
+  const legacy = parseJobStoreDocumentV1({ schemaVersion: 1, jobs: [], providerPause: { active: false }, scheduledOccurrences: [] });
+  assert.deepEqual(legacy.operatorPause, { active: false });
+  assert.throws(() => parseJobStoreDocumentV1({ schemaVersion: 1, jobs: [], providerPause: { active: false }, scheduledOccurrences: [], operatorPause: "yes" }), (error: unknown) => isEngineError(error) && error.code === "JOB_STORE_CORRUPT");
+});
+
+void test("operatorPause validates active/timestamp pairing and rejects invalid timestamps", () => {
+  const base = { schemaVersion: 1, jobs: [], providerPause: { active: false }, scheduledOccurrences: [] };
+  for (const operatorPause of [{ active: true }, { active: false, pausedAt: "2026-01-01T00:00:00.000Z" }, { active: true, pausedAt: "not-a-date" }, { active: true, pausedAt: "2026-01-01" }]) {
+    assert.throws(() => parseJobStoreDocumentV1({ ...base, operatorPause }), (error: unknown) => isEngineError(error) && error.code === "JOB_STORE_CORRUPT");
+  }
+});
+
 void test("bulk batch parser rejects malformed timestamps, root kinds, and item references", () => {
   const root = { ...scopeJob("scope-refresh"), jobId: "bulk-root", batchId: "batch" };
   const base = { schemaVersion: 1, jobs: [{ schemaVersion: 1, job: root, status: "queued", attempt: 0, cancelRequested: false }], providerPause: { active: false }, scheduledOccurrences: [] };
