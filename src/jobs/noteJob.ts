@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { MetadataOutputV1, NoteIdentityV1, SourceProjectionV1 } from "../engine/contracts";
+import type { CanonicalPath, MetadataOutputV1, NoteIdentityV1, RelatedCandidateV1, SourceProjectionV1 } from "../engine/contracts";
 import { EngineError, isEngineError } from "../engine/errors";
 import { MAX_EMBEDDING_DIMENSION } from "../engine/embeddingLimits";
 import type { NoteWriter } from "../engine/noteWriter";
@@ -92,6 +92,7 @@ export interface NoteJobDeps {
   indexStore: UpsertNoteOverlaySeam;
   /** Ordinary notes only; Apple-annotation notes always render `related` as wikilinks instead (see `NoteWriter`). Omit to leave the managed related-section body region untouched for this checkpoint's job engine. */
   buildRelatedLinks?: (metadata: MetadataOutputV1) => RelatedSectionLink[];
+  selectRelated?: (embedded: EmbeddedNote, selfPath: CanonicalPath) => Promise<RelatedCandidateV1[]>;
   mindmapHeading?: string;
   /** See `NoteReplacementSeam`. */
   replacement: NoteReplacementSeam;
@@ -452,11 +453,23 @@ export class NoteJobRunner implements JobPhaseRunner {
     // needing an illegal backward phase transition.
     const metadataResult = await this.ensureMetadata(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
     if (!metadataResult.ok) return metadataResult.outcome;
-    const metadata = metadataResult.value;
-    // Use the CURRENT resolved identity/path (requirement 8) -- never the original queued-against
-    // identity, which may now be stale after a rename.
+    let metadata = metadataResult.value;
     const resolved = this.resolvedIdentityFor(jobId, identity);
     const isAppleAnnotation = resolved.kind === "apple-annotation";
+    let relatedLinks: RelatedSectionLink[] | undefined;
+    const hasRelated = !isAppleAnnotation && (this.deps.selectRelated !== undefined || this.deps.buildRelatedLinks !== undefined);
+    if (!isAppleAnnotation && this.deps.selectRelated) {
+      const embeddedResult = await this.ensureEmbedded(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
+      if (!embeddedResult.ok) return embeddedResult.outcome;
+      const selected = await this.deps.selectRelated(embeddedResult.value, resolved.canonicalPath);
+      metadata = { ...metadata, related: selected.map((r) => r.path) };
+      this.memoryFor(jobId).metadata = metadata;
+      relatedLinks = selected.map((r) => ({ path: r.path, kind: r.kind }));
+      const postSelectFresh = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
+      if (!postSelectFresh.ok) return postSelectFresh.outcome;
+    } else if (this.deps.buildRelatedLinks && !isAppleAnnotation) {
+      relatedLinks = this.deps.buildRelatedLinks(metadata);
+    }
     let result;
     try {
       result = await this.deps.noteWriter.writeMetadata({
@@ -465,9 +478,9 @@ export class NoteJobRunner implements JobPhaseRunner {
         expectedSourceHash,
         metadata,
         isAppleAnnotation,
-        relatedLinks: this.deps.buildRelatedLinks && !isAppleAnnotation ? this.deps.buildRelatedLinks(metadata) : undefined,
+        relatedLinks,
         mindmapHeading: this.deps.mindmapHeading,
-        writeMindmapSection: !isAppleAnnotation && this.deps.buildRelatedLinks !== undefined,
+        writeMindmapSection: hasRelated,
         removeMindmapSection: false,
       });
     } catch (error) {
