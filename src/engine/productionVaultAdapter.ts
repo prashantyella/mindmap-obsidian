@@ -238,22 +238,19 @@ export interface ProductionScopeDiscoveryOptions {
  */
 export function createProductionScopeDiscoverySeam(options: ProductionScopeDiscoveryOptions, scopeRegistry: ScopeRegistry, embeddingModel: string): ScopeDiscoverySeam {
   const reader = makeCatalogTextReader(options.vault, options.vaultFileClasses);
+  const discoverPaths = async (scopeId: string, candidatePaths: readonly string[], signal: AbortSignal): Promise<ScopeDiscoveryItem[]> => {
+    const entry = scopeRegistry.get(scopeId);
+    if (!entry) return [];
+    const config: CatalogPlannerConfig = { scopeFolders: entry.scopeFolders, includeReadingAnnotations: entry.includeReadingAnnotations, minimumWords: options.minimumWords, configDir: options.configDir ?? options.vault.configDir };
+    const stream = await streamFullCatalogDiscovery(candidatePaths, config, reader, signal);
+    return stream.items.map((item) => ({ identity: item.identity, sourceHash: item.sourceHash, embeddingModel }));
+  };
   return {
     async discover(scopeId: string, signal: AbortSignal): Promise<ScopeDiscoveryItem[]> {
-      const entry = scopeRegistry.get(scopeId);
-      if (!entry) return []; // unknown scopeId -- fails closed, never widens to any other scope's folders
-      const config: CatalogPlannerConfig = {
-        scopeFolders: entry.scopeFolders,
-        includeReadingAnnotations: entry.includeReadingAnnotations,
-        minimumWords: options.minimumWords,
-        configDir: options.configDir ?? options.vault.configDir,
-      };
       const candidatePaths = options.vault.getMarkdownFiles().map((file) => file.path);
-      // Item 8: content-free streaming discovery -- never retains more than one note's body at a
-      // time, regardless of how many thousands of notes the configured scope covers.
-      const stream = await streamFullCatalogDiscovery(candidatePaths, config, reader, signal);
-      return stream.items.map((item) => ({ identity: item.identity, sourceHash: item.sourceHash, embeddingModel }));
+      return discoverPaths(scopeId, candidatePaths, signal);
     },
+    discoverPaths,
   };
 }
 

@@ -310,6 +310,7 @@ export class ProductionEngine {
         noteWriter,
         indexStore: { upsertNote: (input) => this.indexStoreUpsert(input) },
         replacement: createProductionNoteReplacementSeam(lateJobSubmitter, "manual"),
+        deferWrite: (_persisted, identity) => options.workspace?.getActiveFile()?.path === identity.canonicalPath,
       });
       // Item 3: the SAME `ScopeJobRunner` instance is deliberately registered for BOTH
       // "reading-sync" and "scope-refresh" -- one runner, two job kinds, exactly like
@@ -977,6 +978,14 @@ export class ProductionEngine {
     const items = await this.pendingDiscoverySeam.discover(scopeId, signal ?? this.lifecycleAbort.signal);
     return items.map((item) => ({ identity: item.identity, sourceHash: item.sourceHash }));
   }
+
+  /** Returns targeted results for the given paths, or `null` when targeted discovery is not supported (the caller must fall back to full discovery and replace its caches). */
+  async getPendingCandidatesForPaths(scopeId: string, paths: readonly string[], signal?: AbortSignal): Promise<{ identity: import("./contracts").NoteIdentityV1; sourceHash: string }[] | null> {
+    if (!this.pendingDiscoverySeam.discoverPaths) return null;
+    const items = await this.pendingDiscoverySeam.discoverPaths(scopeId, paths, signal ?? this.lifecycleAbort.signal);
+    return items.map((item) => ({ identity: item.identity, sourceHash: item.sourceHash }));
+  }
+  wake(): void { this.jobEngine.wake(); }
 
   private emptyPreflightReport(nowIso: string = new Date().toISOString()): PreflightReportV1 {
     return { schemaVersion: 1, generatedAtIso: nowIso, checks: [], summary: { runtimeReady: false, overallStatus: "unavailable", requiredOkCount: 0, requiredCount: 0, optionalOkCount: 0, optionalCount: 0 } };

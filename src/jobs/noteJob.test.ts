@@ -809,3 +809,82 @@ void test("duplicate manual triggers for the same note/sourceHash coalesce into 
   const key = computeJobIdempotencyKey("process-note", { schemaVersion: 1, kind: "note", identity: identity() }, 1, hash, "test-model");
   assert.equal(first.job.idempotencyKey, key);
 });
+
+// --- deferWrite tests ---
+
+function buildHarnessWithDefer(deferFn: (persisted: import("./jobTypes").PersistedJobV1, id: NoteIdentityV1) => boolean, initialContent = RAW_CONTENT): Harness {
+  const vault = new FakeVault();
+  vault.files.set(NOTE_PATH, initialContent);
+  const sourceReader = new FakeSourceReader(vault);
+  const embedding = new FakeEmbedding();
+  const metadata = new FakeMetadata();
+  const index = new FakeIndex();
+  const noteWriter = new NoteWriter(vault);
+  const replacement = new NoopReplacement();
+  const runner = new NoteJobRunner({ sourceReader, embedding, metadata, noteWriter, indexStore: index, replacement, deferWrite: deferFn });
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const clock = new FakeClock();
+  const engine = new JobEngine(store, { "process-note": runner }, clock);
+  return { vault, sourceReader, embedding, metadata, index, noteWriter, runner, replacement, fs, store, engine, clock };
+}
+
+void test("deferWrite: a batched note job defers at write-note when deferWrite returns true", async () => {
+  // deferWrite returns true for our test note
+  const h = buildHarnessWithDefer(() => true);
+  const hash = sourceHashOf(RAW_CONTENT);
+  // Submit as a bulk child so the job has a batchId
+  const root = await h.engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "test-scope", pipelineVersion: 1 });
+  const batchId = root.job.batchId!;
+  assert.ok(batchId, "scope-refresh must create a batch");
+  const child = await h.engine.submitBulkChild(batchId, { trigger: "manual", kind: "process-note", identity: identity(), sourceHash: hash, embeddingModel: "test-model", pipelineVersion: 1 });
+  assert.ok(child, "bulk child must be created");
+  // Drain — the note job should advance through discover/embed/metadata/confirm-source but defer at write-note
+  await h.engine.drain();
+  const final = await h.store.getById(child!.job.jobId);
+  assert.equal(final?.status, "queued", "deferred job must remain queued");
+  assert.equal(final?.job.phase, "write-note", "deferred job must be at write-note phase");
+  assert.equal(h.vault.modifyCount, 0, "note must NOT be written while deferred");
+  assert.equal(h.index.calls.length, 0, "overlay must NOT be written while deferred");
+});
+
+void test("deferWrite: an explicit (non-batch) note job is NOT deferred even when deferWrite returns true", async () => {
+  const h = buildHarnessWithDefer(() => true);
+  const hash = sourceHashOf(RAW_CONTENT);
+  // Submit directly — no batchId
+  await submitNoteJob(h, hash);
+  await h.engine.drain();
+  const jobs = await h.store.list();
+  const noteJob = jobs.find((j) => j.job.kind === "process-note");
+  assert.equal(noteJob?.status, "completed", "non-batch job must complete even when deferWrite returns true");
+  assert.equal(h.vault.modifyCount, 1, "note must be written");
+});
+
+void test("deferWrite: a batched note job proceeds when deferWrite returns false", async () => {
+  const h = buildHarnessWithDefer(() => false);
+  const hash = sourceHashOf(RAW_CONTENT);
+  const root = await h.engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "test-scope", pipelineVersion: 1 });
+  const child = await h.engine.submitBulkChild(root.job.batchId!, { trigger: "manual", kind: "process-note", identity: identity(), sourceHash: hash, embeddingModel: "test-model", pipelineVersion: 1 });
+  assert.ok(child);
+  await h.engine.drain();
+  const final = await h.store.getById(child!.job.jobId);
+  assert.equal(final?.status, "completed", "batch job must complete when deferWrite returns false");
+  assert.equal(h.vault.modifyCount, 1);
+});
+
+void test("deferWrite: wake retries a deferred batch note job", async () => {
+  let activeFile: string | null = NOTE_PATH;
+  const h = buildHarnessWithDefer((_persisted, id) => id.canonicalPath === activeFile);
+  const hash = sourceHashOf(RAW_CONTENT);
+  const root = await h.engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "test-scope", pipelineVersion: 1 });
+  const child = await h.engine.submitBulkChild(root.job.batchId!, { trigger: "manual", kind: "process-note", identity: identity(), sourceHash: hash, embeddingModel: "test-model", pipelineVersion: 1 });
+  assert.ok(child);
+  await h.engine.drain();
+  assert.equal((await h.store.getById(child!.job.jobId))?.status, "queued", "job deferred while active");
+  // Simulate user switching away from the file
+  activeFile = null;
+  h.engine.wake();
+  await h.engine.drain();
+  assert.equal((await h.store.getById(child!.job.jobId))?.status, "completed", "job must complete after wake when file is no longer active");
+  assert.equal(h.vault.modifyCount, 1);
+});

@@ -963,3 +963,31 @@ void test("(final-closure requirement 5) the SEMANTIC snapshot match and the BYT
   // NOT match -- proving a post-receipt exact-artifact check catches what the semantic one cannot.
   assert.notEqual(manifestArtifactFingerprint(alteredManifest), originalFingerprint);
 });
+
+// --- IndexMutationQueue tests ---
+
+void test("IndexMutationQueue: revision is shared across all callers of the same queue", async () => {
+  const { IndexMutationQueue } = await import("./indexStore");
+  const queue = new IndexMutationQueue();
+  assert.equal(queue.getRevision(), 0, "initial revision is 0");
+  await queue.run(async () => {});
+  assert.equal(queue.getRevision(), 1, "revision increments after successful run");
+  await queue.run(async () => {});
+  assert.equal(queue.getRevision(), 2, "revision increments again");
+});
+
+void test("IndexMutationQueue: revision does not increment on failure", async () => {
+  const { IndexMutationQueue } = await import("./indexStore");
+  const queue = new IndexMutationQueue();
+  await queue.run(async () => {}); // revision = 1
+  assert.equal(queue.getRevision(), 1);
+  try {
+    await queue.run(async () => { throw new Error("task failed"); });
+  } catch {
+    // expected
+  }
+  assert.equal(queue.getRevision(), 1, "revision must not increment after a failed task");
+  // A subsequent success should still increment
+  await queue.run(async () => {});
+  assert.equal(queue.getRevision(), 2, "revision increments after recovery");
+});

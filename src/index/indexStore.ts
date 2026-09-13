@@ -343,15 +343,18 @@ export interface UpsertNoteInput {
  */
 export class IndexMutationQueue {
   private tail: Promise<void> = Promise.resolve();
+  private revision = 0;
 
   run<T>(task: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(task, task);
+    const result = this.tail.then(async () => { const value = await task(); this.revision += 1; return value; }, task);
     this.tail = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
   }
+
+  getRevision(): number { return this.revision; }
 }
 
 interface MutationContext {
@@ -925,6 +928,8 @@ export class IndexStore {
   snapshotCatalog(): Promise<IndexedCatalogRecord[] | null> {
     return snapshotIndexedCatalog(this.fs, this.root);
   }
+
+  getRevision(): number { return this.queue.getRevision(); }
 
   /**
    * Read-only, manifest-only note count for the CURRENT committed

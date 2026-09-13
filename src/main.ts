@@ -276,7 +276,8 @@ export default class MindmapPlugin extends Plugin {
     registerVaultRefreshEvents(this.app.vault, (event) => this.registerEvent(event), (reason, paths) => {
       this.pendingScanService?.requestRefresh(reason, paths);
     });
-    this.registerEvent(this.app.workspace.on("active-leaf-change", () => { void this.refreshActiveNoteEligibility(); }));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => { this.productionEngine?.wake(); void this.refreshActiveNoteEligibility(); }));
+    this.registerEvent(this.app.workspace.on("file-open", () => { this.productionEngine?.wake(); void this.refreshActiveNoteEligibility(); }));
     await this.migrateLegacyConfigOnce();
     await this.startProductionEngine();
     void this.pendingScanService.warm().then(() => this.updateStatusBar());
