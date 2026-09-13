@@ -236,7 +236,6 @@ export default class MindmapPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
-    await this.retireLegacyLaunchAgents();
 
     this.statusBarEl = this.addStatusBarItem();
     configureStatusBarElement(this.statusBarEl, (event) => this.openStatusMenu(event));
@@ -255,7 +254,6 @@ export default class MindmapPlugin extends Plugin {
       rename: async (source, target) => await fs.promises.rename(source, target),
       unlink: async (filePath) => await fs.promises.unlink(filePath),
     });
-    await this.refreshAutomaticResearchPolicyStatus();
     this.readingModeController = this.createReadingModeController();
     this.registerView(MINDMAP_VIEW_TYPE, (leaf) => new MindmapWorkspaceView(leaf, this));
     this.registerHoverLinkSource(MINDMAP_VIEW_TYPE, {
@@ -278,11 +276,18 @@ export default class MindmapPlugin extends Plugin {
     });
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => { this.productionEngine?.wake(); void this.refreshActiveNoteEligibility(); }));
     this.registerEvent(this.app.workspace.on("file-open", () => { this.productionEngine?.wake(); void this.refreshActiveNoteEligibility(); }));
+
+    this.app.workspace.onLayoutReady(() => { void this.onLayoutReadyDeferred(); });
+  }
+
+  private async onLayoutReadyDeferred(): Promise<void> {
+    await this.retireLegacyLaunchAgents();
+    await this.refreshAutomaticResearchPolicyStatus();
     await this.migrateLegacyConfigOnce();
     await this.startProductionEngine();
-    void this.pendingScanService.warm().then(() => this.updateStatusBar());
+    void this.pendingScanService?.warm().then(() => this.updateStatusBar());
     if (this.settings.readingMode === "reading") {
-      void this.readingModeController.start();
+      void this.readingModeController?.start();
     }
   }
 
