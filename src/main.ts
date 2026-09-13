@@ -1886,6 +1886,13 @@ export default class MindmapPlugin extends Plugin {
         void this.refreshCachedMigrationStatus();
         this.invalidateLiveMindmapViews();
       },
+      importAppleBooks: this.readingStateStore ? async (payload) => {
+        await importAppleBooksAnnotations(payload, {
+          vault: createObsidianVaultApi(this.app.vault, TFile),
+          state: this.readingStateStore!,
+          configDir: this.app.vault.configDir,
+        });
+      } : undefined,
     };
   }
 

@@ -269,7 +269,7 @@ export async function getIndexedRecord(fs: IndexFs, root: string, identity: Note
     if (overlay.operation !== "upsert" || overlay.sourceHash === undefined || overlay.embeddingModel === undefined || overlay.chunkCount === undefined) {
       return null;
     }
-    return { schemaVersion: 1, identity: overlay.identity, sourceHash: overlay.sourceHash, embeddingModel: overlay.embeddingModel, chunkCount: overlay.chunkCount };
+    return { schemaVersion: 1, identity: overlay.identity, sourceHash: overlay.sourceHash, embeddingModel: overlay.embeddingModel, chunkCount: overlay.chunkCount, ...(overlay.relatedVersion !== undefined ? { relatedVersion: overlay.relatedVersion } : {}) };
   }
   const generationId = await loadCurrentGenerationId(fs, root);
   if (generationId === null) return null;
@@ -281,6 +281,7 @@ export async function getIndexedRecord(fs: IndexFs, root: string, identity: Note
 export interface IndexedCatalogRecord {
   identity: NoteIdentityV1;
   sourceHash: string;
+  relatedVersion?: number;
 }
 
 /**
@@ -314,11 +315,11 @@ export async function snapshotIndexedCatalog(fs: IndexFs, root: string): Promise
   const result: IndexedCatalogRecord[] = [];
   for (const row of baseRecords) {
     if (shadow.byKey.has(identityKey(row.identity))) continue; // shadowed by a later overlay (tombstone or upsert) -- handled below, or removed
-    result.push({ identity: row.identity, sourceHash: row.sourceHash });
+    result.push({ identity: row.identity, sourceHash: row.sourceHash, ...(row.relatedVersion !== undefined ? { relatedVersion: row.relatedVersion } : {}) });
   }
   for (const overlay of overlays) {
     if (overlay.operation !== "upsert" || overlay.sourceHash === undefined) continue;
-    result.push({ identity: overlay.identity, sourceHash: overlay.sourceHash });
+    result.push({ identity: overlay.identity, sourceHash: overlay.sourceHash, ...(overlay.relatedVersion !== undefined ? { relatedVersion: overlay.relatedVersion } : {}) });
   }
   return result;
 }
@@ -330,6 +331,7 @@ export interface UpsertNoteInput {
   dimension: number;
   noteVector: Float32Array;
   chunkVectors: Float32Array[];
+  relatedVersion?: number;
 }
 
 /**
