@@ -65,6 +65,7 @@ export interface UpsertNoteOverlaySeam {
     dimension: number;
     noteVector: Float32Array;
     chunkVectors: Float32Array[];
+    relatedVersion?: number;
   }): Promise<void>;
 }
 
@@ -93,6 +94,7 @@ export interface NoteJobDeps {
   /** Ordinary notes only; Apple-annotation notes always render `related` as wikilinks instead (see `NoteWriter`). Omit to leave the managed related-section body region untouched for this checkpoint's job engine. */
   buildRelatedLinks?: (metadata: MetadataOutputV1) => RelatedSectionLink[];
   selectRelated?: (embedded: EmbeddedNote, selfPath: CanonicalPath) => Promise<RelatedCandidateV1[]>;
+  relatedVersion?: number;
   mindmapHeading?: string;
   /** See `NoteReplacementSeam`. */
   replacement: NoteReplacementSeam;
@@ -512,6 +514,7 @@ export class NoteJobRunner implements JobPhaseRunner {
         dimension: embedded.dimension,
         noteVector: embedded.noteVector,
         chunkVectors: embedded.chunkVectors,
+        ...(this.deps.relatedVersion !== undefined ? { relatedVersion: this.deps.relatedVersion } : {}),
       });
     } catch (error) {
       return this.providerFailureOutcome(error);

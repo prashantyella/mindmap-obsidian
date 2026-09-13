@@ -22,6 +22,7 @@ import { AppleBooksSqliteReader, createNodeAppleBooksFsAdapter, type AppleBooksF
 import { createNodeSqliteProcess, type SqliteProcess } from "../reading/sqliteProcess";
 import {
   createDeferredScopeImportSeam,
+  createProductionScopeImportSeam,
   createProductionNoteReplacementSeam,
   createProductionNoteSourceReader,
   createProductionNoteVaultAdapter,
@@ -54,6 +55,7 @@ import { MigrationDriver } from "../migration/migrationDriver";
 export const PRODUCTION_SCOPE_CURRENT = "current";
 export const PRODUCTION_SCOPE_ALL = "all";
 export const PRODUCTION_SCOPE_READING = "reading";
+export const PRODUCTION_RELATED_VERSION = 1;
 
 /** Exported for direct, focused testing of the exact registry `ProductionEngine` itself composes -- see `productionEngine.test.ts`'s own scope-registry regression tests. Never imported/used by any other production module. */
 export function buildProductionScopeRegistry(options: Pick<ProductionEngineOptions, "scopeFolders" | "currentScopeFolders">): ScopeRegistry {
@@ -193,6 +195,7 @@ export interface ProductionEngineOptions {
   onFault?: (fault: ProductionEngineFault) => void;
   /** Checkpoint 10B SIDEBAR: fired every time migration settles at phase `"complete"` (mirrors the internal `tryStartOrdinaryWork()` call this shares a subscription with -- safe to fire more than once per engine instance, e.g. a later config-driven re-migration) -- lets a caller (main.ts) refresh anything that cached an empty/not-indexed result while migration was still running (e.g. an open Mindmap sidebar's `queryLiveRelated` cache), since the engine itself has no other way to reach that caller. Never fired for any other phase. */
   onMigrationComplete?: () => void;
+  importAppleBooks?: (payload: unknown) => Promise<void>;
   preflightTimeoutMs?: number;
 }
 
@@ -324,15 +327,17 @@ export class ProductionEngine {
             { selfPath, relatedLimit: relatedConfig.relatedLimit, overreachCount: relatedConfig.overreachCount, creativeCount: relatedConfig.creativeCount, creativeMin: relatedConfig.creativeMin, creativeMax: relatedConfig.creativeMax, minScore: relatedConfig.minScore },
           );
         } : undefined,
+        relatedVersion: relatedConfig ? PRODUCTION_RELATED_VERSION : undefined,
       });
-      // Item 3: the SAME `ScopeJobRunner` instance is deliberately registered for BOTH
-      // "reading-sync" and "scope-refresh" -- one runner, two job kinds, exactly like
-      // `RebuildJobRunner` below serves "rebuild-index" alone. `"reading-sync"`'s own `"import"`
-      // phase stays the explicit, documented no-op seam (`createDeferredScopeImportSeam`) --
-      // pulling newly-read Apple Books annotations into the vault remains deferred past 10A.
+      const importSeam = options.importAppleBooks
+        ? createProductionScopeImportSeam({
+          readPayload: () => this.appleBooksReader.readAnnotations(),
+          importPayload: options.importAppleBooks,
+        })
+        : createDeferredScopeImportSeam();
       const scopeRunner = new ScopeJobRunner({
         discovery: createProductionScopeDiscoverySeam({ vault: options.vault, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses }, scopeRegistry, options.embeddingModel),
-        import: createDeferredScopeImportSeam(),
+        import: importSeam,
         enqueue: createProductionScopeEnqueueSeam(lateJobSubmitter, "manual"),
       });
       runners["scope-refresh"] = scopeRunner;
@@ -1041,6 +1046,10 @@ export class ProductionEngine {
       this.schedulerStarted = false;
       this.phase = "disposed";
     });
+  }
+
+  get relatedVersion(): number | undefined {
+    return this.options.relatedSelectionConfig ? PRODUCTION_RELATED_VERSION : undefined;
   }
 
   getCapabilityFaults(): ReadonlyMap<string, string> {

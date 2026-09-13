@@ -255,21 +255,27 @@ export function createProductionScopeDiscoverySeam(options: ProductionScopeDisco
 }
 
 /**
- * Checkpoint 10A explicitly forbids a live Apple Books call from this
- * checkpoint's composition -- a real `"reading-sync"` import (pulling
- * NEWLY-read annotations from Apple Books into the vault) would require
- * exactly that. This seam therefore stays a documented, honest no-op: it
- * satisfies `ScopeJobRunner`'s REQUIRED dependency (so composing a
- * `"reading-sync"` runner never silently skips its `"import"` phase, per
- * `ScopeJobDeps`'s own doc comment) without ever touching Apple Books.
- * `"reading-sync"` is not exercised in 10A's migration flow (which only
- * ever submits `"scope-refresh"`/`"process-note"`/`"migrate-index"`); a
- * later checkpoint wires the real import against `appleBooksImport.ts`.
+ * No-op import seam for contexts where Apple Books import is not available
+ * (e.g. no reader configured, or non-desktop platforms).
  */
 export function createDeferredScopeImportSeam(): ScopeImportSeam {
   return {
-    async import(): Promise<void> {
-      // Deliberately empty -- see this function's own doc comment.
+    async import(): Promise<void> {},
+  };
+}
+
+export interface ProductionScopeImportDeps {
+  readPayload: () => Promise<unknown>;
+  importPayload: (payload: unknown) => Promise<void>;
+}
+
+export function createProductionScopeImportSeam(deps: ProductionScopeImportDeps): ScopeImportSeam {
+  return {
+    async import(_scopeId, _items, signal): Promise<void> {
+      if (signal.aborted) return;
+      const payload = await deps.readPayload();
+      if (signal.aborted) return;
+      await deps.importPayload(payload);
     },
   };
 }

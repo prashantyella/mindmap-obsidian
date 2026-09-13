@@ -173,9 +173,9 @@ export class ProductionPendingScanService {
       const currentItems = merge(PRODUCTION_SCOPE_CURRENT, currentDiscovered);
       const allItems = merge(PRODUCTION_SCOPE_ALL, allDiscovered);
 
-      const indexedHashByPath = new Map<string, string>();
+      const indexedByPath = new Map<string, { sourceHash: string; relatedVersion?: number }>();
       if (catalog) {
-        for (const record of catalog) indexedHashByPath.set(record.identity.canonicalPath, record.sourceHash);
+        for (const record of catalog) indexedByPath.set(record.identity.canonicalPath, { sourceHash: record.sourceHash, relatedVersion: record.relatedVersion });
       }
       const queuedHashByPath = new Map<string, string>();
       for (const persisted of jobs) {
@@ -185,8 +185,13 @@ export class ProductionPendingScanService {
         queuedHashByPath.set(persisted.job.target.identity.canonicalPath, persisted.job.sourceHash);
       }
 
+      const expectedRelatedVersion = engine.relatedVersion;
       const isPending = (canonicalPath: string, sourceHash: string): boolean => {
-        if (indexedHashByPath.get(canonicalPath) === sourceHash) return false;
+        const indexed = indexedByPath.get(canonicalPath);
+        if (indexed && indexed.sourceHash === sourceHash) {
+          if (expectedRelatedVersion !== undefined && (indexed.relatedVersion ?? 0) < expectedRelatedVersion) return true;
+          return false;
+        }
         if (queuedHashByPath.get(canonicalPath) === sourceHash) return false;
         return true;
       };

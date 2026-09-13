@@ -357,6 +357,7 @@ export interface IndexRecordV1 {
   sourceHash: string;
   embeddingModel: string;
   chunkCount: number;
+  relatedVersion?: number;
 }
 
 export function parseIndexRecordV1(value: unknown): IndexRecordV1 {
@@ -369,7 +370,10 @@ export function parseIndexRecordV1(value: unknown): IndexRecordV1 {
   if (typeof value.chunkCount !== "number" || !Number.isInteger(value.chunkCount) || value.chunkCount < 0) {
     throw new EngineError("CONTRACT_SHAPE_INVALID", `${contractName}.chunkCount must be a non-negative integer.`, { contractName });
   }
-  return { schemaVersion: 1, identity, sourceHash: value.sourceHash, embeddingModel, chunkCount: value.chunkCount };
+  if (value.relatedVersion !== undefined && (typeof value.relatedVersion !== "number" || !Number.isInteger(value.relatedVersion) || value.relatedVersion < 0)) {
+    throw new EngineError("CONTRACT_SHAPE_INVALID", `${contractName}.relatedVersion must be a non-negative integer when present.`, { contractName });
+  }
+  return { schemaVersion: 1, identity, sourceHash: value.sourceHash, embeddingModel, chunkCount: value.chunkCount, ...(value.relatedVersion !== undefined ? { relatedVersion: value.relatedVersion } : {}) };
 }
 
 /**

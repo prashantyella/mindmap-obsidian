@@ -117,6 +117,7 @@ interface OverlayMetadataV1 {
   embeddingModel?: string;
   dimension?: number;
   chunkCount?: number;
+  relatedVersion?: number;
 }
 
 /**
@@ -196,6 +197,9 @@ function parseOverlayMetadataJson(bytes: Uint8Array, expectedFileName: string): 
   if (record.chunkCount > MAX_MANIFEST_SHARD_ROW_COUNT) {
     throw new OverlayStoreError(`overlay metadata chunkCount (${record.chunkCount}) exceeds the maximum shard row count (${MAX_MANIFEST_SHARD_ROW_COUNT}).`);
   }
+  if (record.relatedVersion !== undefined && (typeof record.relatedVersion !== "number" || !Number.isInteger(record.relatedVersion) || record.relatedVersion < 0)) {
+    throw new OverlayStoreError("overlay metadata relatedVersion must be a non-negative integer when present.");
+  }
   return {
     identity,
     operation: "upsert",
@@ -206,6 +210,7 @@ function parseOverlayMetadataJson(bytes: Uint8Array, expectedFileName: string): 
     embeddingModel: record.embeddingModel,
     dimension: record.dimension,
     chunkCount: record.chunkCount,
+    ...(record.relatedVersion !== undefined ? { relatedVersion: record.relatedVersion } : {}),
   };
 }
 
@@ -220,6 +225,7 @@ export interface OverlayPrefixRecord {
   embeddingModel?: string;
   dimension?: number;
   chunkCount?: number;
+  relatedVersion?: number;
   /** `undefined` for a tombstone. */
   noteVector?: Float32Array;
   /** This overlay container's exact total on-disk byte length (header + both checksums + metadata JSON + note-vector bytes + chunk-vector bytes) -- known from the header alone (`overlayContainerTotalLength`), never requiring a full read. Used for actual (not worst-case-reserved) disk-budget accounting -- see `indexStore.ts`'s per-mutation resource-budget check. */
@@ -372,6 +378,7 @@ export interface UpsertOverlayInput {
   noteVector: Float32Array;
   /** Raw chunk embeddings, in chunk order; normalized here. */
   chunkVectors: Float32Array[];
+  relatedVersion?: number;
   now?: () => Date;
   /** Test-injectable override for the generated `mutationId`; defaults to `randomUUID()`. */
   mutationId?: string;
@@ -420,6 +427,7 @@ export async function writeUpsertOverlay(fs: IndexFs, root: string, input: Upser
     embeddingModel: input.embeddingModel,
     dimension: input.dimension,
     chunkCount: chunkVectors.length,
+    ...(input.relatedVersion !== undefined ? { relatedVersion: input.relatedVersion } : {}),
   };
 
   const noteMatrixEncoded = encodeVectorMatrix({ kind: "note", dimension: input.dimension, count: 1, data: noteVector });

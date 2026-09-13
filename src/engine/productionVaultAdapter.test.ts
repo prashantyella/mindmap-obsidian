@@ -13,6 +13,7 @@ import {
   createProductionNoteVaultAdapter,
   createProductionScopeDiscoverySeam,
   createProductionScopeEnqueueSeam,
+  createProductionScopeImportSeam,
   openRelatedNote,
 } from "./productionVaultAdapter";
 
@@ -259,6 +260,28 @@ void test("createProductionScopeDiscoverySeam (10B blocker resolution) fails clo
 void test("createDeferredScopeImportSeam.import resolves without touching anything -- a documented no-op, never a live Apple Books call", async () => {
   const seam = createDeferredScopeImportSeam();
   await assert.doesNotReject(() => seam.import("reading-scope", [], new AbortController().signal));
+});
+
+void test("createProductionScopeImportSeam reads payload and passes it to importPayload", async () => {
+  const calls: unknown[] = [];
+  const seam = createProductionScopeImportSeam({
+    readPayload: async () => ({ books: ["a"] }),
+    importPayload: async (p) => { calls.push(p); },
+  });
+  await seam.import("reading-scope", [], new AbortController().signal);
+  assert.deepEqual(calls, [{ books: ["a"] }]);
+});
+
+void test("createProductionScopeImportSeam skips work when signal is already aborted", async () => {
+  let read = false;
+  const seam = createProductionScopeImportSeam({
+    readPayload: async () => { read = true; return {}; },
+    importPayload: async () => {},
+  });
+  const ac = new AbortController();
+  ac.abort();
+  await seam.import("reading-scope", [], ac.signal);
+  assert.equal(read, false);
 });
 
 void test("createProductionScopeEnqueueSeam forwards to the injected job submitter with the given trigger/pipelineVersion", async () => {
