@@ -45,9 +45,9 @@ export interface EmbeddedNote {
  * Provider/model seams. Deliberately narrow, provider-neutral function
  * contracts -- NOT a direct dependency on `OllamaEmbeddingProvider`'s or
  * `metadataPipeline`'s concrete config shapes, since wiring those concrete
- * providers together is later checkpoints' job (Checkpoint 9's
- * `MindmapEngine` composition). Every result here is used in-memory only
- * for the remainder of this one job run; none of it is ever persisted.
+ * providers is the composition root's job (`productionEngine.ts`). Every
+ * result here is used in-memory only for the remainder of this one job
+ * run; none of it is ever persisted.
  */
 export interface NoteEmbeddingSeam {
   embed(projection: SourceProjectionV1, signal: AbortSignal): Promise<EmbeddedNote>;

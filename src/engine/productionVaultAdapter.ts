@@ -47,7 +47,7 @@ function isTFolderStructural(candidate: TAbstractFile): candidate is TFolder {
   return Array.isArray(record.children);
 }
 
-/** Item 3 (10A blocker pass): the real Obsidian `TFile`/`TFolder` CLASSES, injectable by the composition root (`main.ts`, safely importing them as values exactly like it already does elsewhere) once a later checkpoint wires this module up for real. */
+/** Item 3 (10A blocker pass): the real Obsidian `TFile`/`TFolder` CLASSES, injected by the composition root (`main.ts`). */
 export interface VaultFileClasses {
   TFile: abstract new (...args: never[]) => TFile;
   TFolder: abstract new (...args: never[]) => TFolder;

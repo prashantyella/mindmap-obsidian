@@ -40,11 +40,16 @@ export interface ScopeEnqueueSeam {
   enqueueProcessNote(item: ScopeDiscoveryItem, pipelineVersion: number, signal: AbortSignal, batchId?: string): Promise<void>;
 }
 
+export interface ScopeIndexCheckSeam {
+  isAlreadyIndexed(identity: NoteIdentityV1, sourceHash: string): Promise<boolean>;
+}
+
 export interface ScopeJobDeps {
   discovery: ScopeDiscoverySeam;
   /** REQUIRED -- see `ScopeImportSeam`. Never referenced for a `"scope-refresh"` job (its phase list structurally never includes `"import"`), but always required at construction so a caller composing this runner for `"reading-sync"` can never forget it. */
   import: ScopeImportSeam;
   enqueue: ScopeEnqueueSeam;
+  indexCheck?: ScopeIndexCheckSeam;
 }
 
 type ScopeReceipt = Extract<JobReceiptV1, { kind: "scope" }>;
@@ -120,10 +125,10 @@ function computeDiscoveryFingerprint(items: readonly ScopeDiscoveryItem[]): stri
  * the two officially-submittable scope job kinds that had no runner at all
  * before this, and so would fail immediately (`JOB_SHAPE_INVALID`, "no
  * runner registered for this job kind") the moment anything ever
- * submitted one. No production wiring: the discovery/import/enqueue seams
- * this constructor takes are injected exactly like every other job kind's
- * dependencies, and remain a later checkpoint's job to back with the real
- * vault/Apple Books/`JobEngine.submit` implementations.
+ * submitted one. The discovery/import/enqueue seams this constructor takes
+ * are injected exactly like every other job kind's dependencies, backed by
+ * the real vault/Apple Books/`JobEngine.submit` implementations composed
+ * in `productionEngine.ts`.
  *
  * Every phase re-runs `discovery.discover()` rather than caching its
  * result across phase-steps or persisting it: the discovered item list
@@ -224,17 +229,17 @@ export class ScopeJobRunner implements JobPhaseRunner {
     if (priorReceipt?.discoveryFingerprint !== undefined && priorReceipt.discoveryFingerprint !== fingerprint) {
       return { type: "superseded", failureCode: "SCOPE_SUPERSEDED" };
     }
+    let enqueuedCount = 0;
     for (const item of items) {
-      // Checked BETWEEN every item (final-closure requirement 8): a long enqueue run stops
-      // promptly on dispose() rather than working through a large discovered set regardless.
-      // A genuine cancellation, not a transient failure (Checkpoint 7 acceptance guard 7) --
-      // dispose() is a deliberate shutdown signal, so this reports as "cancelled" rather than an
-      // "UNKNOWN_TRANSIENT" retry/backoff, which would misleadingly suggest a bare retry could
-      // succeed. Re-running enqueue from scratch after a restart is idempotent either way.
       if (signal.aborted) {
         return { type: "cancelled" };
       }
+      if (this.deps.indexCheck) {
+        const indexed = await this.deps.indexCheck.isAlreadyIndexed(item.identity, item.sourceHash);
+        if (indexed) continue;
+      }
       await this.deps.enqueue.enqueueProcessNote(item, pipelineVersion, signal, batchId);
+      enqueuedCount++;
     }
     const receipt: ScopeReceipt = {
       kind: "scope",
@@ -242,7 +247,7 @@ export class ScopeJobRunner implements JobPhaseRunner {
       discoveredCount: priorReceipt?.discoveredCount ?? items.length,
       discoveryFingerprint: fingerprint,
       imported: priorReceipt?.imported,
-      enqueuedCount: items.length,
+      enqueuedCount,
     };
     return { type: "complete", receipt };
   }
