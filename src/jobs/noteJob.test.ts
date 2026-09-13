@@ -888,3 +888,31 @@ void test("deferWrite: wake retries a deferred batch note job", async () => {
   assert.equal((await h.store.getById(child!.job.jobId))?.status, "completed", "job must complete after wake when file is no longer active");
   assert.equal(h.vault.modifyCount, 1);
 });
+
+void test("deferWrite: editing the note while deferred triggers replacement via ensureFreshProjection, not a silent obsolete", async () => {
+  let activeFile: string | null = NOTE_PATH;
+  const h = buildHarnessWithDefer((_persisted, id) => id.canonicalPath === activeFile);
+  const originalContent = RAW_CONTENT;
+  const originalHash = sourceHashOf(originalContent);
+  const root = await h.engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "test-scope", pipelineVersion: 1 });
+  const child = await h.engine.submitBulkChild(root.job.batchId!, { trigger: "manual", kind: "process-note", identity: identity(), sourceHash: originalHash, embeddingModel: "test-model", pipelineVersion: 1 });
+  assert.ok(child);
+  await h.engine.drain();
+  assert.equal((await h.store.getById(child!.job.jobId))?.status, "queued", "job deferred");
+  // Simulate the user editing the note while deferred
+  const editedContent = "---\ntitle: Example\n---\nEdited body.\n";
+  h.vault.files.set(NOTE_PATH, editedContent);
+  // Switch away and wake
+  activeFile = null;
+  h.engine.wake();
+  await h.engine.drain();
+  // The original job should be cancelled (source changed → obsolete via ensureFreshProjection)
+  const originalJob = await h.store.getById(child!.job.jobId);
+  assert.equal(originalJob?.status, "cancelled", "original job must be cancelled when source changed during deferral");
+  assert.equal(originalJob?.lastFailureCode, "SOURCE_STALE");
+  // The replacement seam must have been called with the new sourceHash
+  assert.equal(h.replacement.calls.length, 1, "replacement must be enqueued for the edited content");
+  assert.equal(h.replacement.calls[0].sourceHash, sourceHashOf(editedContent), "replacement must carry the edited sourceHash");
+  // The note must NOT have been written with stale metadata
+  assert.equal(h.vault.modifyCount, 0, "no note write should occur with stale content");
+});

@@ -209,6 +209,7 @@ export class JobEngine {
   private readonly activityListeners = new Set<(snapshot: EngineActivitySnapshot) => void>();
   private activityRevision = 0;
   private readonly deferredJobIds = new Set<string>();
+  private wakeGeneration = 0;
   private storeOperatorPaused = false;
 
   constructor(
@@ -471,7 +472,7 @@ export class JobEngine {
   }
 
   /** Wakes deferred/background work after an external state change, without altering pause semantics. */
-  wake(): void { this.deferredJobIds.clear(); this.kick(); }
+  wake(): void { this.deferredJobIds.clear(); this.wakeGeneration++; this.kick(); }
 
   /**
    * Requests that the background pump run (or keep running). Setting
@@ -835,8 +836,14 @@ export class JobEngine {
         return;
       }
       case "deferred": {
-        this.deferredJobIds.add(entry.job.jobId);
+        const gen = this.wakeGeneration;
         await this.store.updateJob(entry.job.jobId, (current) => ({ ...current, status: "queued", nextAttemptAtMs: undefined }));
+        // Only park the job if no wake() occurred during the persist — a wake that ran
+        // while updateJob was in flight already cleared deferredJobIds and bumped
+        // wakeGeneration, so re-adding the ID would lose that wake's intent.
+        if (this.wakeGeneration === gen) {
+          this.deferredJobIds.add(entry.job.jobId);
+        }
         return;
       }
     }

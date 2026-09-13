@@ -203,7 +203,7 @@ export class ProductionPendingScanService {
         metrics: {
           durationMs: end - start,
           filesListed: allItems.length,
-          filesScanned: paths.length || allItems.length,
+          filesScanned: targeted ? paths.length : allItems.length,
           filesUpdated: paths.length,
           totalTracked: catalog?.length ?? 0,
           dirtyPaths: 0,

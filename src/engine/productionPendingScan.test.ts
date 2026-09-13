@@ -340,9 +340,8 @@ void test("ProductionPendingScanService: a revision change during discovery trig
   } as unknown as ProductionEngine;
   const service = createProductionPendingScanService(() => engine, deps.log, deps.onUpdated);
   await service.warm();
-  // Discovery was called for the initial scan, then the revision change should trigger
-  // a follow-up (queuedRefresh), so we expect at least 2 discovery rounds (2 scopes each)
-  assert.ok(discoveryCalls >= 2, `expected follow-up scan; discoveryCalls = ${discoveryCalls}`);
+  // Initial scan = 2 calls (current + all), follow-up = 2 more = 4 total
+  assert.equal(discoveryCalls, 4, "expected one initial scan and exactly one follow-up scan");
 });
 
 // --- Coalesced scans with controlled timer ---
