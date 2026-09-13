@@ -465,6 +465,8 @@ export class NoteJobRunner implements JobPhaseRunner {
       metadata = { ...metadata, related: selected.map((r) => r.path) };
       this.memoryFor(jobId).metadata = metadata;
       relatedLinks = selected.map((r) => ({ path: r.path, kind: r.kind }));
+      const postSelectFresh = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
+      if (!postSelectFresh.ok) return postSelectFresh.outcome;
     } else if (this.deps.buildRelatedLinks && !isAppleAnnotation) {
       relatedLinks = this.deps.buildRelatedLinks(metadata);
     }

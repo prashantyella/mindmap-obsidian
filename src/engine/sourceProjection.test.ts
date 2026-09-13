@@ -98,18 +98,37 @@ void test("projectSource produces the same hash for LF and CRLF versions of iden
   assert.equal(lfProjection.sourceHash, crlfProjection.sourceHash);
 });
 
-void test("projectSource hash is stable when only whitespace changes in the body", () => {
+void test("projectSource hash is stable when only trailing spaces or extra blank lines change", () => {
   const identity = identityFor("Notes/Example.md");
   const before = "---\ntitle: Example\n---\nSome text here.\n";
-  const afterSpaces = "---\ntitle: Example\n---\nSome  text   here.\n";
   const afterNewlines = "---\ntitle: Example\n---\nSome text here.\n\n\n";
   const afterTrailingSpaces = "---\ntitle: Example\n---\nSome text here.   \n";
-  assert.equal(projectSource(identity, before).sourceHash, projectSource(identity, afterSpaces).sourceHash);
   assert.equal(projectSource(identity, before).sourceHash, projectSource(identity, afterNewlines).sourceHash);
   assert.equal(projectSource(identity, before).sourceHash, projectSource(identity, afterTrailingSpaces).sourceHash);
 });
 
-void test("projectSource hash changes when actual words change even with whitespace normalization", () => {
+void test("projectSource hash changes when inline spaces change in the body", () => {
+  const identity = identityFor("Notes/Example.md");
+  const before = "---\ntitle: Example\n---\nSome text here.\n";
+  const after = "---\ntitle: Example\n---\nSome  text   here.\n";
+  assert.notEqual(projectSource(identity, before).sourceHash, projectSource(identity, after).sourceHash);
+});
+
+void test("projectSource hash preserves code block indentation", () => {
+  const identity = identityFor("Notes/Example.md");
+  const before = "```\n  indented\n```\n";
+  const after = "```\nindented\n```\n";
+  assert.notEqual(projectSource(identity, before).sourceHash, projectSource(identity, after).sourceHash);
+});
+
+void test("projectSource hash preserves frontmatter quoted values with spaces", () => {
+  const identity = identityFor("Notes/Example.md");
+  const before = "---\ntitle: \"a  b\"\n---\nBody.\n";
+  const after = "---\ntitle: \"a b\"\n---\nBody.\n";
+  assert.notEqual(projectSource(identity, before).sourceHash, projectSource(identity, after).sourceHash);
+});
+
+void test("projectSource hash changes when actual words change", () => {
   const identity = identityFor("Notes/Example.md");
   const before = "---\ntitle: Example\n---\nSome text here.\n";
   const after = "---\ntitle: Example\n---\nSome different text here.\n";

@@ -261,10 +261,17 @@ function normalizeNewlinesForHashing(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-// Collapses runs of whitespace so that adding/removing spaces or blank lines
-// does not change the sourceHash when the semantic content is unchanged.
-function normalizeWhitespaceForHashing(text: string): string {
-  return normalizeNewlinesForHashing(text).replace(/[ \t]+/g, " ").replace(/\n{2,}/g, "\n\n").trim();
+// Collapses runs of blank lines and trims trailing whitespace per line so that
+// pressing enter or adding trailing spaces does not change the sourceHash.
+// Preserves inline spaces (YAML quoted values), leading indentation (code
+// blocks), and does NOT touch the frontmatter portion (caller responsibility).
+function normalizeBodyWhitespaceForHashing(text: string): string {
+  return normalizeNewlinesForHashing(text)
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function sha256Hex(input: string): string {
@@ -305,7 +312,7 @@ export function projectSource(
 
   const projectedFrontmatterJson = canonicalFrontmatterJson(remainingRaw);
   const projectedBody = afterRelated.text;
-  const hashInput = `${JSON.stringify(normalizeWhitespaceForHashing(remainingRaw))}\n${normalizeWhitespaceForHashing(projectedBody)}`;
+  const hashInput = `${JSON.stringify(normalizeNewlinesForHashing(remainingRaw))}\n${normalizeBodyWhitespaceForHashing(projectedBody)}`;
 
   return {
     schemaVersion: 1,
