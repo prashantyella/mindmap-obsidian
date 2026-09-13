@@ -1,6 +1,7 @@
 import { isTerminalJobStatus } from "../jobs/jobTypes";
 import { emptyMetrics, emptySummary, DebouncedRefreshController, type PendingSnapshot } from "../pendingScan";
 import { PRODUCTION_SCOPE_ALL, PRODUCTION_SCOPE_CURRENT, type ProductionEngine } from "./productionEngine";
+import type { NoteIdentityV1 } from "./contracts";
 
 const MAX_PENDING_ITEMS = 5;
 const DEFAULT_DEBOUNCE_MS = 500;
@@ -41,6 +42,11 @@ export class ProductionPendingScanService {
   };
   private refreshInFlight: Promise<void> | null = null;
   private queuedRefresh = false;
+  private dirtyPaths = new Set<string>();
+  private discovered = new Map<string, Map<string, { identity: NoteIdentityV1; sourceHash: string }>>();
+  private catalogCache: Awaited<ReturnType<ProductionEngine["indexStore"]["snapshotCatalog"]>> | undefined;
+  private catalogRevision: number | null = null;
+  private fullRefreshRequested = false;
 
   constructor(
     private readonly getEngine: () => ProductionEngine | null,
@@ -58,9 +64,13 @@ export class ProductionPendingScanService {
     await this.refresh();
   }
 
-  /** `relpaths` is accepted only to keep the exact call signature `registerVaultRefreshEvents`/existing call sites already use -- a targeted rescan is not worth the complexity a full discovery pass already re-derives everything fresh on every debounced refresh. */
-  requestRefresh(reason: string, relpaths: string[] = []): void {
-    this.deps.log(`Pending refresh requested: ${reason}${relpaths.length ? ` (${relpaths.join(", ")})` : ""}`);
+  /** `paths` scopes the refresh to specific changed files when non-empty; an empty array (settings/scope/recovery callers) forces a full discovery that replaces both scope caches entirely, even when targeted dirty paths are already queued. */
+  requestRefresh(reason: string, paths: string[] = []): void {
+    if (paths.length === 0) {
+      this.fullRefreshRequested = true;
+    }
+    for (const path of paths) this.dirtyPaths.add(path);
+    this.deps.log(`Pending refresh requested: ${reason}${paths.length ? ` (${paths.join(", ")})` : ""}`);
     this.debouncer.trigger();
   }
 
@@ -105,13 +115,63 @@ export class ProductionPendingScanService {
       return;
     }
 
+    let scanPaths: string[] = [];
+    let wasFullRefresh = false;
     try {
-      const [currentDiscovered, allDiscovered, catalog, jobs] = await Promise.all([
-        engine.getPendingCandidates(PRODUCTION_SCOPE_CURRENT),
-        engine.getPendingCandidates(PRODUCTION_SCOPE_ALL),
-        engine.indexStore.snapshotCatalog(),
-        engine.jobStore.list(),
-      ]);
+      wasFullRefresh = this.fullRefreshRequested;
+      this.fullRefreshRequested = false;
+      scanPaths = [...this.dirtyPaths];
+      this.dirtyPaths.clear();
+      const paths = scanPaths;
+      const revisionBefore = typeof engine.indexStore.getRevision === "function" ? engine.indexStore.getRevision() : 0;
+      let targeted = !wasFullRefresh && paths.length > 0 && this.discovered.size > 0 && typeof engine.getPendingCandidatesForPaths === "function";
+      let currentDiscovered: { identity: NoteIdentityV1; sourceHash: string }[];
+      let allDiscovered: { identity: NoteIdentityV1; sourceHash: string }[];
+      let jobs: Awaited<ReturnType<ProductionEngine["jobStore"]["list"]>>;
+      if (targeted) {
+        const [currentResult, allResult, jobsResult] = await Promise.all([
+          engine.getPendingCandidatesForPaths(PRODUCTION_SCOPE_CURRENT, paths),
+          engine.getPendingCandidatesForPaths(PRODUCTION_SCOPE_ALL, paths),
+          engine.jobStore.list(),
+        ]);
+        jobs = jobsResult;
+        if (currentResult === null || allResult === null) {
+          // Targeted not supported — fall back to full discovery
+          targeted = false;
+          [currentDiscovered, allDiscovered] = await Promise.all([
+            engine.getPendingCandidates(PRODUCTION_SCOPE_CURRENT),
+            engine.getPendingCandidates(PRODUCTION_SCOPE_ALL),
+          ]);
+        } else {
+          currentDiscovered = currentResult;
+          allDiscovered = allResult;
+        }
+      } else {
+        [currentDiscovered, allDiscovered, jobs] = await Promise.all([
+          engine.getPendingCandidates(PRODUCTION_SCOPE_CURRENT),
+          engine.getPendingCandidates(PRODUCTION_SCOPE_ALL),
+          engine.jobStore.list(),
+        ]);
+      }
+      if (this.catalogCache === undefined || this.catalogRevision !== revisionBefore) {
+        const verifiedCatalog = await engine.indexStore.snapshotCatalog();
+        this.catalogCache = verifiedCatalog;
+        this.catalogRevision = verifiedCatalog === null ? null : revisionBefore;
+      }
+      const catalog = this.catalogCache;
+      if (typeof engine.indexStore.getRevision === "function" && engine.indexStore.getRevision() !== revisionBefore) this.queuedRefresh = true;
+
+      const merge = (scope: string, items: readonly { identity: NoteIdentityV1; sourceHash: string }[]): { identity: NoteIdentityV1; sourceHash: string }[] => {
+        const map = targeted ? this.discovered.get(scope) ?? new Map<string, { identity: NoteIdentityV1; sourceHash: string }>() : new Map<string, { identity: NoteIdentityV1; sourceHash: string }>();
+        if (targeted) {
+          for (const path of paths) map.delete(path);
+        }
+        for (const item of items) map.set(item.identity.canonicalPath, item);
+        this.discovered.set(scope, map);
+        return [...map.values()];
+      };
+      const currentItems = merge(PRODUCTION_SCOPE_CURRENT, currentDiscovered);
+      const allItems = merge(PRODUCTION_SCOPE_ALL, allDiscovered);
 
       const indexedHashByPath = new Map<string, string>();
       if (catalog) {
@@ -131,8 +191,8 @@ export class ProductionPendingScanService {
         return true;
       };
 
-      const currentPending = currentDiscovered.filter((item) => isPending(item.identity.canonicalPath, item.sourceHash));
-      const allPending = allDiscovered.filter((item) => isPending(item.identity.canonicalPath, item.sourceHash));
+      const currentPending = currentItems.filter((item) => isPending(item.identity.canonicalPath, item.sourceHash));
+      const allPending = allItems.filter((item) => isPending(item.identity.canonicalPath, item.sourceHash));
       const end = this.deps.now();
 
       this.snapshot = {
@@ -142,9 +202,9 @@ export class ProductionPendingScanService {
         all: { total: allPending.length, items: allPending.slice(0, MAX_PENDING_ITEMS).map((item) => item.identity.canonicalPath) },
         metrics: {
           durationMs: end - start,
-          filesListed: allDiscovered.length,
-          filesScanned: allDiscovered.length,
-          filesUpdated: allDiscovered.length,
+          filesListed: allItems.length,
+          filesScanned: targeted ? paths.length : allItems.length,
+          filesUpdated: paths.length,
           totalTracked: catalog?.length ?? 0,
           dirtyPaths: 0,
           stateReloaded: false,
@@ -157,6 +217,8 @@ export class ProductionPendingScanService {
         `Pending scan updated in ${this.snapshot.metrics.durationMs}ms (current ${currentPending.length}, all ${allPending.length}, tracked ${this.snapshot.metrics.totalTracked}).`,
       );
     } catch (error) {
+      for (const path of scanPaths) this.dirtyPaths.add(path);
+      if (wasFullRefresh) this.fullRefreshRequested = true;
       this.snapshot = {
         available: false,
         reason: error instanceof Error ? error.message : "Pending scan failed.",

@@ -905,3 +905,107 @@ void test("ordinary submit()/manual reruns remain completely unaffected by sched
 function isEngineErrorLike(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === code;
 }
+
+// --- Deferred job / wake tests ---
+
+void test("JobEngine: a deferred job executes once and does not spin in the pump", async () => {
+  let stepCount = 0;
+  const runner = new ScriptedRunner((job) => {
+    stepCount++;
+    if (job.job.phase === "discover") return { type: "deferred" };
+    return { type: "complete" };
+  });
+  const { engine } = makeEngine({ "process-note": runner });
+  const job = await engine.submit({
+    trigger: "manual",
+    kind: "process-note",
+    identity: stableNoteIdentity(canonicalizePath("Notes/a.md")),
+    sourceHash: "a".repeat(64),
+    embeddingModel: "test-model",
+    pipelineVersion: 1,
+  });
+  void job;
+  engine.start();
+  // Let the pump run
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  engine.stop();
+  // The deferred job should have been attempted exactly once, not spun repeatedly
+  assert.equal(stepCount, 1, "deferred job must be attempted exactly once before the pump idles");
+});
+
+void test("JobEngine: unrelated jobs continue while a deferred job is parked", async () => {
+  const completed: string[] = [];
+  const runner = new ScriptedRunner((job) => {
+    const path = job.job.target.kind === "note" ? job.job.target.identity.canonicalPath : "other";
+    if (path === "Notes/active.md" && job.job.phase === "discover") return { type: "deferred" };
+    completed.push(path);
+    return linearAdvanceScript("process-note")(job);
+  });
+  const { engine } = makeEngine({ "process-note": runner });
+  await engine.submit({ trigger: "manual", kind: "process-note", identity: stableNoteIdentity(canonicalizePath("Notes/active.md")), sourceHash: "a".repeat(64), embeddingModel: "m", pipelineVersion: 1 });
+  await engine.submit({ trigger: "manual", kind: "process-note", identity: stableNoteIdentity(canonicalizePath("Notes/other.md")), sourceHash: "b".repeat(64), embeddingModel: "m", pipelineVersion: 1 });
+  await engine.drain();
+  assert.ok(completed.some((p) => p === "Notes/other.md"), "unrelated job must complete while deferred job is parked");
+  assert.ok(!completed.some((p) => p === "Notes/active.md"), "deferred job must not have completed");
+});
+
+void test("JobEngine: wake() retries a deferred job exactly once", async () => {
+  let deferCount = 0;
+  const runner = new ScriptedRunner((job) => {
+    if (job.job.phase === "discover") {
+      deferCount++;
+      // Defer twice — only the first should park, wake should retry once
+      if (deferCount <= 2) return { type: "deferred" };
+    }
+    return linearAdvanceScript("process-note")(job);
+  });
+  const { engine } = makeEngine({ "process-note": runner });
+  await engine.submit({ trigger: "manual", kind: "process-note", identity: stableNoteIdentity(canonicalizePath("Notes/a.md")), sourceHash: "a".repeat(64), embeddingModel: "m", pipelineVersion: 1 });
+  // First drain — defers
+  await engine.drain();
+  assert.equal(deferCount, 1);
+  // Wake and drain again — retries once, defers again
+  engine.wake();
+  await engine.drain();
+  assert.equal(deferCount, 2);
+  // Wake and drain one more time — now it proceeds
+  engine.wake();
+  await engine.drain();
+  assert.equal(deferCount, 3); // third attempt proceeds past discover
+});
+
+void test("JobEngine: dispose() clears the deferredJobIds set", async () => {
+  const runner = new ScriptedRunner(() => ({ type: "deferred" }));
+  const { engine, store } = makeEngine({ "process-note": runner });
+  await engine.submit({ trigger: "manual", kind: "process-note", identity: stableNoteIdentity(canonicalizePath("Notes/a.md")), sourceHash: "a".repeat(64), embeddingModel: "m", pipelineVersion: 1 });
+  await engine.drain();
+  // Job is deferred — verify it's still queued
+  const jobs = await store.list();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].status, "queued");
+  engine.dispose();
+  // After dispose, a new engine on the same store should be able to pick up the job
+  const runner2 = new ScriptedRunner(linearAdvanceScript("process-note"));
+  const engine2 = new JobEngine(store, { "process-note": runner2 });
+  await engine2.drain();
+  const afterDrain = await store.list();
+  assert.equal(afterDrain[0].status, "completed", "a new engine after dispose must be able to run the previously deferred job");
+  engine2.dispose();
+});
+
+void test("JobEngine: terminal job outcome clears the deferred tracking for that job", async () => {
+  let callCount = 0;
+  const runner = new ScriptedRunner((_job) => {
+    callCount++;
+    if (callCount === 1) return { type: "deferred" };
+    // On wake-retry, fail terminally
+    return { type: "retry", failureCode: "JOB_SHAPE_INVALID" };
+  });
+  const { engine, store } = makeEngine({ "process-note": runner });
+  await engine.submit({ trigger: "manual", kind: "process-note", identity: stableNoteIdentity(canonicalizePath("Notes/a.md")), sourceHash: "a".repeat(64), embeddingModel: "m", pipelineVersion: 1 });
+  await engine.drain(); // defers
+  engine.wake();
+  await engine.drain(); // retries, fails terminally
+  const jobs = await store.list();
+  assert.equal(jobs[0].status, "failed", "terminally failed job must not remain in deferred set");
+});

@@ -95,6 +95,8 @@ export interface NoteJobDeps {
   mindmapHeading?: string;
   /** See `NoteReplacementSeam`. */
   replacement: NoteReplacementSeam;
+  /** Returns true only for automatic/bulk writes that should wait while the note is actively edited. */
+  deferWrite?: (persisted: PersistedJobV1, identity: NoteIdentityV1) => boolean;
 }
 
 interface NoteJobMemory {
@@ -437,6 +439,13 @@ export class NoteJobRunner implements JobPhaseRunner {
 
   private async stepWriteNote(persisted: PersistedJobV1, identity: NoteIdentityV1, expectedSourceHash: string, embeddingModel: string, pipelineVersion: number, signal: AbortSignal): Promise<PhaseStepOutcome> {
     const jobId = persisted.job.jobId;
+    if (persisted.job.batchId !== undefined && this.deps.deferWrite?.(persisted, identity)) return { type: "deferred" };
+    // After a deferral, the source may have changed while the job was parked. Re-check freshness
+    // so an edited note enqueues a replacement (via tryEnqueueReplacement) instead of discovering
+    // the stale hash only at NoteWriter.writeMetadata time, where the obsolete outcome would lose
+    // the replacement intent.
+    const freshResult = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
+    if (!freshResult.ok) return freshResult.outcome;
     // Cache hit on the ordinary forward path; a cold restart landing directly on write-note (empty
     // cache) recomputes embed+metadata here, in place, WITHOUT changing job.phase away from
     // "write-note" -- exactly "resumes from the earliest safe recomputation phase" without ever

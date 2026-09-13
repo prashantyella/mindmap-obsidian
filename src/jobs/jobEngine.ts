@@ -80,6 +80,7 @@ export type PhaseStepOutcome =
   | { type: "advance"; nextPhase: JobPhase; receipt?: JobReceiptV1 }
   | { type: "complete"; receipt?: JobReceiptV1 }
   | { type: "retry"; failureCode: string }
+  | { type: "deferred" }
   | { type: "cancelled" }
   | { type: "obsolete"; failureCode: string }
   | {
@@ -207,6 +208,8 @@ export class JobEngine {
   private readonly onError?: (fault: JobEngineFault) => void;
   private readonly activityListeners = new Set<(snapshot: EngineActivitySnapshot) => void>();
   private activityRevision = 0;
+  private readonly deferredJobIds = new Set<string>();
+  private wakeGeneration = 0;
   private storeOperatorPaused = false;
 
   constructor(
@@ -468,6 +471,9 @@ export class JobEngine {
     void this.emitActivity();
   }
 
+  /** Wakes deferred/background work after an external state change, without altering pause semantics. */
+  wake(): void { this.deferredJobIds.clear(); this.wakeGeneration++; this.kick(); }
+
   /**
    * Requests that the background pump run (or keep running). Setting
    * `kickRequested` BEFORE checking `this.pumping` closes the exact
@@ -560,6 +566,7 @@ export class JobEngine {
 
   private isEligibleNow(entry: PersistedJobV1, pause: { active: boolean }, now: number): boolean {
     if (entry.status !== "queued") return false;
+    if (this.deferredJobIds.has(entry.job.jobId)) return false;
     if (entry.nextAttemptAtMs !== undefined && entry.nextAttemptAtMs > now) return false;
     if (pause.active && entry.job.kind === "process-note") return false;
     if (this.storeOperatorPaused) return false;
@@ -605,6 +612,7 @@ export class JobEngine {
     this.disposed = true;
     this.running = false;
     this.abortController.abort();
+    this.deferredJobIds.clear();
     void this.emitActivity();
   }
 
@@ -680,6 +688,7 @@ export class JobEngine {
 
   /** Best-effort, synchronous, never throws: a runner without `forget` (or one that throws from it) must never break the engine's own terminal-transition bookkeeping. */
   private forgetJob(kind: JobKind, jobId: string): void {
+    this.deferredJobIds.delete(jobId);
     try {
       this.runners[kind]?.forget?.(jobId);
     } catch {
@@ -824,6 +833,17 @@ export class JobEngine {
           }));
         }
         this.kick();
+        return;
+      }
+      case "deferred": {
+        const gen = this.wakeGeneration;
+        await this.store.updateJob(entry.job.jobId, (current) => ({ ...current, status: "queued", nextAttemptAtMs: undefined }));
+        // Only park the job if no wake() occurred during the persist — a wake that ran
+        // while updateJob was in flight already cleared deferredJobIds and bumped
+        // wakeGeneration, so re-adding the ID would lose that wake's intent.
+        if (this.wakeGeneration === gen) {
+          this.deferredJobIds.add(entry.job.jobId);
+        }
         return;
       }
     }

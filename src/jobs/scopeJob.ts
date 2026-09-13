@@ -26,6 +26,8 @@ export interface ScopeDiscoveryItem {
  */
 export interface ScopeDiscoverySeam {
   discover(scopeId: string, signal: AbortSignal): Promise<ScopeDiscoveryItem[]>;
+  /** Optional targeted discovery used by pending refreshes; implementations must preserve strict scope filtering. */
+  discoverPaths?(scopeId: string, paths: readonly string[], signal: AbortSignal): Promise<ScopeDiscoveryItem[]>;
 }
 
 /** `"reading-sync"` only: e.g. importing newly-read Apple Books annotations into the vault before any per-note job is enqueued for them. Must be idempotent -- safe to re-run against the same discovered set after a restart. REQUIRED (Checkpoint 7 final-closure requirement 8): every `"reading-sync"` job reaches the `"import"` phase, so a runner missing this dependency would otherwise silently skip an entire phase's worth of work rather than failing closed. */

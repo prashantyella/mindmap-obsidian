@@ -216,10 +216,11 @@ export class JobStore {
   }
 
   private syncBatches(doc: JobStoreDocumentV1, jobs: PersistedJobV1[]): BulkBatchV1[] {
+    const jobsById = new Map(jobs.map((entry) => [entry.job.jobId, entry]));
     return this.pruneBatches(doc.bulkBatches.map((batch) => {
-      const root = jobs.find((entry) => entry.job.jobId === batch.rootJobId);
+      const root = jobsById.get(batch.rootJobId);
       const items = batch.items.map((item) => {
-        const child = jobs.find((entry) => entry.job.jobId === item.jobId);
+        const child = jobsById.get(item.jobId);
         return child ? { ...item, status: child.status } : item;
       });
       const discoveredTotal = root?.receipt?.kind === "scope" ? root.receipt.discoveredCount : batch.discoveredTotal;
