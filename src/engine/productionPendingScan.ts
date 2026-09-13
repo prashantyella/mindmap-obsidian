@@ -1,6 +1,6 @@
 import { isTerminalJobStatus } from "../jobs/jobTypes";
 import { emptyMetrics, emptySummary, DebouncedRefreshController, type PendingSnapshot } from "../pendingScan";
-import { PRODUCTION_RELATED_VERSION, PRODUCTION_SCOPE_ALL, PRODUCTION_SCOPE_CURRENT, type ProductionEngine } from "./productionEngine";
+import { PRODUCTION_SCOPE_ALL, PRODUCTION_SCOPE_CURRENT, type ProductionEngine } from "./productionEngine";
 import type { NoteIdentityV1 } from "./contracts";
 
 const MAX_PENDING_ITEMS = 5;
