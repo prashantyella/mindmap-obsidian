@@ -261,6 +261,12 @@ function normalizeNewlinesForHashing(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+// Collapses runs of whitespace so that adding/removing spaces or blank lines
+// does not change the sourceHash when the semantic content is unchanged.
+function normalizeWhitespaceForHashing(text: string): string {
+  return normalizeNewlinesForHashing(text).replace(/[ \t]+/g, " ").replace(/\n{2,}/g, "\n\n").trim();
+}
+
 function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
 }
@@ -299,7 +305,7 @@ export function projectSource(
 
   const projectedFrontmatterJson = canonicalFrontmatterJson(remainingRaw);
   const projectedBody = afterRelated.text;
-  const hashInput = `${JSON.stringify(normalizeNewlinesForHashing(remainingRaw))}\n${normalizeNewlinesForHashing(projectedBody)}`;
+  const hashInput = `${JSON.stringify(normalizeWhitespaceForHashing(remainingRaw))}\n${normalizeWhitespaceForHashing(projectedBody)}`;
 
   return {
     schemaVersion: 1,

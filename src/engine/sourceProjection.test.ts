@@ -98,6 +98,24 @@ void test("projectSource produces the same hash for LF and CRLF versions of iden
   assert.equal(lfProjection.sourceHash, crlfProjection.sourceHash);
 });
 
+void test("projectSource hash is stable when only whitespace changes in the body", () => {
+  const identity = identityFor("Notes/Example.md");
+  const before = "---\ntitle: Example\n---\nSome text here.\n";
+  const afterSpaces = "---\ntitle: Example\n---\nSome  text   here.\n";
+  const afterNewlines = "---\ntitle: Example\n---\nSome text here.\n\n\n";
+  const afterTrailingSpaces = "---\ntitle: Example\n---\nSome text here.   \n";
+  assert.equal(projectSource(identity, before).sourceHash, projectSource(identity, afterSpaces).sourceHash);
+  assert.equal(projectSource(identity, before).sourceHash, projectSource(identity, afterNewlines).sourceHash);
+  assert.equal(projectSource(identity, before).sourceHash, projectSource(identity, afterTrailingSpaces).sourceHash);
+});
+
+void test("projectSource hash changes when actual words change even with whitespace normalization", () => {
+  const identity = identityFor("Notes/Example.md");
+  const before = "---\ntitle: Example\n---\nSome text here.\n";
+  const after = "---\ntitle: Example\n---\nSome different text here.\n";
+  assert.notEqual(projectSource(identity, before).sourceHash, projectSource(identity, after).sourceHash);
+});
+
 void test("projectSource preserves original CRLF bytes in the projected body rather than normalizing them", () => {
   const identity = identityFor("Notes/Example.md");
   const crlf = "---\r\ntitle: Example\r\n---\r\nLine one.\r\nLine two.\r\n";

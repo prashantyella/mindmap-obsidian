@@ -303,6 +303,7 @@ export class ProductionEngine {
       if (!options.chunkOptions) {
         throw new Error("ProductionEngineOptions.chunkOptions is required whenever embeddingProvider/embeddingModel are configured.");
       }
+      const relatedConfig = options.relatedSelectionConfig;
       runners["process-note"] = new NoteJobRunner({
         sourceReader,
         embedding: createProductionNoteEmbeddingSeam(options.embeddingProvider, options.embeddingModel, options.chunkOptions),
@@ -311,6 +312,18 @@ export class ProductionEngine {
         indexStore: { upsertNote: (input) => this.indexStoreUpsert(input) },
         replacement: createProductionNoteReplacementSeam(lateJobSubmitter, "manual"),
         deferWrite: (_persisted, identity) => options.workspace?.getActiveFile()?.path === identity.canonicalPath,
+        selectRelated: relatedConfig ? async (embedded, selfPath) => {
+          const candidates = await this.indexStore.queryRelated({
+            queryVector: embedded.noteVector,
+            queryChunkVectors: embedded.chunkVectors,
+            excludePath: selfPath,
+            limit: relatedConfig.candidateLimit,
+          });
+          return selectRelatedCandidates(
+            candidates.map((c): RelatedCandidateScore => ({ path: c.path, score: c.score })),
+            { selfPath, relatedLimit: relatedConfig.relatedLimit, overreachCount: relatedConfig.overreachCount, creativeCount: relatedConfig.creativeCount, creativeMin: relatedConfig.creativeMin, creativeMax: relatedConfig.creativeMax, minScore: relatedConfig.minScore },
+          );
+        } : undefined,
       });
       // Item 3: the SAME `ScopeJobRunner` instance is deliberately registered for BOTH
       // "reading-sync" and "scope-refresh" -- one runner, two job kinds, exactly like
