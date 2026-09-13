@@ -335,10 +335,20 @@ export class ProductionEngine {
           importPayload: options.importAppleBooks,
         })
         : createDeferredScopeImportSeam();
+      const expectedRelatedVersion = relatedConfig ? PRODUCTION_RELATED_VERSION : undefined;
+      const indexCheckSeam = {
+        isAlreadyIndexed: async (identity: import("./contracts").NoteIdentityV1, sourceHash: string): Promise<boolean> => {
+          const record = await this.indexStore.getRecord(identity);
+          if (!record || record.sourceHash !== sourceHash) return false;
+          if (expectedRelatedVersion !== undefined && (record.relatedVersion ?? 0) < expectedRelatedVersion) return false;
+          return true;
+        },
+      };
       const scopeRunner = new ScopeJobRunner({
         discovery: createProductionScopeDiscoverySeam({ vault: options.vault, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses }, scopeRegistry, options.embeddingModel),
         import: importSeam,
         enqueue: createProductionScopeEnqueueSeam(lateJobSubmitter, "manual"),
+        indexCheck: indexCheckSeam,
       });
       runners["scope-refresh"] = scopeRunner;
       runners["reading-sync"] = scopeRunner;
