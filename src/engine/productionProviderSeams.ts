@@ -122,15 +122,12 @@ export function createProductionNoteEmbeddingSeam(provider: EmbeddingProvider, e
  * text here would silently swallow the overflow instead of ever letting
  * that check run.
  *
- * `related` is passed as an empty array -- Checkpoint 10A's per-note
- * ingestion step runs BEFORE any index exists to query related candidates
- * from (migration builds the index as it goes), so there is nothing
- * genuine to select yet; this mirrors `NoteJobDeps.buildRelatedLinks`
- * staying unwired this checkpoint (see `productionEngine.ts`'s own doc
- * comment) rather than fabricating a related list. A later checkpoint that
- * runs ordinary (non-migration) note processing against an already-built
- * index is expected to supply a real `relatedSelector.ts`-backed related
- * list instead.
+ * `related` is passed as an empty array -- migration's per-note ingestion
+ * step runs BEFORE any index exists to query related candidates from
+ * (migration builds the index as it goes), so there is nothing genuine to
+ * select yet. Ordinary (non-migration) note processing uses the
+ * `selectRelated` seam wired in `productionEngine.ts` to query the
+ * already-built index via `relatedSelector.ts`.
  */
 export function createProductionNoteMetadataSeam(provider: MetadataInferenceProvider, config: MetadataPipelineConfig): NoteMetadataSeam {
   return {

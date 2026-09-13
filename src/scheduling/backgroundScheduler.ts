@@ -11,9 +11,7 @@ import { EngineError } from "../engine/errors";
  * enforces this at the source level). If Community Plugin review later
  * rejects LaunchAgent management outright, deleting this one file (and its
  * test) changes zero behavior in `coreScheduler.ts`/`scheduleStore.ts` --
- * neither imports anything from here. Nothing in this file is wired into
- * `main.ts` yet; it is a free-standing adapter a future checkpoint may
- * choose to invoke.
+ * neither imports anything from here.
  *
  * The LaunchAgent plist this module writes contains exactly two
  * caller-meaningful pieces of information: a fixed `/usr/bin/open <argv>`
