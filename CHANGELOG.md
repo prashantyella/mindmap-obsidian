@@ -9,6 +9,22 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.2
+
+### Fixed
+- Stabilize sourceHash against whitespace variation and wire related-note selection config.
+- Wire Apple Books import seam and add relatedVersion backfill for existing indexed notes.
+- Skip already-indexed notes during scope-refresh enqueue to avoid redundant reprocessing.
+- Use enqueuedCount for batch completion check when index check skips notes.
+- Prevent status bar spinner glitch during re-renders.
+- Run preflight checks automatically on startup.
+
+### Changed
+- Defer heavy startup work to onLayoutReady for faster plugin load.
+- Remove stale checkpoint-wiring comments.
+
+`minAppVersion` remains `1.7.2`.
+
 ## 0.3.1
 
 ### Added
