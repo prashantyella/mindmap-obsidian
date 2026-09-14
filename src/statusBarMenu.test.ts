@@ -113,7 +113,7 @@ void test("activity-driven presentation uses approved alert/progress/queued labe
   assert.equal(paused.icon, "triangle-alert");
   assert.match(paused.ariaLabel, /paused/);
   assert.doesNotMatch(paused.ariaLabel, /\//);
-  const progress = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", processed: 2, total: 4, failed: 0 } } }));
+  const progress = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", preparing: false, processed: 2, total: 4, failed: 0 } } }));
   assert.equal(progress.label, "Mindmap · 2/4");
   assert.equal(progress.icon, "loader-circle");
 });
@@ -144,14 +144,14 @@ void test("operator pause has distinct accessible presentation and only Resume a
 });
 
 void test("active engine work takes priority over passive Reading count", () => {
-  const presentation = buildStatusBarPresentation(state({ readingMode: "reading", readingActivity: "ready", readingPending: 9, activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", processed: 1, total: 3, failed: 0 } } }));
+  const presentation = buildStatusBarPresentation(state({ readingMode: "reading", readingActivity: "ready", readingPending: 9, activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", preparing: false, processed: 1, total: 3, failed: 0 } } }));
   assert.equal(presentation.label, "Mindmap · 1/3");
   assert.equal(presentation.icon, "loader-circle");
 });
 
 void test("current work hides a retained prior failure, while idle exposes it", () => {
   const prior = { status: "completed-with-failures" as const, failed: 2 };
-  const active = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", processed: 1, total: 2, failed: 0 }, latestFailureBatch: prior } }));
+  const active = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", preparing: false, processed: 1, total: 2, failed: 0 }, latestFailureBatch: prior } }));
   assert.equal(active.label, "Mindmap · 1/2");
   assert.equal(active.icon, "loader-circle");
   assert.match(active.ariaLabel, /queued/);
