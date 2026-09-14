@@ -40,8 +40,8 @@ export interface ScopeEnqueueSeam {
   enqueueProcessNote(item: ScopeDiscoveryItem, pipelineVersion: number, signal: AbortSignal, batchId?: string): Promise<void>;
 }
 
-export interface ScopeIndexCheckSeam {
-  isAlreadyIndexed(identity: NoteIdentityV1, sourceHash: string): Promise<boolean>;
+export interface ScopeCatalogSnapshotSeam {
+  prepareLookup(): Promise<(identity: NoteIdentityV1, sourceHash: string) => boolean>;
 }
 
 export interface ScopeJobDeps {
@@ -49,7 +49,7 @@ export interface ScopeJobDeps {
   /** REQUIRED -- see `ScopeImportSeam`. Never referenced for a `"scope-refresh"` job (its phase list structurally never includes `"import"`), but always required at construction so a caller composing this runner for `"reading-sync"` can never forget it. */
   import: ScopeImportSeam;
   enqueue: ScopeEnqueueSeam;
-  indexCheck?: ScopeIndexCheckSeam;
+  catalogSnapshot?: ScopeCatalogSnapshotSeam;
 }
 
 type ScopeReceipt = Extract<JobReceiptV1, { kind: "scope" }>;
@@ -229,15 +229,15 @@ export class ScopeJobRunner implements JobPhaseRunner {
     if (priorReceipt?.discoveryFingerprint !== undefined && priorReceipt.discoveryFingerprint !== fingerprint) {
       return { type: "superseded", failureCode: "SCOPE_SUPERSEDED" };
     }
+    const isAlreadyIndexed = this.deps.catalogSnapshot
+      ? await this.deps.catalogSnapshot.prepareLookup()
+      : () => false;
     let enqueuedCount = 0;
     for (const item of items) {
       if (signal.aborted) {
         return { type: "cancelled" };
       }
-      if (this.deps.indexCheck) {
-        const indexed = await this.deps.indexCheck.isAlreadyIndexed(item.identity, item.sourceHash);
-        if (indexed) continue;
-      }
+      if (isAlreadyIndexed(item.identity, item.sourceHash)) continue;
       await this.deps.enqueue.enqueueProcessNote(item, pipelineVersion, signal, batchId);
       enqueuedCount++;
     }

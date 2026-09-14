@@ -113,7 +113,7 @@ void test("activity-driven presentation uses approved alert/progress/queued labe
   assert.equal(paused.icon, "triangle-alert");
   assert.match(paused.ariaLabel, /paused/);
   assert.doesNotMatch(paused.ariaLabel, /\//);
-  const progress = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", processed: 2, total: 4, failed: 0 } } }));
+  const progress = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", preparing: false, processed: 2, total: 4, failed: 0 } } }));
   assert.equal(progress.label, "Mindmap · 2/4");
   assert.equal(progress.icon, "loader-circle");
 });
@@ -144,14 +144,14 @@ void test("operator pause has distinct accessible presentation and only Resume a
 });
 
 void test("active engine work takes priority over passive Reading count", () => {
-  const presentation = buildStatusBarPresentation(state({ readingMode: "reading", readingActivity: "ready", readingPending: 9, activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", processed: 1, total: 3, failed: 0 } } }));
+  const presentation = buildStatusBarPresentation(state({ readingMode: "reading", readingActivity: "ready", readingPending: 9, activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", preparing: false, processed: 1, total: 3, failed: 0 } } }));
   assert.equal(presentation.label, "Mindmap · 1/3");
   assert.equal(presentation.icon, "loader-circle");
 });
 
 void test("current work hides a retained prior failure, while idle exposes it", () => {
   const prior = { status: "completed-with-failures" as const, failed: 2 };
-  const active = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", processed: 1, total: 2, failed: 0 }, latestFailureBatch: prior } }));
+  const active = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", preparing: false, processed: 1, total: 2, failed: 0 }, latestFailureBatch: prior } }));
   assert.equal(active.label, "Mindmap · 1/2");
   assert.equal(active.icon, "loader-circle");
   assert.match(active.ariaLabel, /queued/);
@@ -181,6 +181,22 @@ void test("activity detail row is bounded, disabled, and privacy-safe", () => {
   assert.match(detail?.title ?? "", /embed/);
   assert.match(detail?.title ?? "", /Note\.md/);
   assert.doesNotMatch(detail?.title ?? "", /\//);
+});
+
+void test("CP5: Engine detail row shows batch preparing when preparing=true", () => {
+  const items = buildStatusBarMenuItems(state({ activity: { state: "running", queuedCount: 0, activeCount: 1, processNoteCount: 0, bulkBlocked: true, current: { kind: "scope-refresh", phase: "discover", attempt: 1 }, batch: { status: "active", preparing: true, processed: 0, total: undefined, failed: 0 } } }));
+  const detail = items.find((item) => item.title.startsWith("Engine: "));
+  assert.ok(detail);
+  assert.match(detail?.title ?? "", /preparing/);
+  assert.doesNotMatch(detail?.title ?? "", /queued/);
+});
+
+void test("CP5: Engine detail row shows batch progress 895/935", () => {
+  const items = buildStatusBarMenuItems(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, current: { kind: "process-note", phase: "embed", attempt: 1 }, batch: { status: "active", preparing: false, processed: 895, total: 935, failed: 0 } } }));
+  const detail = items.find((item) => item.title.startsWith("Engine: "));
+  assert.ok(detail);
+  assert.match(detail?.title ?? "", /895\/935/);
+  assert.doesNotMatch(detail?.title ?? "", /queued/);
 });
 
 void test("actionable scheduler health is announced without contradictory schedule copy", () => {
