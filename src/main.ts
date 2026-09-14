@@ -285,6 +285,7 @@ export default class MindmapPlugin extends Plugin {
     await this.refreshAutomaticResearchPolicyStatus();
     await this.migrateLegacyConfigOnce();
     await this.startProductionEngine();
+    void this.runPreflight("startup").then(() => this.updateStatusBar());
     void this.pendingScanService?.warm().then(() => this.updateStatusBar());
     if (this.settings.readingMode === "reading") {
       void this.readingModeController?.start();
