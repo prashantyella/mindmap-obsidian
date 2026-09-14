@@ -34,17 +34,32 @@ export function configureStatusBarElement(element: HTMLElement, onOpen: (event?:
   });
 }
 
+let lastRenderedIcon: string | null = null;
+let lastRenderedLabel: string | null = null;
+
 export function renderStatusBarElement(element: HTMLElement, state: StatusBarMenuState): StatusBarPresentation {
   const presentation = buildStatusBarPresentation(state);
   element.classList.toggle("is-running", presentation.running);
   element.classList.toggle("is-animating", presentation.animateIcon);
   element.classList.toggle("is-actionable", presentation.actionable);
-  element.replaceChildren();
 
-  const icon = element.createSpan({ cls: "mindmap-status-icon", attr: { "aria-hidden": "true" } });
-  setIcon(icon, presentation.icon);
+  const iconChanged = lastRenderedIcon !== presentation.icon;
+  const labelChanged = lastRenderedLabel !== presentation.label;
 
-  element.createSpan({ text: presentation.label });
+  if (iconChanged || labelChanged || element.childElementCount === 0) {
+    if (iconChanged || element.childElementCount === 0) {
+      element.replaceChildren();
+      const icon = element.createSpan({ cls: "mindmap-status-icon", attr: { "aria-hidden": "true" } });
+      setIcon(icon, presentation.icon);
+      element.createSpan({ text: presentation.label });
+    } else {
+      const labelSpan = element.querySelector("span:last-child");
+      if (labelSpan) labelSpan.textContent = presentation.label;
+    }
+    lastRenderedIcon = presentation.icon;
+    lastRenderedLabel = presentation.label;
+  }
+
   element.setAttribute("aria-label", presentation.ariaLabel);
   element.title = presentation.title;
   return presentation;
