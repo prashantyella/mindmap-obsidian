@@ -916,3 +916,15 @@ void test("deferWrite: editing the note while deferred triggers replacement via 
   // The note must NOT have been written with stale metadata
   assert.equal(h.vault.modifyCount, 0, "no note write should occur with stale content");
 });
+
+void test("OVERLAY_METADATA_TOO_LARGE from IndexStore reaches terminal failed on first write-overlay attempt with no retry", async () => {
+  const h = buildHarness();
+  h.index.nextError = new EngineError("OVERLAY_METADATA_TOO_LARGE", "overlay metadata JSON exceeds the enforced byte cap", {});
+  h.index.errorCountRemaining = 1;
+  const job = await submitNoteJob(h, sourceHashOf(RAW_CONTENT));
+  await h.engine.drain();
+  const final = await h.store.getById(job.job.jobId);
+  assert.equal(final?.status, "failed");
+  assert.equal(final?.lastFailureCode, "OVERLAY_METADATA_TOO_LARGE");
+  assert.equal(h.index.calls.length, 0, "overlay upsert must not have succeeded on any attempt");
+});

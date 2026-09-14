@@ -71,6 +71,7 @@ export const ENGINE_ERROR_CODES = [
   "MIGRATION_NOT_STARTABLE",
   "MIGRATION_PLAN_CORRUPT",
   "MIGRATION_REVISION_CONFLICT",
+  "OVERLAY_METADATA_TOO_LARGE",
 ] as const;
 
 export type EngineErrorCode = (typeof ENGINE_ERROR_CODES)[number];

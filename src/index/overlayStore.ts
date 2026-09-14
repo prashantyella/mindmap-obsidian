@@ -60,6 +60,13 @@ export class OverlayStoreError extends Error {
   }
 }
 
+export class OverlayMetadataTooLargeError extends OverlayStoreError {
+  constructor(message: string) {
+    super(message);
+    this.name = "OverlayMetadataTooLargeError";
+  }
+}
+
 const MAX_OVERLAY_BYTES = MAX_MATRIX_TOTAL_BYTES;
 const OVERLAY_EXTENSION = ".movl";
 /** A file's basename matches this pattern if and only if it is a name `overlayFileName` could have produced -- i.e. it is OWNED by this store. Anything else found under `overlays/` is foreign and is reported/ignored, never deleted, never treated as a fail-closed integrity failure. */
@@ -130,7 +137,7 @@ interface OverlayMetadataV1 {
 function encodeMetadataJsonOrThrow(metadata: OverlayMetadataV1): Uint8Array {
   const bytes = new TextEncoder().encode(JSON.stringify(metadata));
   if (bytes.length > OVERLAY_METADATA_JSON_MAX_BYTES) {
-    throw new OverlayStoreError(
+    throw new OverlayMetadataTooLargeError(
       `overlay metadata JSON is ${bytes.length} bytes, exceeding the enforced maximum of ${OVERLAY_METADATA_JSON_MAX_BYTES} bytes (identity "${identityKey(metadata.identity)}").`,
     );
   }
