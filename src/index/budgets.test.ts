@@ -15,6 +15,7 @@ import {
   computeSteadyStateBytesWithOverlays,
   MAX_PENDING_OVERLAY_CHUNK_ROWS,
   MAX_PENDING_OVERLAY_COUNT,
+  OVERLAY_METADATA_JSON_MAX_BYTES,
 } from "./budgets";
 import { MAX_MANIFEST_SHARD_ROW_COUNT } from "./indexManifest";
 
@@ -107,4 +108,22 @@ void test("computeOverlayContainerBytes at a real overlay's exact shape is a saf
   const container = encodeOverlayContainer({ operation: "upsert", metadataJsonBytes, noteVectorBytes: noteVector, chunkVectorBytes: chunkVector });
   const projected = computeOverlayContainerBytes(dimension, chunkCount);
   assert.ok(projected >= container.length, `projected (${projected}) must never under-count the real container (${container.length})`);
+});
+
+void test("the cap increase from 512 to 4096 adds exactly 7,168,000 bytes to computeOverlayDiskBytesBudget and the total stays within the 600 MiB disk budget", () => {
+  assert.equal(OVERLAY_METADATA_JSON_MAX_BYTES, 4096, "cap must be 4096 after the increase");
+  const expectedDelta = MAX_PENDING_OVERLAY_COUNT * (4096 - 512);
+  assert.equal(expectedDelta, 7_168_000);
+  const shardCounts = Array.from({ length: TARGET_SHARD_COUNT }, () => MAX_MANIFEST_SHARD_ROW_COUNT);
+  const diskWithOverlays = computeDiskBytesWithOverlays(TARGET_DIMENSION, TARGET_NOTE_COUNT, shardCounts);
+  assert.ok(diskWithOverlays <= BUDGET_DISK_BYTES, `disk with overlays (${(diskWithOverlays / 1024 / 1024).toFixed(1)}MB) must stay within ${BUDGET_DISK_BYTES / 1024 / 1024}MB`);
+});
+
+void test("steady-state and rebuild-peak ceilings are unaffected by the metadata cap increase (they do not reference it)", () => {
+  const shardCounts = Array.from({ length: TARGET_SHARD_COUNT }, () => MAX_MANIFEST_SHARD_ROW_COUNT);
+  const largestShardCount = Math.max(...shardCounts);
+  const steadyState = computeSteadyStateBytesWithOverlays({ dimension: TARGET_DIMENSION, noteCount: TARGET_NOTE_COUNT, largestShardCount });
+  assert.ok(steadyState <= BUDGET_STEADY_STATE_MEMORY_BYTES);
+  const rebuildPeak = computeCompactionRebuildPeakBytes({ dimension: TARGET_DIMENSION, oldNoteCount: TARGET_NOTE_COUNT, newNoteCount: TARGET_NOTE_COUNT, largestShardCount });
+  assert.ok(rebuildPeak <= BUDGET_REBUILD_PEAK_MEMORY_BYTES);
 });

@@ -11,6 +11,7 @@ import {
   isOwnedOverlayFileName,
   listOverlayPrefixes,
   overlayFileName,
+  OverlayMetadataTooLargeError,
   OverlayStoreError,
   readOverlayFull,
   readOverlayPrefix,
@@ -18,6 +19,7 @@ import {
   writeUpsertOverlay,
   type UpsertOverlayInput,
 } from "./overlayStore";
+import { OVERLAY_METADATA_JSON_MAX_BYTES } from "./budgets";
 import { encodeVectorMatrix } from "./vectorCodec";
 
 const DIM = 3;
@@ -266,8 +268,59 @@ void test("a foreign container claiming chunkCount beyond MAX_MANIFEST_SHARD_ROW
 
 void test("writeUpsertOverlay enforces the OVERLAY_METADATA_JSON_MAX_BYTES cap on its own metadata (an oversized identity path is rejected before any write)", async () => {
   const fs = new FakeIndexFs();
-  const hugePath = `${"A/".repeat(400)}Note.md`; // pushes the identity's canonicalPath, and thus metadata JSON, well past the cap
-  await assert.rejects(() => writeUpsertOverlay(fs, "/root", upsertInput(hugePath)), OverlayStoreError);
+  const hugePath = `${"A/".repeat(2500)}Note.md`; // pushes metadata JSON well past the 4096-byte cap
+  await assert.rejects(() => writeUpsertOverlay(fs, "/root", upsertInput(hugePath)), OverlayMetadataTooLargeError);
+});
+
+void test("production-shaped 155-char ASCII path (513 bytes metadata) succeeds after cap increase to 4096", async () => {
+  const fs = new FakeIndexFs();
+  const path = "x".repeat(155);
+  const dim = 1536;
+  const noteVector = new Float32Array(dim); noteVector[0] = 1;
+  const makeChunk = () => { const v = new Float32Array(dim); v[0] = 1; return v; };
+  const result = await writeUpsertOverlay(fs, "/root", upsertInput(path, { dimension: dim, noteVector, chunkVectors: Array.from({ length: 5 }, makeChunk), relatedVersion: 1 }));
+  assert.equal(result.operation, "upsert");
+  assert.equal(result.identity.canonicalPath, path);
+  const prefix = await readOverlayPrefix(fs, "/root", result.identity);
+  assert.ok(prefix);
+  assert.equal(prefix?.identity.canonicalPath, path);
+});
+
+void test("production-shaped curly-apostrophe UTF-8 path (513 bytes metadata) succeeds after cap increase", async () => {
+  const fs = new FakeIndexFs();
+  const path = "Projects/Research/2026/Café’s-Notes/Brontë’s-Analysis/Naïve-Bayes’s-Application/Café-Reviews/Précis-Summary’s-Findings-and-Further-Thoughts.md";
+  const dim = 1536;
+  const noteVector = new Float32Array(dim); noteVector[0] = 1;
+  const makeChunk = () => { const v = new Float32Array(dim); v[0] = 1; return v; };
+  const result = await writeUpsertOverlay(fs, "/root", upsertInput(path, { dimension: dim, noteVector, chunkVectors: Array.from({ length: 5 }, makeChunk), relatedVersion: 1 }));
+  assert.equal(result.operation, "upsert");
+  const prefix = await readOverlayPrefix(fs, "/root", result.identity);
+  assert.ok(prefix);
+});
+
+void test("exact 4096-byte metadata JSON accepted, 4097-byte rejected with OverlayMetadataTooLargeError", async () => {
+  const fs = new FakeIndexFs();
+  const overhead = new TextEncoder().encode(JSON.stringify({
+    identity: { schemaVersion: 1, kind: "path", canonicalPath: "" },
+    operation: "upsert", version: 1, recordedAt: new Date().toISOString(),
+    mutationId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, chunkCount: 1,
+  })).length;
+  const exactPath = "x".repeat(OVERLAY_METADATA_JSON_MAX_BYTES - overhead);
+  await writeUpsertOverlay(fs, "/root", upsertInput(exactPath));
+  const prefix = await readOverlayPrefix(fs, "/root", stableNoteIdentity(canonicalizePath(exactPath)));
+  assert.ok(prefix, "exact 4096-byte metadata must be accepted");
+  const overPath = "x".repeat(OVERLAY_METADATA_JSON_MAX_BYTES - overhead + 1);
+  await assert.rejects(() => writeUpsertOverlay(fs, "/root", upsertInput(overPath)), OverlayMetadataTooLargeError);
+});
+
+void test("ordinary short-path note writes successfully (unaffected by cap change)", async () => {
+  const fs = new FakeIndexFs();
+  const result = await writeUpsertOverlay(fs, "/root", upsertInput("Notes/Daily/2026-09-14.md"));
+  assert.equal(result.operation, "upsert");
+  const prefix = await readOverlayPrefix(fs, "/root", result.identity);
+  assert.ok(prefix);
+  assert.equal(prefix?.sourceHash, HASH);
 });
 
 void test("(final-closure requirement 1) deleteOverlayIfSnapshotMatches: a stale {version, fingerprint} snapshot never deletes a REPLACEMENT overlay that reused the same version number after a delete reset it back to 1", async () => {

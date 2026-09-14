@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { CanonicalPath, IndexRecordV1, NoteIdentityV1 } from "../engine/contracts";
+import { EngineError } from "../engine/errors";
 import { compareScored, CosineIndexError, dotProduct, MAX_RANKING_LIMIT, normalizeVector } from "./cosineIndex";
 import { identityKey, type NoteRowMetadataV1 } from "./generationMetadata";
 import {
@@ -22,6 +23,7 @@ import {
   deleteOverlayIfSnapshotMatches,
   listOverlayPrefixes,
   overlayFileName,
+  OverlayMetadataTooLargeError,
   OverlayStoreError,
   readOverlayFull,
   writeTombstoneOverlay,
@@ -70,7 +72,10 @@ export class IndexStoreError extends Error {
   }
 }
 
-function wrapOverlayError(error: unknown, context: string): IndexStoreError {
+function wrapOverlayError(error: unknown, context: string): IndexStoreError | EngineError {
+  if (error instanceof OverlayMetadataTooLargeError) {
+    return new EngineError("OVERLAY_METADATA_TOO_LARGE", "overlay metadata JSON exceeds the enforced byte cap", {});
+  }
   if (error instanceof OverlayStoreError) {
     return new IndexStoreError(`${context}: ${error.message}`);
   }

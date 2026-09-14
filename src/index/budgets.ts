@@ -161,7 +161,7 @@ const CODEC_VECTOR_OVERHEAD_BYTES = HEADER_BYTES + CHECKSUM_BYTES;
  * dimension, chunkCount}` (a canonical path up to a few hundred bytes,
  * two hex hashes, an ISO timestamp, small integers).
  */
-export const OVERLAY_METADATA_JSON_MAX_BYTES = 512;
+export const OVERLAY_METADATA_JSON_MAX_BYTES = 4096;
 
 /**
  * Worst-case on-disk bytes ALL pending overlays combined could ever reach

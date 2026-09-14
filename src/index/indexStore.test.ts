@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { canonicalizePath, stableNoteIdentity } from "../engine/contracts";
+import { EngineError } from "../engine/errors";
 import { FakeIndexFs } from "./fakeIndexFs.test-support";
 import { buildGeneration, generationDirPath, loadCurrentGenerationId, loadGeneration, switchCurrentGeneration, verifyGenerationFully, type GenerationInputNote } from "./generationStore";
 import { overlayFileName, readOverlayPrefix, writeUpsertOverlay } from "./overlayStore";
@@ -17,7 +18,7 @@ import {
   planCompaction,
 } from "./indexStore";
 import { MAX_MANIFEST_NOTE_COUNT, MAX_MANIFEST_SHARD_ROW_COUNT } from "./indexManifest";
-import { MAX_PENDING_OVERLAY_COUNT } from "./budgets";
+import { MAX_PENDING_OVERLAY_COUNT, OVERLAY_METADATA_JSON_MAX_BYTES } from "./budgets";
 import type { OverlayPrefixRecord } from "./overlayStore";
 
 const DIM = 4;
@@ -990,4 +991,22 @@ void test("IndexMutationQueue: revision does not increment on failure", async ()
   // A subsequent success should still increment
   await queue.run(async () => {});
   assert.equal(queue.getRevision(), 2, "revision increments after recovery");
+});
+
+void test("IndexStore.upsertNote converts OverlayMetadataTooLargeError to EngineError with code OVERLAY_METADATA_TOO_LARGE", async () => {
+  const fs = new FakeIndexFs();
+  const store = new IndexStore(fs, "/root");
+  const hugePath = "x".repeat(OVERLAY_METADATA_JSON_MAX_BYTES);
+  const noteVector = new Float32Array(DIM);
+  noteVector[0] = 1;
+  const error = await store.upsertNote({
+    identity: stableNoteIdentity(canonicalizePath(hugePath)),
+    sourceHash: HASH,
+    embeddingModel: MODEL,
+    dimension: DIM,
+    noteVector,
+    chunkVectors: [],
+  }).then(() => null, (e: unknown) => e);
+  assert.ok(error instanceof EngineError, "must be an EngineError, not IndexStoreError");
+  assert.equal(error.code, "OVERLAY_METADATA_TOO_LARGE");
 });
