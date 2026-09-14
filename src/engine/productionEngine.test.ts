@@ -10,7 +10,7 @@ import { MigrationStore } from "../migration/migrationStore";
 import { createProductionScopeDiscoverySeam } from "./productionVaultAdapter";
 import { canonicalizePath, stableNoteIdentity } from "./contracts";
 import { projectSource } from "./sourceProjection";
-import { ProductionEngine, buildProductionScopeRegistry, PRODUCTION_SCOPE_CURRENT, PRODUCTION_SCOPE_ALL, PRODUCTION_SCOPE_READING } from "./productionEngine";
+import { ProductionEngine, buildProductionScopeRegistry, buildCatalogPredicate, PRODUCTION_SCOPE_CURRENT, PRODUCTION_SCOPE_ALL, PRODUCTION_SCOPE_READING, PRODUCTION_RELATED_VERSION } from "./productionEngine";
 
 /** A fuller fake `Vault` (unlike this file's own minimal `fakeVault` below) that actually resolves/reads note content -- needed to exercise the real scope-registry discovery seam end to end. Mirrors `productionVaultAdapter.test.ts`'s own `fakeVault` helper. */
 function richFakeVault(files: Record<string, string>, configDir = ".obsidian"): Vault {
@@ -791,4 +791,47 @@ void test("ProductionEngine.submitRebuild (10B FORCE COMMANDS) submits a real re
   const jobs = await engine.jobStore.list();
   assert.ok(jobs.some((persisted) => persisted.job.kind === "rebuild-index" && persisted.job.target.kind === "global"));
   await engine.dispose();
+});
+
+// -- buildCatalogPredicate (CP3: catalog snapshot predicate construction) --------------------------
+
+void test("buildCatalogPredicate: returns true on full match (identity + sourceHash + relatedVersion)", () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/A.md"));
+  const records = [{ identity, sourceHash: "a".repeat(64), relatedVersion: PRODUCTION_RELATED_VERSION }];
+  const predicate = buildCatalogPredicate(records, PRODUCTION_RELATED_VERSION);
+  assert.equal(predicate(identity, "a".repeat(64)), true);
+});
+
+void test("buildCatalogPredicate: returns false on sourceHash mismatch", () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/A.md"));
+  const records = [{ identity, sourceHash: "a".repeat(64), relatedVersion: PRODUCTION_RELATED_VERSION }];
+  const predicate = buildCatalogPredicate(records, PRODUCTION_RELATED_VERSION);
+  assert.equal(predicate(identity, "b".repeat(64)), false);
+});
+
+void test("buildCatalogPredicate: returns false on stale relatedVersion", () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/A.md"));
+  const records = [{ identity, sourceHash: "a".repeat(64), relatedVersion: 0 }];
+  const predicate = buildCatalogPredicate(records, PRODUCTION_RELATED_VERSION);
+  assert.equal(predicate(identity, "a".repeat(64)), false);
+});
+
+void test("buildCatalogPredicate: returns true when expectedRelatedVersion is undefined (no related config)", () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/A.md"));
+  const records = [{ identity, sourceHash: "a".repeat(64) }];
+  const predicate = buildCatalogPredicate(records, undefined);
+  assert.equal(predicate(identity, "a".repeat(64)), true);
+});
+
+void test("buildCatalogPredicate: empty catalog → predicate rejects all", () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/A.md"));
+  const predicate = buildCatalogPredicate([], PRODUCTION_RELATED_VERSION);
+  assert.equal(predicate(identity, "a".repeat(64)), false);
+});
+
+void test("buildCatalogPredicate: null catalog → throws STORE_READ_FAILED", () => {
+  assert.throws(
+    () => buildCatalogPredicate(null, PRODUCTION_RELATED_VERSION),
+    (error: unknown) => isEngineError(error) && error.code === "STORE_READ_FAILED",
+  );
 });

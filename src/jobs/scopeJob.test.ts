@@ -6,7 +6,7 @@ import { canonicalizePath, stableNoteIdentity, type NoteIdentityV1 } from "../en
 import { isEngineError } from "../engine/errors";
 import { JobEngine, type JobEngineClock } from "./jobEngine";
 import { JobStore } from "./jobStore";
-import { ScopeJobRunner, type ScopeDiscoveryItem, type ScopeDiscoverySeam, type ScopeEnqueueSeam, type ScopeImportSeam } from "./scopeJob";
+import { ScopeJobRunner, type ScopeCatalogSnapshotSeam, type ScopeDiscoveryItem, type ScopeDiscoverySeam, type ScopeEnqueueSeam, type ScopeImportSeam } from "./scopeJob";
 
 class FakeFs implements AtomicStoreFs {
   files = new Map<string, string>();
@@ -453,4 +453,100 @@ void test("(acceptance guard 8) drift detected across a simulated restart: the p
   const successorFinal = await store.getById(successor!.job.jobId);
   assert.equal(successorFinal?.status, "completed");
   assert.equal(enqueue.calls.length, 2, "exactly the successor's own enqueue calls for {A, B} -- never a duplicate/drifted call from the original job");
+});
+
+// -- ScopeCatalogSnapshotSeam: prepareLookup predicate tests --------------------------------------
+
+function buildCatalogHarness(kind: "reading-sync" | "scope-refresh", catalogSnapshot?: ScopeCatalogSnapshotSeam) {
+  const discovery = new FakeDiscovery();
+  const scopeImport = new FakeImport();
+  const enqueue = new FakeEnqueue();
+  const runner = new ScopeJobRunner({ discovery, import: scopeImport, enqueue, catalogSnapshot });
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const clock = new FakeClock();
+  const engine = new JobEngine(store, { [kind]: runner }, clock);
+  return { discovery, scopeImport, enqueue, runner, store, engine, clock };
+}
+
+void test("catalogSnapshot: prepareLookup predicate skips indexed notes, enqueuedCount reflects only non-indexed", async () => {
+  const discoveredItems = items("Notes/A.md", "Notes/B.md", "Notes/C.md");
+  const indexedKey = discoveredItems[1].identity;
+  const indexedHash = discoveredItems[1].sourceHash;
+
+  const catalogSnapshot: ScopeCatalogSnapshotSeam = {
+    prepareLookup: async () => (identity, sourceHash) => {
+      return identity.kind === indexedKey.kind
+        && identity.canonicalPath === indexedKey.canonicalPath
+        && sourceHash === indexedHash;
+    },
+  };
+
+  const h = buildCatalogHarness("scope-refresh", catalogSnapshot);
+  h.discovery.result = discoveredItems;
+  const job = await h.engine.submit({ trigger: "scheduled", kind: "scope-refresh", scopeId: "scope-1", pipelineVersion: 1 });
+  await h.engine.drain();
+
+  const final = await h.store.getById(job.job.jobId);
+  assert.equal(final?.status, "completed");
+  assert.equal(h.enqueue.calls.length, 2);
+  if (final?.receipt?.kind === "scope") {
+    assert.equal(final.receipt.enqueuedCount, 2);
+    assert.equal(final.receipt.discoveredCount, 3);
+  }
+});
+
+void test("catalogSnapshot: prepareLookup throws STORE_READ_FAILED → .step re-throws → engine converts to retry", async () => {
+  const catalogSnapshot: ScopeCatalogSnapshotSeam = {
+    prepareLookup: async () => {
+      const { EngineError: EE } = await import("../engine/errors");
+      throw new EE("STORE_READ_FAILED", "Catalog snapshot returned null.", {});
+    },
+  };
+
+  const h = buildCatalogHarness("scope-refresh", catalogSnapshot);
+  h.discovery.result = items("Notes/A.md");
+  const job = await h.engine.submit({ trigger: "scheduled", kind: "scope-refresh", scopeId: "scope-1", pipelineVersion: 1 });
+  await h.engine.drain();
+  h.clock.ms += 100_000;
+  await h.engine.drain();
+
+  const final = await h.store.getById(job.job.jobId);
+  assert.equal(final?.status, "queued");
+  assert.equal(final?.lastFailureCode, "STORE_READ_FAILED");
+});
+
+void test("catalogSnapshot: prepareLookup throws non-EngineError (overlay validation) → .step converts to retry", async () => {
+  const catalogSnapshot: ScopeCatalogSnapshotSeam = {
+    prepareLookup: async () => { throw new Error("overlay validation failed"); },
+  };
+
+  const h = buildCatalogHarness("scope-refresh", catalogSnapshot);
+  h.discovery.result = items("Notes/A.md");
+  const job = await h.engine.submit({ trigger: "scheduled", kind: "scope-refresh", scopeId: "scope-1", pipelineVersion: 1 });
+  await h.engine.drain();
+  h.clock.ms += 100_000;
+  await h.engine.drain();
+
+  const final = await h.store.getById(job.job.jobId);
+  assert.equal(final?.status, "queued");
+  assert.equal(final?.lastFailureCode, "UNKNOWN_TRANSIENT");
+});
+
+void test("catalogSnapshot: predicate returns false for all (fresh index) → all notes enqueued", async () => {
+  const catalogSnapshot: ScopeCatalogSnapshotSeam = {
+    prepareLookup: async () => () => false,
+  };
+
+  const h = buildCatalogHarness("scope-refresh", catalogSnapshot);
+  h.discovery.result = items("Notes/A.md", "Notes/B.md");
+  const job = await h.engine.submit({ trigger: "scheduled", kind: "scope-refresh", scopeId: "scope-1", pipelineVersion: 1 });
+  await h.engine.drain();
+
+  const final = await h.store.getById(job.job.jobId);
+  assert.equal(final?.status, "completed");
+  assert.equal(h.enqueue.calls.length, 2);
+  if (final?.receipt?.kind === "scope") {
+    assert.equal(final.receipt.enqueuedCount, 2);
+  }
 });
