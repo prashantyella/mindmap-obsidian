@@ -227,7 +227,8 @@ export class JobStore {
       if (root && batch.status === "active" && (root.status === "failed" || root.status === "cancelled")) {
         return { ...batch, discoveredTotal, items, status: root.status, updatedAt: root.job.updatedAt > batch.updatedAt ? root.job.updatedAt : batch.updatedAt };
       }
-      if (!root || batch.status !== "active" || discoveredTotal === undefined || items.length !== discoveredTotal || !isTerminalJobStatus(root.status) || items.some((item) => !isTerminalJobStatus(item.status))) return { ...batch, discoveredTotal, items };
+      const expectedChildren = root?.receipt?.kind === "scope" ? (root.receipt.enqueuedCount ?? discoveredTotal) : discoveredTotal;
+      if (!root || batch.status !== "active" || expectedChildren === undefined || items.length !== expectedChildren || !isTerminalJobStatus(root.status) || items.some((item) => !isTerminalJobStatus(item.status))) return { ...batch, discoveredTotal, items };
       const status = root.status === "cancelled" ? "cancelled" : root.status === "failed" ? "failed" : items.some((item) => item.status === "failed" || item.status === "cancelled") ? "completed-with-failures" : "completed";
       return { ...batch, discoveredTotal, items, status, updatedAt: root.job.updatedAt > batch.updatedAt ? root.job.updatedAt : batch.updatedAt };
     }));
