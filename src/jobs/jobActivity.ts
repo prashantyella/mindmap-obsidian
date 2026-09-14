@@ -21,7 +21,7 @@ export function deriveEngineActivity(jobs: readonly PersistedJobV1[], batches: r
   const queued = jobs.filter((job) => job.status === "queued");
   const batch = batches.find((entry) => entry.status === "active");
   const terminal = [...batches].filter((entry) => entry.status === "completed-with-failures" || entry.status === "failed" || entry.status === "cancelled").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-  const activityBatch = batch ? { status: batch.status, processed: batch.items.filter((item) => item.status === "completed" || item.status === "failed" || item.status === "cancelled").length, total: batch.discoveredTotal, failed: batch.items.filter((item) => item.status === "failed" || item.status === "cancelled").length } : undefined;
+  const activityBatch = batch ? { status: batch.status, processed: batch.items.filter((item) => item.status === "completed" || item.status === "failed" || item.status === "cancelled").length, total: batch.items.length > 0 ? batch.items.length : batch.discoveredTotal, failed: batch.items.filter((item) => item.status === "failed" || item.status === "cancelled").length } : undefined;
   const current = active ?? queued[0];
   const path = current?.job.target.kind === "note" && current.job.target.identity.kind === "path" ? current.job.target.identity.canonicalPath.split("/").pop() : undefined;
   const processNoteCount = jobs.filter((job) => job.job.kind === "process-note" && (job.status === "queued" || job.status === "active")).length;
