@@ -183,6 +183,22 @@ void test("activity detail row is bounded, disabled, and privacy-safe", () => {
   assert.doesNotMatch(detail?.title ?? "", /\//);
 });
 
+void test("CP5: Engine detail row shows batch preparing when preparing=true", () => {
+  const items = buildStatusBarMenuItems(state({ activity: { state: "running", queuedCount: 0, activeCount: 1, processNoteCount: 0, bulkBlocked: true, current: { kind: "scope-refresh", phase: "discover", attempt: 1 }, batch: { status: "active", preparing: true, processed: 0, total: undefined, failed: 0 } } }));
+  const detail = items.find((item) => item.title.startsWith("Engine: "));
+  assert.ok(detail);
+  assert.match(detail?.title ?? "", /preparing/);
+  assert.doesNotMatch(detail?.title ?? "", /queued/);
+});
+
+void test("CP5: Engine detail row shows batch progress 895/935", () => {
+  const items = buildStatusBarMenuItems(state({ activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, current: { kind: "process-note", phase: "embed", attempt: 1 }, batch: { status: "active", preparing: false, processed: 895, total: 935, failed: 0 } } }));
+  const detail = items.find((item) => item.title.startsWith("Engine: "));
+  assert.ok(detail);
+  assert.match(detail?.title ?? "", /895\/935/);
+  assert.doesNotMatch(detail?.title ?? "", /queued/);
+});
+
 void test("actionable scheduler health is announced without contradictory schedule copy", () => {
   const presentation = buildStatusBarPresentation(state({
     currentPending: 2,
