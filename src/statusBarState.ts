@@ -237,7 +237,7 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
       : `Reading · ${state.readingPending}`
     : researchBusy
     ? `Research · ${state.webResearchActivity}`
-    : activity?.batch && (activity.batch.total === undefined || activity.batch.processed === 0) ? "Mindmap · preparing"
+    : activity?.batch?.total === undefined && activity?.batch ? "Mindmap · preparing"
     : activity?.batch?.total !== undefined ? `Mindmap · ${activity.batch.processed}/${activity.batch.total}`
     : activity && activity.queuedCount > 0 ? `Mindmap · ${activity.queuedCount} queued`
     : visibleLatestFailure && activity?.latestFailureBatch ? `Mindmap · ${batchFailureSummary(activity.latestFailureBatch)}`

@@ -338,14 +338,10 @@ export class ProductionEngine {
       const expectedRelatedVersion = relatedConfig ? PRODUCTION_RELATED_VERSION : undefined;
       const indexCheckSeam = {
         isAlreadyIndexed: async (identity: import("./contracts").NoteIdentityV1, sourceHash: string): Promise<boolean> => {
-          try {
-            const record = await this.indexStore.getRecord(identity);
-            if (!record || record.sourceHash !== sourceHash) return false;
-            if (expectedRelatedVersion !== undefined && (record.relatedVersion ?? 0) < expectedRelatedVersion) return false;
-            return true;
-          } catch {
-            return false;
-          }
+          const record = await this.indexStore.getRecord(identity);
+          if (!record || record.sourceHash !== sourceHash) return false;
+          if (expectedRelatedVersion !== undefined && (record.relatedVersion ?? 0) < expectedRelatedVersion) return false;
+          return true;
         },
       };
       const scopeRunner = new ScopeJobRunner({
