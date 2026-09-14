@@ -677,3 +677,194 @@ void test("(acceptance guard 5) scope receipt: a well-formed completed scope-ref
     }),
   );
 });
+
+// -- enqueuedCount <= discoveredCount receipt invariant --------------------------------------------
+
+void test("scope receipt: enqueuedCount=40 with discoveredCount=935 is accepted (E <= D)", () => {
+  assert.doesNotThrow(() =>
+    parsePersistedJobV1({
+      schemaVersion: 1,
+      job: scopeJob("scope-refresh", "complete"),
+      status: "completed",
+      attempt: 0,
+      cancelRequested: false,
+      receipt: { kind: "scope", discovered: true, discoveredCount: 935, discoveryFingerprint: "d".repeat(64), enqueuedCount: 40 },
+    }),
+  );
+});
+
+void test("scope receipt: enqueuedCount=936 with discoveredCount=935 is rejected (E > D)", () => {
+  assert.throws(
+    () =>
+      parsePersistedJobV1({
+        schemaVersion: 1,
+        job: scopeJob("scope-refresh", "complete"),
+        status: "completed",
+        attempt: 0,
+        cancelRequested: false,
+        receipt: { kind: "scope", discovered: true, discoveredCount: 935, discoveryFingerprint: "d".repeat(64), enqueuedCount: 936 },
+      }),
+    (error: unknown) => isEngineError(error) && error.code === "JOB_SHAPE_INVALID",
+  );
+});
+
+void test("scope receipt: enqueuedCount <= discoveredCount cross-field invariant rejects via assertPersistedJobInvariants", () => {
+  assert.throws(
+    () =>
+      parsePersistedJobV1({
+        schemaVersion: 1,
+        job: scopeJob("scope-refresh", "enqueue"),
+        status: "queued",
+        attempt: 0,
+        cancelRequested: false,
+        receipt: { kind: "scope", discovered: true, discoveredCount: 10, discoveryFingerprint: "d".repeat(64), enqueuedCount: 11 },
+      }),
+    (error: unknown) => isEngineError(error) && error.code === "JOB_SHAPE_INVALID",
+  );
+});
+
+// -- parseBulkBatchV1 completed expectedItems (enqueuedCount when defined, else discoveredTotal) ---
+
+function makeBatchRootJob(kind: "scope-refresh" | "rebuild-index", batchId: string) {
+  const target = kind === "rebuild-index"
+    ? { schemaVersion: 1 as const, kind: "global" as const }
+    : { schemaVersion: 1 as const, kind: "scope" as const, scopeId: "vault-scope" };
+  return {
+    schemaVersion: 1,
+    jobId: "bulk-root",
+    trigger: "manual" as const,
+    kind,
+    target,
+    pipelineVersion: 1,
+    phase: "complete",
+    idempotencyKey: computeJobIdempotencyKey(kind, target, 1),
+    batchId,
+    createdAt: "2026-09-14T00:00:00.000Z",
+    updatedAt: "2026-09-14T00:00:00.000Z",
+  };
+}
+
+function makeChildJob(index: number, batchId: string, batchItemId: string, status: "completed" | "failed" = "completed") {
+  const path = `Notes/Child-${index}.md`;
+  const identity = stableNoteIdentity(canonicalizePath(path));
+  const target = { schemaVersion: 1 as const, kind: "note" as const, identity };
+  const sourceHash = index.toString(16).padStart(64, "0");
+  const embeddingModel = "m1";
+  const phase = status === "completed" ? "complete" : "discover";
+  const job = {
+    schemaVersion: 1,
+    jobId: `child-${index}`,
+    trigger: "manual" as const,
+    kind: "process-note" as const,
+    target,
+    sourceHash,
+    embeddingModel,
+    pipelineVersion: 1,
+    phase,
+    idempotencyKey: computeJobIdempotencyKey("process-note", target, 1, sourceHash, embeddingModel),
+    batchId,
+    batchItemId,
+    createdAt: "2026-09-14T00:00:00.000Z",
+    updatedAt: "2026-09-14T00:00:00.000Z",
+  };
+  return {
+    schemaVersion: 1,
+    job,
+    status,
+    attempt: 0,
+    cancelRequested: false,
+    ...(status === "completed" ? { receipt: { kind: "note", noteCommitted: true, overlayCommitted: true, noteContentHash: "b".repeat(64) } } : {}),
+    ...(status === "failed" ? { lastFailureCode: "EMBEDDING_TIMEOUT", lastFailureClass: "transient" } : {}),
+  };
+}
+
+function makeTerminalItems(count: number, failedCount = 0) {
+  return Array.from({ length: count }, (_, i) => ({
+    batchItemId: i.toString(16).padStart(64, "0"),
+    jobId: `child-${i}`,
+    status: (i < failedCount ? "failed" : "completed") as "completed" | "failed",
+  }));
+}
+
+void test("parseBulkBatchV1: D=935, E=40, completed batch with 40 terminal items accepted", () => {
+  const batchId = "batch-1";
+  const rootJob = makeBatchRootJob("scope-refresh", batchId);
+  const items = makeTerminalItems(40);
+  const childJobs = items.map((item, i) => makeChildJob(i, batchId, item.batchItemId, item.status));
+  const doc = {
+    schemaVersion: 1,
+    jobs: [
+      { schemaVersion: 1, job: rootJob, status: "completed", attempt: 0, cancelRequested: false, receipt: { kind: "scope", discovered: true, discoveredCount: 935, discoveryFingerprint: "d".repeat(64), enqueuedCount: 40 } },
+      ...childJobs,
+    ],
+    providerPause: { active: false },
+    scheduledOccurrences: [],
+    bulkBatches: [{ schemaVersion: 1, batchId, rootJobId: "bulk-root", trigger: "manual", scopeId: "vault-scope", status: "completed", discoveredTotal: 935, createdAt: "2026-09-14T00:00:00.000Z", updatedAt: "2026-09-14T00:00:00.000Z", items }],
+  };
+  assert.doesNotThrow(() => parseJobStoreDocumentV1(doc));
+});
+
+void test("parseBulkBatchV1: D=935, E=40, completed batch with 935 items rejected (items.length !== expectedItems)", () => {
+  const batchId = "batch-1";
+  const rootJob = makeBatchRootJob("scope-refresh", batchId);
+  const items = makeTerminalItems(935);
+  const childJobs = items.map((item, i) => makeChildJob(i, batchId, item.batchItemId, item.status));
+  const doc = {
+    schemaVersion: 1,
+    jobs: [
+      { schemaVersion: 1, job: rootJob, status: "completed", attempt: 0, cancelRequested: false, receipt: { kind: "scope", discovered: true, discoveredCount: 935, discoveryFingerprint: "d".repeat(64), enqueuedCount: 40 } },
+      ...childJobs,
+    ],
+    providerPause: { active: false },
+    scheduledOccurrences: [],
+    bulkBatches: [{ schemaVersion: 1, batchId, rootJobId: "bulk-root", trigger: "manual", scopeId: "vault-scope", status: "completed", discoveredTotal: 935, createdAt: "2026-09-14T00:00:00.000Z", updatedAt: "2026-09-14T00:00:00.000Z", items }],
+  };
+  assert.throws(() => parseJobStoreDocumentV1(doc), (error: unknown) => isEngineError(error) && error.code === "JOB_STORE_CORRUPT");
+});
+
+void test("parseBulkBatchV1: pruned root (no root in jobsById), completed batch with discoveredTotal=40, 40 items accepted (falls back to discoveredTotal)", () => {
+  const batchId = "batch-1";
+  const items = makeTerminalItems(40);
+  const childJobs = items.map((item, i) => makeChildJob(i, batchId, item.batchItemId, item.status));
+  const doc = {
+    schemaVersion: 1,
+    jobs: [...childJobs],
+    providerPause: { active: false },
+    scheduledOccurrences: [],
+    bulkBatches: [{ schemaVersion: 1, batchId, rootJobId: "pruned-root", trigger: "manual", scopeId: "vault-scope", status: "completed", discoveredTotal: 40, createdAt: "2026-09-14T00:00:00.000Z", updatedAt: "2026-09-14T00:00:00.000Z", items }],
+  };
+  assert.doesNotThrow(() => parseJobStoreDocumentV1(doc));
+});
+
+void test("parseBulkBatchV1: completed-with-failures D=935, E=40, 40 items (39 completed + 1 failed) accepted", () => {
+  const batchId = "batch-1";
+  const rootJob = makeBatchRootJob("scope-refresh", batchId);
+  const items = makeTerminalItems(40, 1);
+  const childJobs = items.map((item, i) => makeChildJob(i, batchId, item.batchItemId, item.status));
+  const doc = {
+    schemaVersion: 1,
+    jobs: [
+      { schemaVersion: 1, job: rootJob, status: "completed", attempt: 0, cancelRequested: false, receipt: { kind: "scope", discovered: true, discoveredCount: 935, discoveryFingerprint: "d".repeat(64), enqueuedCount: 40 } },
+      ...childJobs,
+    ],
+    providerPause: { active: false },
+    scheduledOccurrences: [],
+    bulkBatches: [{ schemaVersion: 1, batchId, rootJobId: "bulk-root", trigger: "manual", scopeId: "vault-scope", status: "completed-with-failures", discoveredTotal: 935, createdAt: "2026-09-14T00:00:00.000Z", updatedAt: "2026-09-14T00:00:00.000Z", items }],
+  };
+  assert.doesNotThrow(() => parseJobStoreDocumentV1(doc));
+});
+
+void test("parseBulkBatchV1: rebuild-index D=0, no scope receipt, completed batch with 0 items accepted", () => {
+  const batchId = "batch-1";
+  const rootJob = makeBatchRootJob("rebuild-index", batchId);
+  const doc = {
+    schemaVersion: 1,
+    jobs: [
+      { schemaVersion: 1, job: rootJob, status: "completed", attempt: 0, cancelRequested: false, receipt: { kind: "rebuild", built: true, verified: true, activated: true, targetGenerationId: 1, snapshot: validRebuildSnapshot(), builtManifestFingerprint: "c".repeat(64) } },
+    ],
+    providerPause: { active: false },
+    scheduledOccurrences: [],
+    bulkBatches: [{ schemaVersion: 1, batchId, rootJobId: "bulk-root", trigger: "manual", status: "completed", discoveredTotal: 0, createdAt: "2026-09-14T00:00:00.000Z", updatedAt: "2026-09-14T00:00:00.000Z", items: [] }],
+  };
+  assert.doesNotThrow(() => parseJobStoreDocumentV1(doc));
+});

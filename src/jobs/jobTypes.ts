@@ -524,6 +524,9 @@ export function parseJobReceiptV1(value: unknown): JobReceiptV1 {
     if (record.enqueuedCount !== undefined && (typeof record.enqueuedCount !== "number" || !Number.isInteger(record.enqueuedCount) || record.enqueuedCount < 0 || record.enqueuedCount > MAX_SCOPE_DISCOVERY_ITEMS)) {
       throw new EngineError("JOB_SHAPE_INVALID", `scope receipt enqueuedCount must be an integer in [0, ${MAX_SCOPE_DISCOVERY_ITEMS}].`, {});
     }
+    if (record.enqueuedCount !== undefined && record.discoveredCount !== undefined && record.enqueuedCount > record.discoveredCount) {
+      throw new EngineError("JOB_SHAPE_INVALID", "scope receipt enqueuedCount must not exceed discoveredCount.", {});
+    }
     const extra = Object.keys(record).filter((key) => !["kind", "discovered", "discoveredCount", "discoveryFingerprint", "imported", "enqueuedCount"].includes(key));
     if (extra.length > 0) {
       throw new EngineError("JOB_SHAPE_INVALID", `scope receipt has unrecognized field(s): ${extra.join(", ")}.`, {});
@@ -684,6 +687,9 @@ function assertPersistedJobInvariants(
       if (job.kind === "reading-sync" && !receipt.imported) {
         throw new EngineError("JOB_SHAPE_INVALID", 'PersistedJobV1: a completed reading-sync job requires receipt.imported.', {});
       }
+    }
+    if (receipt.enqueuedCount !== undefined && receipt.discoveredCount !== undefined && receipt.enqueuedCount > receipt.discoveredCount) {
+      throw new EngineError("JOB_SHAPE_INVALID", "PersistedJobV1: receipt.enqueuedCount must not exceed discoveredCount.", {});
     }
   }
 }
@@ -948,7 +954,8 @@ function parseBulkBatchV1(value: unknown, jobsById: ReadonlyMap<string, Persiste
     if ((!job && !isTerminalJobStatus(itemStatus)) || (job && (job.job.batchId !== batchId || job.job.batchItemId !== item.batchItemId || job.status !== itemStatus))) throw new EngineError("JOB_STORE_CORRUPT", "BulkBatchV1 item must match its child job.", {});
     return { batchItemId: item.batchItemId, jobId, status: itemStatus };
   });
-  if ((status === "completed" || status === "completed-with-failures") && (record.discoveredTotal === undefined || items.length !== record.discoveredTotal || items.some((item) => !isTerminalJobStatus(item.status)))) throw new EngineError("JOB_STORE_CORRUPT", "Completed BulkBatchV1 must have a complete terminal item ledger.", {});
+  const expectedItems = root?.receipt?.kind === "scope" && root.receipt.enqueuedCount !== undefined ? root.receipt.enqueuedCount : record.discoveredTotal;
+  if ((status === "completed" || status === "completed-with-failures") && (record.discoveredTotal === undefined || expectedItems === undefined || items.length !== expectedItems || items.some((item) => !isTerminalJobStatus(item.status)))) throw new EngineError("JOB_STORE_CORRUPT", "Completed BulkBatchV1 must have a complete terminal item ledger.", {});
   if (root) {
     if (status === "active" && (root.status === "failed" || root.status === "cancelled")) throw new EngineError("JOB_STORE_CORRUPT", "An active batch cannot retain a failed/cancelled root.", {});
     if ((status === "failed" || status === "cancelled") && root.status !== status) throw new EngineError("JOB_STORE_CORRUPT", "Terminal batch status must match its root.", {});
