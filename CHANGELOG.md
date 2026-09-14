@@ -9,6 +9,14 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.4
+
+### Fixed
+- Raise overlay metadata byte cap from 512 to 4096 so current valid notes (513–515 bytes) no longer fail deterministically.
+- Add terminal error code `OVERLAY_METADATA_TOO_LARGE` for metadata above 4096, ending 20-retry waste on notes that can never succeed.
+
+`minAppVersion` remains `1.7.2`.
+
 ## 0.3.3
 
 ### Fixed
