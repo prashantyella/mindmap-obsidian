@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { AtomicStoreFs } from "../engine/atomicStore";
 import { canonicalizePath, stableNoteIdentity, type NoteIdentityV1 } from "../engine/contracts";
-import { isEngineError } from "../engine/errors";
+import { EngineError, isEngineError } from "../engine/errors";
 import { JobEngine, type JobEngineClock } from "./jobEngine";
 import { JobStore } from "./jobStore";
 import { ScopeJobRunner, type ScopeCatalogSnapshotSeam, type ScopeDiscoveryItem, type ScopeDiscoverySeam, type ScopeEnqueueSeam, type ScopeImportSeam } from "./scopeJob";
@@ -499,8 +499,7 @@ void test("catalogSnapshot: prepareLookup predicate skips indexed notes, enqueue
 void test("catalogSnapshot: prepareLookup throws STORE_READ_FAILED → .step re-throws → engine converts to retry", async () => {
   const catalogSnapshot: ScopeCatalogSnapshotSeam = {
     prepareLookup: async () => {
-      const { EngineError: EE } = await import("../engine/errors");
-      throw new EE("STORE_READ_FAILED", "Catalog snapshot returned null.", {});
+      throw new EngineError("STORE_READ_FAILED", "Catalog snapshot returned null.", {});
     },
   };
 
