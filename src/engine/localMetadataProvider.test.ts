@@ -71,6 +71,32 @@ void test("createOllamaMetadataProvider sends /api/chat with format:json and ext
   assert.equal((sentBody.options as Record<string, unknown>).num_predict, 100);
 });
 
+void test("createOllamaMetadataProvider sends the bounded metadata-v1 JSON schema when requested", async () => {
+  const { fetchImpl, calls } = createFakeFetch([() => jsonResponse({ message: { content: '{"summary":"s","tags":[],"concepts":[]}' } })]);
+  const provider = createOllamaMetadataProvider({ baseUrl: LOOPBACK_URL }, { fetchImpl });
+  await provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], maxTokens: 100, responseFormat: "metadata-v1" });
+  const sentBody = JSON.parse(String(calls[0].init?.body)) as Record<string, unknown>;
+  assert.deepEqual(sentBody.format, {
+    type: "object",
+    properties: {
+      summary: { type: "string" },
+      tags: { type: "array", items: { type: "string" } },
+      concepts: { type: "array", items: { type: "string" } },
+    },
+    required: ["summary", "tags", "concepts"],
+    additionalProperties: false,
+  });
+});
+
+void test("createOllamaMetadataProvider rejects an unknown response format discriminator", async () => {
+  const { fetchImpl } = createFakeFetch([() => jsonResponse({ message: { content: "{}" } })]);
+  const provider = createOllamaMetadataProvider({ baseUrl: LOOPBACK_URL }, { fetchImpl });
+  await assert.rejects(
+    provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], maxTokens: 100, responseFormat: "other" as never }),
+    (error: unknown) => error instanceof EngineError && error.code === "METADATA_CONFIG_INVALID",
+  );
+});
+
 void test("createOllamaMetadataProvider sends num_ctx alongside num_predict when contextTokens is provided", async () => {
   const { fetchImpl, calls } = createFakeFetch([() => jsonResponse({ message: { content: '{"summary":"s","tags":[],"concepts":[]}' } })]);
   const provider = createOllamaMetadataProvider({ baseUrl: LOOPBACK_URL }, { fetchImpl });

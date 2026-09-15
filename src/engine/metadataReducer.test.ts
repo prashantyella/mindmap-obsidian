@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { EngineError } from "./errors";
 import type { MetadataInferenceProvider } from "./metadataPipeline";
-import { resolveLeafBudget } from "./metadataBudget";
+import { resolveIntermediateBudget, resolveLeafBudget } from "./metadataBudget";
 import {
   validateIntermediate,
   buildReductionMessages,
@@ -23,7 +23,7 @@ const CTX = 4096;
 const BUDGET = resolveLeafBudget(CTX);
 
 function baseOpts(provider: MetadataInferenceProvider, overrides: Partial<{ signal: AbortSignal }> = {}) {
-  return { provider, model: "m", contextTokens: CTX, budget: BUDGET, ...overrides };
+  return { provider, model: "m", contextTokens: CTX, budget: BUDGET, intermediateBudget: resolveIntermediateBudget(CTX), tagLimit: 6, conceptLimit: 4, ...overrides };
 }
 
 void test("validateIntermediate rejects oversized summary", () => {
@@ -66,6 +66,11 @@ void test("buildReductionMessages includes all intermediates", () => {
   assert.equal(messages.length, 2);
   assert.ok(messages[1].content.includes("Part 1:"));
   assert.ok(messages[1].content.includes("Part 2:"));
+});
+
+void test("buildReductionMessages caps configured limits to validated intermediate bounds", () => {
+  const messages = buildReductionMessages([im("A")], 100, 100);
+  assert.match(messages[1].content, /at most 50 tags and 50 concepts/);
 });
 
 void test("reduceIntermediates makes a distinct configured root call for one intermediate", async () => {
@@ -175,11 +180,31 @@ void test("reduceIntermediates does not retry non-METADATA_RESPONSE_INVALID erro
   assert.equal(callCount, 1, "should not retry METADATA_TIMEOUT");
 });
 
+void test("diagnostic: a saturated reduction node retries malformed JSON exactly once at the 384-token allowance", async () => {
+  let calls = 0;
+  let observedMaxTokens = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete(request) {
+      calls++;
+      observedMaxTokens = request.maxTokens;
+      return "truncated reduction output";
+    },
+  };
+  await assert.rejects(
+    reduceIntermediates(Array.from({ length: 23 }, (_, i) => im(`part-${i}`, ["tag"], ["concept"])), baseOpts(provider)),
+    (error: unknown) => error instanceof EngineError && error.code === "METADATA_RESPONSE_INVALID" && error.message === "Metadata inference response did not contain valid JSON.",
+  );
+  assert.equal(calls, 2);
+  assert.equal(observedMaxTokens, 384);
+});
+
 void test("reduceIntermediates carries contextTokens in provider request", async () => {
   let receivedContextTokens: number | undefined;
+  let receivedResponseFormat: string | undefined;
   const provider: MetadataInferenceProvider = {
     async complete(request) {
       receivedContextTokens = request.contextTokens;
+      receivedResponseFormat = request.responseFormat;
       return '{"summary":"ok","tags":[],"concepts":[]}';
     },
   };
@@ -188,6 +213,7 @@ void test("reduceIntermediates carries contextTokens in provider request", async
     { provider, model: "m", contextTokens: 8192, budget: resolveLeafBudget(8192) },
   );
   assert.equal(receivedContextTokens, 8192, "contextTokens must be passed to provider");
+  assert.equal(receivedResponseFormat, "metadata-v1");
 });
 
 void test("reduceIntermediates group sizes strictly decrease", async () => {

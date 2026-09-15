@@ -4,7 +4,7 @@ import { parseMetadataOutputV1 } from "./contracts";
 import { hasControlCharacter } from "./controlCharacters";
 import { EngineError } from "./errors";
 import { validateBoundedIdentifier } from "./identifierValidation";
-import { validateContextTokens, resolveRootBudget, resolveLeafBudget, fitsInputBudget, assertFitsInputBudget, messagesTotalBytes } from "./metadataBudget";
+import { validateContextTokens, resolveRootBudget, resolveLeafBudget, resolveIntermediateBudget, MAX_INTERMEDIATE_ITEM_COUNT, fitsInputBudget, assertFitsInputBudget, messagesTotalBytes } from "./metadataBudget";
 import { chunkMarkdown } from "./metadataChunker";
 import { reduceIntermediates, validateIntermediate, type IntermediateMetadata } from "./metadataReducer";
 import { closestMatches } from "./textSimilarity";
@@ -91,6 +91,7 @@ export interface MetadataInferenceRequest {
   messages: ChatMessage[];
   maxTokens: number;
   contextTokens?: number;
+  responseFormat?: "metadata-v1";
 }
 
 export interface MetadataInferenceProviderCallOptions {
@@ -633,7 +634,7 @@ export async function runMetadataPipeline(
       }
       let raw: string;
       try {
-        raw = await provider.complete({ model, messages, maxTokens: config.maxTokens, contextTokens }, { signal: options.signal });
+        raw = await provider.complete({ model, messages, maxTokens: config.maxTokens, contextTokens, responseFormat: "metadata-v1" }, { signal: options.signal });
       } catch (error) {
         if (error instanceof EngineError) throw error;
         throw new EngineError("METADATA_PROVIDER_FAILED", "Metadata inference provider call failed.");
@@ -645,7 +646,10 @@ export async function runMetadataPipeline(
 
   // Long-note hierarchical path: chunk → map (with retry) → reduce (with retry) → normalize.
   const leafBudget = resolveLeafBudget(contextTokens);
-  const promptOverheadBytes = messagesTotalBytes(buildMetadataMessages("", config.tagLimit, config.conceptLimit, config.controlledTags, config.allowFreeTags));
+  const intermediateBudget = resolveIntermediateBudget(contextTokens);
+  const effectiveTagLimit = Math.min(config.tagLimit, MAX_INTERMEDIATE_ITEM_COUNT);
+  const effectiveConceptLimit = Math.min(config.conceptLimit, MAX_INTERMEDIATE_ITEM_COUNT);
+  const promptOverheadBytes = messagesTotalBytes(buildMetadataMessages("", effectiveTagLimit, effectiveConceptLimit, config.controlledTags, config.allowFreeTags));
   const contextWrapperBytes = 12;
   const chunkByteBudget = leafBudget.inputBudgetBytes - promptOverheadBytes - contextWrapperBytes;
   if (chunkByteBudget <= 0) {
@@ -663,7 +667,7 @@ export async function runMetadataPipeline(
   const chunkRequests = chunks.map((chunk) => {
     const promptBody = chunk.sourceText;
     const context = [chunk.headingBreadcrumb, chunk.fenceContext].filter(Boolean).join("\n");
-    const chunkMessages = buildMetadataMessages(promptBody, config.tagLimit, config.conceptLimit, config.controlledTags, config.allowFreeTags, context);
+    const chunkMessages = buildMetadataMessages(promptBody, effectiveTagLimit, effectiveConceptLimit, config.controlledTags, config.allowFreeTags, context);
     assertFitsInputBudget(chunkMessages, leafBudget);
     return { chunk, chunkMessages };
   });
@@ -681,7 +685,7 @@ export async function runMetadataPipeline(
     }
     const intermediate = await callProviderAndParseWithRetry(
       provider,
-      { model, messages: chunkMessages, maxTokens: leafBudget.maxOutputTokens, contextTokens },
+      { model, messages: chunkMessages, maxTokens: leafBudget.maxOutputTokens, contextTokens, responseFormat: "metadata-v1" },
       options.signal,
       (raw) => validateIntermediate(parseMetadataResponse(raw)),
     );
@@ -694,6 +698,9 @@ export async function runMetadataPipeline(
     model,
     contextTokens,
     budget: leafBudget,
+    intermediateBudget,
+    tagLimit: effectiveTagLimit,
+    conceptLimit: effectiveConceptLimit,
     rootBudget,
     nodeCache: options.nodeCache,
     nodeCacheKeyPrefix: options.nodeCacheKeyPrefix,

@@ -324,6 +324,23 @@ export interface OllamaMetadataConfig {
   maxResponseChars?: number;
 }
 
+const METADATA_V1_RESPONSE_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: { type: "string" },
+    tags: { type: "array", items: { type: "string" } },
+    concepts: { type: "array", items: { type: "string" } },
+  },
+  required: ["summary", "tags", "concepts"],
+  additionalProperties: false,
+} as const;
+
+function ollamaResponseFormat(value: MetadataInferenceRequest["responseFormat"]): "json" | typeof METADATA_V1_RESPONSE_SCHEMA {
+  if (value === undefined) return "json";
+  if (value === "metadata-v1") return METADATA_V1_RESPONSE_SCHEMA;
+  throw new EngineError("METADATA_CONFIG_INVALID", "Metadata response format is not recognized.");
+}
+
 /** Ports the `provider == "ollama"` branch of `llm_extract`: `POST {baseUrl}/api/chat` with bounded generation options; content extracted from `response.message.content`. */
 export function createOllamaMetadataProvider(config: OllamaMetadataConfig, deps: LocalMetadataProviderDeps): MetadataInferenceProvider {
   const { baseUrl } = validateLoopbackEndpoint(config.baseUrl, "METADATA_ENDPOINT_INVALID", "Ollama metadata");
@@ -337,7 +354,7 @@ export function createOllamaMetadataProvider(config: OllamaMetadataConfig, deps:
       const maxTokens = validateMaxTokens(request.maxTokens);
       const numCtx = validateContextTokens(request.contextTokens);
       const ollamaOptions: Record<string, number> = { num_ctx: numCtx, num_predict: maxTokens };
-      const body = JSON.stringify({ model, messages: request.messages, format: "json", stream: false, options: ollamaOptions });
+      const body = JSON.stringify({ model, messages: request.messages, format: ollamaResponseFormat(request.responseFormat), stream: false, options: ollamaOptions });
       assertBoundedBody(body);
       const text = await postJson(deps.fetchImpl, `${baseUrl}/api/chat`, body, {}, timeoutMs, maxResponseChars, options.signal);
       const parsed = parseJsonObject(text);
