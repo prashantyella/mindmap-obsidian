@@ -6,6 +6,7 @@ const MAX_CONTEXT_TOKENS = 131_072;
 
 export const CHAT_TEMPLATE_RESERVE_BYTES = 512;
 const LEAF_OUTPUT_ALLOWANCE = 256;
+export const INTERMEDIATE_OUTPUT_ALLOWANCE = 384;
 
 export interface ResolvedBudget {
   contextTokens: number;
@@ -35,6 +36,14 @@ export function resolveLeafBudget(contextTokens: number): ResolvedBudget {
     throw new EngineError("METADATA_CONFIG_INVALID", "contextTokens is too small for the leaf output allowance and chat-template reserve.");
   }
   return { contextTokens, maxOutputTokens: LEAF_OUTPUT_ALLOWANCE, inputBudgetBytes };
+}
+
+export function resolveIntermediateBudget(contextTokens: number): ResolvedBudget {
+  const inputBudgetBytes = contextTokens - CHAT_TEMPLATE_RESERVE_BYTES - INTERMEDIATE_OUTPUT_ALLOWANCE;
+  if (inputBudgetBytes <= 0) {
+    throw new EngineError("METADATA_CONFIG_INVALID", "contextTokens is too small for the intermediate output allowance and chat-template reserve.");
+  }
+  return { contextTokens, maxOutputTokens: INTERMEDIATE_OUTPUT_ALLOWANCE, inputBudgetBytes };
 }
 
 export function assertPositiveInputBudget(budget: ResolvedBudget): void {
