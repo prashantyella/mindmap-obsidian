@@ -443,3 +443,244 @@ void test("controlledTags and tagAliases keys/values reject control characters t
     assert.doesNotMatch(JSON.stringify({ message: error.message, context: error.context }), /Ignore previous instructions/);
   }
 });
+
+// --- Hierarchical pipeline tests ---
+
+void test("short note uses single-call path with contextTokens configured, makes exactly 1 provider call", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/Short.md"));
+  let callCount = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() { callCount++; return '{"summary":"short note","tags":["test"],"concepts":["idea"]}'; },
+  };
+  const config = baseConfig({ contextTokens: 4096 });
+  const output = await runMetadataPipeline(provider, config, { identity, text: "A short note.", related: [] });
+  assert.equal(callCount, 1, "short note must make exactly one provider call");
+  assert.equal(output.summary, "short note");
+  assert.deepEqual(output.tags, ["test"]);
+});
+
+void test("short note path preserves exact output byte-compatible with existing behavior", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/Example.md"));
+  const provider = fakeProvider('{"summary":"  A summary.  ","tags":["Machine Learning","ml"],"concepts":["Neural Networks"]}');
+  const config = baseConfig({ tagAliases: { ml: "machine-learning" }, contextTokens: 8192 });
+  const output = await runMetadataPipeline(provider, config, { identity, text: "note body", related: ["Notes/Other.md"] });
+  assert.equal(output.summary, "A summary.");
+  assert.deepEqual(output.tags, ["machine-learning"]);
+  assert.deepEqual(output.concepts, ["Neural Networks"]);
+  assert.deepEqual(output.related, ["Notes/Other.md"]);
+});
+
+void test("long note triggers hierarchical pipeline with multiple provider calls", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/Long.md"));
+  let callCount = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() {
+      callCount++;
+      return `{"summary":"part ${callCount}","tags":["tag-${callCount}"],"concepts":["concept-${callCount}"]}`;
+    },
+  };
+  const longText = "word ".repeat(2000);
+  const config = baseConfig({ contextTokens: 2048 });
+  const output = await runMetadataPipeline(provider, config, { identity, text: longText, related: [] });
+  assert.ok(callCount > 1, `expected multiple provider calls, got ${callCount}`);
+  assert.ok(output.summary.length > 0);
+  assert.ok(output.tags.length > 0);
+});
+
+void test("hierarchical pipeline normalizes only at final output, not intermediates", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/Norm.md"));
+  const provider: MetadataInferenceProvider = {
+    async complete() {
+      return '{"summary":"merged","tags":["Machine Learning","ml"],"concepts":["Neural Networks"]}';
+    },
+  };
+  const longText = "word ".repeat(3000);
+  const config = baseConfig({ contextTokens: 2048, tagAliases: { ml: "machine-learning" } });
+  const output = await runMetadataPipeline(provider, config, { identity, text: longText, related: [] });
+  assert.deepEqual(output.tags, ["machine-learning"]);
+});
+
+void test("hierarchical pipeline request bytes never exceed contextTokens estimate", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/Budget.md"));
+  const contextTokens = 2048;
+  const observedRequests: { bytes: number; maxTokens: number; contextTokens?: number }[] = [];
+  const provider: MetadataInferenceProvider = {
+    async complete(request) {
+      let total = 0;
+      for (const m of request.messages) total += Buffer.byteLength(m.content, "utf8");
+      observedRequests.push({ bytes: total, maxTokens: request.maxTokens, contextTokens: request.contextTokens });
+      return '{"summary":"ok","tags":["t"],"concepts":["c"]}';
+    },
+  };
+  const longText = "word ".repeat(5000);
+  await runMetadataPipeline(provider, baseConfig({ contextTokens }), { identity, text: longText, related: [] });
+  for (const request of observedRequests) {
+    assert.equal(request.contextTokens, contextTokens);
+    assert.ok(request.bytes + 512 + request.maxTokens <= contextTokens, `request exceeds hard context equation: ${request.bytes}+512+${request.maxTokens} > ${contextTokens}`);
+  }
+});
+
+void test("oversized heading context fails before any provider spend", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/OversizedHeading.md"));
+  let calls = 0;
+  const provider: MetadataInferenceProvider = { async complete() { calls++; return '{"summary":"s","tags":[],"concepts":[]}'; } };
+  const body = `# ${"H".repeat(2_000)}\n${"word ".repeat(9_000)}`;
+  await assert.rejects(
+    runMetadataPipeline(provider, baseConfig({ contextTokens: 2048, maxTokens: 100 }), { identity, text: body, related: [] }),
+    (error: unknown) => error instanceof EngineError && error.code === "METADATA_CONFIG_INVALID",
+  );
+  assert.equal(calls, 0);
+});
+
+void test("hierarchical pipeline cancellation aborts before provider calls", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/Cancel.md"));
+  const controller = new AbortController();
+  controller.abort();
+  const longText = "word ".repeat(3000);
+  await assert.rejects(
+    runMetadataPipeline(fakeProvider("{}"), baseConfig({ contextTokens: 2048 }), { identity, text: longText, related: [] }, { signal: controller.signal }),
+    (e: unknown) => e instanceof EngineError && e.code === "METADATA_CANCELLED",
+  );
+});
+
+void test("short note path does NOT retry on METADATA_RESPONSE_INVALID", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/ShortNoRetry.md"));
+  let callCount = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() {
+      callCount++;
+      return "not json";
+    },
+  };
+  await assert.rejects(
+    runMetadataPipeline(provider, baseConfig(), { identity, text: "short note", related: [] }),
+    (e: unknown) => e instanceof EngineError && e.code === "METADATA_RESPONSE_INVALID",
+  );
+  assert.equal(callCount, 1, "short-note path must make exactly one call with no retry");
+});
+
+void test("long note leaf retries once on METADATA_RESPONSE_INVALID then succeeds", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/LongRetry.md"));
+  let callCount = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() {
+      callCount++;
+      if (callCount === 1) return "not json";
+      return '{"summary":"ok","tags":["t"],"concepts":["c"]}';
+    },
+  };
+  const longText = "word ".repeat(2000);
+  const output = await runMetadataPipeline(provider, baseConfig({ contextTokens: 2048 }), { identity, text: longText, related: [] });
+  assert.equal(output.summary, "ok");
+  assert.ok(callCount >= 2, `expected at least 2 calls (1 retry), got ${callCount}`);
+});
+
+void test("long note leaf does not retry non-METADATA_RESPONSE_INVALID errors", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/NoRetry.md"));
+  let callCount = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() {
+      callCount++;
+      throw new EngineError("METADATA_TIMEOUT", "timed out");
+    },
+  };
+  const longText = "word ".repeat(2000);
+  await assert.rejects(
+    runMetadataPipeline(provider, baseConfig({ contextTokens: 2048 }), { identity, text: longText, related: [] }),
+    (e: unknown) => e instanceof EngineError && e.code === "METADATA_TIMEOUT",
+  );
+  assert.equal(callCount, 1);
+});
+
+void test("synthetic 20K input processes through hierarchical pipeline", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/20K.md"));
+  const body = "word ".repeat(4000);
+  assert.ok(body.length >= 20_000);
+  const provider = fakeProvider('{"summary":"s","tags":["t"],"concepts":["c"]}');
+  const output = await runMetadataPipeline(provider, baseConfig({ contextTokens: 4096 }), { identity, text: body, related: [] });
+  assert.ok(output.summary.length > 0);
+});
+
+void test("synthetic 30K input processes through hierarchical pipeline", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/30K.md"));
+  const body = "word ".repeat(6000);
+  assert.ok(body.length >= 30_000);
+  const provider = fakeProvider('{"summary":"s","tags":["t"],"concepts":["c"]}');
+  const output = await runMetadataPipeline(provider, baseConfig({ contextTokens: 4096 }), { identity, text: body, related: [] });
+  assert.ok(output.summary.length > 0);
+});
+
+void test("synthetic 55K input processes through hierarchical pipeline", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/55K.md"));
+  const body = "word ".repeat(11000);
+  assert.ok(body.length >= 55_000);
+  const provider = fakeProvider('{"summary":"s","tags":["t"],"concepts":["c"]}');
+  const output = await runMetadataPipeline(provider, baseConfig({ contextTokens: 4096 }), { identity, text: body, related: [] });
+  assert.ok(output.summary.length > 0);
+});
+
+void test("synthetic 250K input processes through hierarchical pipeline with fake provider", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/250K.md"));
+  const body = "word ".repeat(50_000);
+  assert.ok(body.length >= 250_000);
+  const provider = fakeProvider('{"summary":"s","tags":["t"],"concepts":["c"]}');
+  const start = Date.now();
+  const output = await runMetadataPipeline(provider, baseConfig({ contextTokens: 8192 }), { identity, text: body, related: [] });
+  const elapsed = Date.now() - start;
+  assert.ok(output.summary.length > 0);
+  assert.ok(elapsed < 10_000, `250K took ${elapsed}ms`);
+});
+
+void test("synthetic 2M input processes through hierarchical pipeline bounded and fast", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/2M.md"));
+  const body = "word ".repeat(400_000);
+  assert.ok(body.length >= 2_000_000);
+  const provider = fakeProvider('{"summary":"s","tags":["t"],"concepts":["c"]}');
+  const start = Date.now();
+  const output = await runMetadataPipeline(provider, baseConfig({ contextTokens: 16384 }), { identity, text: body, related: [] });
+  const elapsed = Date.now() - start;
+  assert.ok(output.summary.length > 0);
+  assert.ok(elapsed < 30_000, `2M took ${elapsed}ms`);
+});
+
+void test("contextTokens defaults to 4096 when omitted from config", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/Default.md"));
+  const provider = fakeProvider('{"summary":"s","tags":[],"concepts":[]}');
+  const config = baseConfig();
+  assert.equal(config.contextTokens, undefined);
+  const output = await runMetadataPipeline(provider, config, { identity, text: "short", related: [] });
+  assert.ok(output.summary.length > 0);
+});
+
+void test("hierarchical provider input includes breadcrumbs and each source body region exactly once", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/Breadcrumbs.md"));
+  const calls: string[] = [];
+  const provider: MetadataInferenceProvider = {
+    async complete(request) {
+      calls.push(request.messages.map((message) => message.content).join("\n"));
+      return '{"summary":"s","tags":[],"concepts":[]}';
+    },
+  };
+  const body = `# Root\nAlpha body. ${"word ".repeat(2500)}\n\n## Child\nBeta body. ${"word ".repeat(2500)}`;
+  await runMetadataPipeline(provider, baseConfig({ contextTokens: 2048 }), { identity, text: body, related: [] });
+  assert.ok(calls.some((call) => call.includes("# Root") && call.includes("Alpha body.")));
+  assert.ok(calls.some((call) => call.includes("# Root > ## Child") && call.includes("Beta body.")));
+  assert.equal(calls.filter((call) => call.includes("Alpha body.")).length, 1);
+  assert.equal(calls.filter((call) => call.includes("Beta body.")).length, 1);
+});
+
+void test("hierarchical reduction makes a distinct root request with configured output allowance", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/RootBudget.md"));
+  const requests: { maxTokens: number; contextTokens?: number }[] = [];
+  const provider: MetadataInferenceProvider = {
+    async complete(request) {
+      requests.push({ maxTokens: request.maxTokens, contextTokens: request.contextTokens });
+      return '{"summary":"s","tags":[],"concepts":[]}';
+    },
+  };
+  const config = baseConfig({ contextTokens: 2048, maxTokens: 700 });
+  await runMetadataPipeline(provider, config, { identity, text: "word ".repeat(5000), related: [] });
+  assert.equal(requests[requests.length - 1]?.maxTokens, 700);
+  assert.equal(requests[requests.length - 1]?.contextTokens, 2048);
+  assert.ok(requests.slice(0, -1).every((request) => request.maxTokens === 256));
+});

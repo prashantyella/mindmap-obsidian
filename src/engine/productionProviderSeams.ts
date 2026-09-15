@@ -1,5 +1,6 @@
 import type { EmbeddingProvider } from "./embeddingProvider";
 import { EngineError } from "./errors";
+import { classifyFailureCode } from "../jobs/jobTypes";
 import { MAX_EMBEDDING_DIMENSION } from "./embeddingLimits";
 import { chunkText } from "./chunker";
 import type { MetadataInferenceProvider } from "./metadataPipeline";
@@ -113,26 +114,154 @@ export function createProductionNoteEmbeddingSeam(provider: EmbeddingProvider, e
   };
 }
 
+const MAX_METADATA_CACHE_ENTRIES = 4096;
+const MAX_METADATA_CACHE_BYTES = 32_000_000;
+
+interface MetadataNodeCacheEntry {
+  key: string;
+  prefix: string;
+  value: { summary: string; tags: string[]; concepts: string[] };
+  bytes: number;
+}
+
+function noteIdentityStableKey(identity: import("./contracts").NoteIdentityV1): string {
+  return identity.kind === "apple-annotation" ? `apple-annotation:${identity.appleAnnotationId}` : `path:${identity.canonicalPath}`;
+}
+
+function metadataCacheKey(identity: import("./contracts").NoteIdentityV1, sourceHash: string, model: string, configFingerprint: string): string {
+  return JSON.stringify([noteIdentityStableKey(identity), sourceHash, model, configFingerprint]);
+}
+
+function computeConfigFingerprint(config: MetadataPipelineConfig): string {
+  const orderedAliases = Object.keys(config.tagAliases).sort().map((key) => [key, config.tagAliases[key]]);
+  return JSON.stringify({
+    maxTokens: config.maxTokens,
+    contextTokens: config.contextTokens ?? null,
+    tagLimit: config.tagLimit,
+    conceptLimit: config.conceptLimit,
+    conceptMaxWords: config.conceptMaxWords,
+    conceptCaseMode: config.conceptCaseMode,
+    controlledTags: [...config.controlledTags],
+    allowFreeTags: config.allowFreeTags,
+    tagMinLen: config.tagMinLen,
+    tagMaxWords: config.tagMaxWords,
+    tagAliases: orderedAliases,
+  });
+}
+
 /**
- * Production `NoteMetadataSeam`: runs the existing `runMetadataPipeline`
- * coordinator against the note's projected body, UNTRUNCATED (item 7:
- * "metadata seam must also not silently truncate") -- `runMetadataPipeline`
- * already fails closed with `METADATA_PROMPT_TOO_LARGE` against its own
- * configured bound when the note text itself is oversized; pre-slicing the
- * text here would silently swallow the overflow instead of ever letting
- * that check run.
- *
- * `related` is passed as an empty array -- migration's per-note ingestion
- * step runs BEFORE any index exists to query related candidates from
- * (migration builds the index as it goes), so there is nothing genuine to
- * select yet. Ordinary (non-migration) note processing uses the
- * `selectRelated` seam wired in `productionEngine.ts` to query the
- * already-built index via `relatedSelector.ts`.
+ * Production `NoteMetadataSeam` with a bounded in-memory node-result LRU.
+ * Completed final outputs are deliberately never cached: every short-note
+ * extraction remains a fresh single provider call. Long-path leaf/reduction
+ * nodes are retained only across transient failures for their own document.
  */
-export function createProductionNoteMetadataSeam(provider: MetadataInferenceProvider, config: MetadataPipelineConfig): NoteMetadataSeam {
+export function createProductionNoteMetadataSeam(provider: MetadataInferenceProvider, config: MetadataPipelineConfig): NoteMetadataSeam & { clearCache(): void; readonly cacheSize: number } {
+  const nodeCache = new Map<string, MetadataNodeCacheEntry>();
+  let totalNodeCacheBytes = 0;
+  const latestPrefixByIdentity = new Map<string, string>();
+  const configFingerprint = computeConfigFingerprint(config);
+
+  function evictOldestNode(): void {
+    const oldest = nodeCache.keys().next().value;
+    if (oldest === undefined) return;
+    const entry = nodeCache.get(oldest);
+    if (entry) totalNodeCacheBytes -= entry.bytes;
+    nodeCache.delete(oldest);
+    prunePrefixRegistry(entry?.prefix);
+  }
+
+  function prunePrefixRegistry(prefix: string | undefined): void {
+    if (prefix === undefined) return;
+    for (const [identity, registeredPrefix] of latestPrefixByIdentity) {
+      if (registeredPrefix === prefix && ![...nodeCache.values()].some((entry) => entry.prefix === prefix)) {
+        latestPrefixByIdentity.delete(identity);
+      }
+    }
+  }
+
+  function prefixForNodeKey(key: string): string {
+    try {
+      const parsed: unknown = JSON.parse(key);
+      if (Array.isArray(parsed) && typeof parsed[0] === "string") return parsed[0];
+    } catch {
+      // Corrupt in-memory keys are not trusted for ownership; isolate them.
+    }
+    return "invalid-node-prefix";
+  }
+
+  function clearPrefix(prefix: string): void {
+    for (const [key, entry] of nodeCache) {
+      if (entry.prefix === prefix) {
+        totalNodeCacheBytes -= entry.bytes;
+        nodeCache.delete(key);
+      }
+    }
+  }
+
+  const nodeCacheHook = {
+    get(key: string) {
+      const entry = nodeCache.get(key);
+      if (!entry) return undefined;
+      nodeCache.delete(key);
+      nodeCache.set(key, entry);
+      return entry.value;
+    },
+    set(key: string, value: { summary: string; tags: string[]; concepts: string[] }) {
+      const bytes = Buffer.byteLength(JSON.stringify(value), "utf8") + Buffer.byteLength(key, "utf8");
+      const prior = nodeCache.get(key);
+      if (prior) totalNodeCacheBytes -= prior.bytes;
+      nodeCache.delete(key);
+      while (nodeCache.size >= MAX_METADATA_CACHE_ENTRIES || totalNodeCacheBytes + bytes > MAX_METADATA_CACHE_BYTES) {
+        if (nodeCache.size === 0) break;
+        evictOldestNode();
+      }
+      nodeCache.set(key, { key, prefix: prefixForNodeKey(key), value, bytes });
+      totalNodeCacheBytes += bytes;
+    },
+    clearPrefix,
+    clear() {
+      nodeCacheHook.clearAll();
+    },
+    clearAll() {
+      nodeCache.clear();
+      totalNodeCacheBytes = 0;
+    },
+  };
+
   return {
     async extract(projection: SourceProjectionV1, signal: AbortSignal) {
-      return runMetadataPipeline(provider, config, { identity: projection.identity, text: projection.projectedBody, related: [] }, { signal });
+      const key = metadataCacheKey(projection.identity, projection.sourceHash, config.model, configFingerprint);
+      const identityKey = noteIdentityStableKey(projection.identity);
+      const priorPrefix = latestPrefixByIdentity.get(identityKey);
+      if (priorPrefix !== undefined && priorPrefix !== key) nodeCacheHook.clearPrefix(priorPrefix);
+      latestPrefixByIdentity.set(identityKey, key);
+
+      let result: import("./contracts").MetadataOutputV1;
+      try {
+        result = await runMetadataPipeline(provider, config, { identity: projection.identity, text: projection.projectedBody, related: [] }, {
+          signal,
+          nodeCache: nodeCacheHook,
+          nodeCacheKeyPrefix: key,
+        });
+      } catch (error) {
+        const failureCode = error instanceof EngineError ? error.code : "UNKNOWN_TRANSIENT";
+        const cancelled = signal.aborted || failureCode === "METADATA_CANCELLED";
+        if (cancelled || classifyFailureCode(failureCode) === "terminal") {
+          nodeCacheHook.clearPrefix(key);
+          latestPrefixByIdentity.delete(identityKey);
+        }
+        throw error;
+      }
+      nodeCacheHook.clearPrefix(key);
+      latestPrefixByIdentity.delete(identityKey);
+      return result;
+    },
+    clearCache() {
+      nodeCacheHook.clearAll();
+      latestPrefixByIdentity.clear();
+    },
+    get cacheSize() {
+      return nodeCache.size;
     },
   };
 }

@@ -941,3 +941,14 @@ void test("OVERLAY_METADATA_TOO_LARGE from IndexStore reaches terminal failed on
   assert.equal(final?.lastFailureCode, "OVERLAY_METADATA_TOO_LARGE");
   assert.equal(h.index.calls.length, 0, "overlay upsert must not have succeeded on any attempt");
 });
+
+// --- Hierarchical pipeline regression tests ---
+
+void test("short note compatibility: single metadata call, unchanged output shape", async () => {
+  const h = buildHarness();
+  const job = await submitNoteJob(h, sourceHashOf(RAW_CONTENT));
+  await h.engine.drain();
+  const final = await h.store.getById(job.job.jobId);
+  assert.equal(final?.status, "completed");
+  assert.equal(h.metadata.calls, 1, "short notes must still make exactly one metadata call");
+});

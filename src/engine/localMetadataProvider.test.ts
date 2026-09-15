@@ -68,7 +68,54 @@ void test("createOllamaMetadataProvider sends /api/chat with format:json and ext
   assert.equal(sentBody.format, "json");
   assert.equal(sentBody.stream, false);
   assert.equal(sentBody.model, "m");
-  assert.deepEqual(sentBody.options, { num_predict: 100 });
+  assert.equal((sentBody.options as Record<string, unknown>).num_predict, 100);
+});
+
+void test("createOllamaMetadataProvider sends num_ctx alongside num_predict when contextTokens is provided", async () => {
+  const { fetchImpl, calls } = createFakeFetch([() => jsonResponse({ message: { content: '{"summary":"s","tags":[],"concepts":[]}' } })]);
+  const provider = createOllamaMetadataProvider({ baseUrl: LOOPBACK_URL }, { fetchImpl });
+  await provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], maxTokens: 100, contextTokens: 8192 });
+  const sentBody = JSON.parse(String(calls[0].init?.body)) as Record<string, unknown>;
+  const options = sentBody.options as Record<string, unknown>;
+  assert.equal(options.num_predict, 100);
+  assert.equal(options.num_ctx, 8192);
+});
+
+void test("createOllamaMetadataProvider sends the shared default num_ctx when contextTokens is undefined", async () => {
+  const { fetchImpl, calls } = createFakeFetch([() => jsonResponse({ message: { content: '{"summary":"s","tags":[],"concepts":[]}' } })]);
+  const provider = createOllamaMetadataProvider({ baseUrl: LOOPBACK_URL }, { fetchImpl });
+  await provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], maxTokens: 100 });
+  const sentBody = JSON.parse(String(calls[0].init?.body)) as Record<string, unknown>;
+  const options = sentBody.options as Record<string, unknown>;
+  assert.equal(options.num_predict, 100);
+  assert.equal(options.num_ctx, 4096);
+});
+
+void test("createOllamaMetadataProvider rejects contextTokens below shared minimum (512)", async () => {
+  const { fetchImpl } = createFakeFetch([() => jsonResponse({ message: { content: '{"summary":"s","tags":[],"concepts":[]}' } })]);
+  const provider = createOllamaMetadataProvider({ baseUrl: LOOPBACK_URL }, { fetchImpl });
+  await assert.rejects(
+    provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], maxTokens: 100, contextTokens: 256 }),
+    (e: unknown) => e instanceof EngineError && e.code === "METADATA_CONFIG_INVALID",
+  );
+});
+
+void test("createOllamaMetadataProvider rejects contextTokens above shared maximum (131072)", async () => {
+  const { fetchImpl } = createFakeFetch([() => jsonResponse({ message: { content: '{"summary":"s","tags":[],"concepts":[]}' } })]);
+  const provider = createOllamaMetadataProvider({ baseUrl: LOOPBACK_URL }, { fetchImpl });
+  await assert.rejects(
+    provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], maxTokens: 100, contextTokens: 200_000 }),
+    (e: unknown) => e instanceof EngineError && e.code === "METADATA_CONFIG_INVALID",
+  );
+});
+
+void test("createOllamaMetadataProvider rejects non-integer contextTokens", async () => {
+  const { fetchImpl } = createFakeFetch([() => jsonResponse({ message: { content: '{"summary":"s","tags":[],"concepts":[]}' } })]);
+  const provider = createOllamaMetadataProvider({ baseUrl: LOOPBACK_URL }, { fetchImpl });
+  await assert.rejects(
+    provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], maxTokens: 100, contextTokens: 4096.5 }),
+    (e: unknown) => e instanceof EngineError && e.code === "METADATA_CONFIG_INVALID",
+  );
 });
 
 void test("createOllamaMetadataProvider sends configured maxTokens as Ollama options.num_predict", async () => {

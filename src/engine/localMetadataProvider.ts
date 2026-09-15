@@ -2,6 +2,7 @@ import { hasControlCharacter } from "./controlCharacters";
 import { EngineError } from "./errors";
 import { validateBoundedIdentifier } from "./identifierValidation";
 import { validateLoopbackEndpoint } from "./loopbackEndpoint";
+import { validateContextTokens } from "./metadataBudget";
 import type { MetadataInferenceProvider, MetadataInferenceProviderCallOptions, MetadataInferenceRequest } from "./metadataPipeline";
 import { isPlainObject } from "./metadataPipeline";
 
@@ -334,7 +335,9 @@ export function createOllamaMetadataProvider(config: OllamaMetadataConfig, deps:
       const model = validateModel(request.model);
       validateChatMessages(request.messages);
       const maxTokens = validateMaxTokens(request.maxTokens);
-      const body = JSON.stringify({ model, messages: request.messages, format: "json", stream: false, options: { num_predict: maxTokens } });
+      const numCtx = validateContextTokens(request.contextTokens);
+      const ollamaOptions: Record<string, number> = { num_ctx: numCtx, num_predict: maxTokens };
+      const body = JSON.stringify({ model, messages: request.messages, format: "json", stream: false, options: ollamaOptions });
       assertBoundedBody(body);
       const text = await postJson(deps.fetchImpl, `${baseUrl}/api/chat`, body, {}, timeoutMs, maxResponseChars, options.signal);
       const parsed = parseJsonObject(text);
