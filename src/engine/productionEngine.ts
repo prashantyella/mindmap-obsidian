@@ -56,7 +56,7 @@ import { MigrationDriver } from "../migration/migrationDriver";
 export const PRODUCTION_SCOPE_CURRENT = "current";
 export const PRODUCTION_SCOPE_ALL = "all";
 export const PRODUCTION_SCOPE_READING = "reading";
-export const PRODUCTION_RELATED_VERSION = 1;
+export const PRODUCTION_RELATED_VERSION = 2;
 
 export function buildCatalogPredicate(records: IndexedCatalogRecord[] | null, expectedRelatedVersion: number | undefined): (identity: import("./contracts").NoteIdentityV1, sourceHash: string) => boolean {
   if (records === null) {

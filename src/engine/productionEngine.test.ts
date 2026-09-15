@@ -811,7 +811,7 @@ void test("buildCatalogPredicate: returns false on sourceHash mismatch", () => {
 
 void test("buildCatalogPredicate: returns false on stale relatedVersion", () => {
   const identity = stableNoteIdentity(canonicalizePath("Notes/A.md"));
-  const records = [{ identity, sourceHash: "a".repeat(64), relatedVersion: 0 }];
+  const records = [{ identity, sourceHash: "a".repeat(64), relatedVersion: 1 }];
   const predicate = buildCatalogPredicate(records, PRODUCTION_RELATED_VERSION);
   assert.equal(predicate(identity, "a".repeat(64)), false);
 });

@@ -8,7 +8,7 @@ import { NoteWriter, type NoteVaultAdapter } from "../engine/noteWriter";
 import { projectSource } from "../engine/sourceProjection";
 import { JobEngine, type JobEngineClock } from "./jobEngine";
 import { JobStore } from "./jobStore";
-import { NoteJobRunner, type EmbeddedNote, type NoteEmbeddingSeam, type NoteMetadataSeam, type NoteSourceReader, type UpsertNoteOverlaySeam } from "./noteJob";
+import { NoteJobRunner, type EmbeddedNote, type NoteEmbeddingSeam, type NoteJobDeps, type NoteMetadataSeam, type NoteSourceReader, type UpsertNoteOverlaySeam } from "./noteJob";
 
 class FakeFs implements AtomicStoreFs {
   files = new Map<string, string>();
@@ -134,7 +134,7 @@ class FakeMetadata implements NoteMetadataSeam {
 }
 
 class FakeIndex implements UpsertNoteOverlaySeam {
-  calls: unknown[] = [];
+  calls: Parameters<UpsertNoteOverlaySeam["upsertNote"]>[0][] = [];
   errorCountRemaining = 0;
   nextError: Error | null = null;
 
@@ -206,7 +206,7 @@ interface Harness {
   clock: FakeClock;
 }
 
-function buildHarness(initialContent = RAW_CONTENT): Harness {
+function buildHarness(initialContent = RAW_CONTENT, selectRelated?: NoteJobDeps["selectRelated"]): Harness {
   const vault = new FakeVault();
   vault.files.set(NOTE_PATH, initialContent);
   const sourceReader = new FakeSourceReader(vault);
@@ -215,7 +215,7 @@ function buildHarness(initialContent = RAW_CONTENT): Harness {
   const index = new FakeIndex();
   const noteWriter = new NoteWriter(vault);
   const replacement = new NoopReplacement();
-  const runner = new NoteJobRunner({ sourceReader, embedding, metadata, noteWriter, indexStore: index, replacement });
+  const runner = new NoteJobRunner({ sourceReader, embedding, metadata, noteWriter, indexStore: index, replacement, selectRelated, relatedVersion: 2 });
   const fs = new FakeFs();
   const store = new JobStore(fs, "/root");
   const clock = new FakeClock();
@@ -241,6 +241,19 @@ void test("happy path: note job runs discover->embed->extract-metadata->confirm-
     assert.equal(final.receipt.overlayCommitted, true);
     assert.ok(final.receipt.noteContentHash);
   }
+});
+
+void test("ordinary note processing preserves selected related frontmatter while removing the managed footer", async () => {
+  const raw = "---\ntitle: Example\nrelated:\n  - Notes/Old.md\n---\nUser body.\n\n---\n\n> [!mindmap]- Mindmap\n> - <span class=\"mindmap-link is-core\">[[Notes/Old.md|Old]]</span>\n";
+  const h = buildHarness(raw, async () => [{ schemaVersion: 1, path: canonicalizePath("Notes/New.md"), score: 0.9, kind: "core" }]);
+  const job = await h.engine.submit({ trigger: "manual", kind: "process-note", identity: identity(), sourceHash: sourceHashOf(raw), embeddingModel: "test-model", pipelineVersion: 1 });
+  await h.engine.drain();
+  const content = h.vault.files.get(NOTE_PATH)!;
+  assert.match(content, /related:\n\x20{2}- Notes\/New\.md/);
+  assert.doesNotMatch(content, /\[!mindmap\]/);
+  assert.match(content, /User body\./);
+  assert.equal((await h.store.getById(job.job.jobId))?.status, "completed");
+  assert.equal(h.index.calls[0]?.relatedVersion, 2);
 });
 
 void test("note write commits, then index upsert fails once: retry repairs the overlay without rewriting the note a second time", async () => {
