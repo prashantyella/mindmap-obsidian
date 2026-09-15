@@ -16,6 +16,13 @@ All notable changes to this project should be documented in this file.
 
 `minAppVersion` remains `1.7.2`.
 
+## 0.3.7
+
+### Fixed
+- Enforce structured metadata JSON responses and bounded intermediate reductions with corrective retry handling.
+
+`minAppVersion` remains `1.7.2`.
+
 ## 0.3.5
 
 ### Fixed
