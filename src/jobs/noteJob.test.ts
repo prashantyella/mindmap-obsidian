@@ -249,7 +249,7 @@ void test("ordinary note processing preserves selected related frontmatter while
   const job = await h.engine.submit({ trigger: "manual", kind: "process-note", identity: identity(), sourceHash: sourceHashOf(raw), embeddingModel: "test-model", pipelineVersion: 1 });
   await h.engine.drain();
   const content = h.vault.files.get(NOTE_PATH)!;
-  assert.match(content, /related:\n  - Notes\/New\.md/);
+  assert.match(content, /related:\n\x20{2}- Notes\/New\.md/);
   assert.doesNotMatch(content, /\[!mindmap\]/);
   assert.match(content, /User body\./);
   assert.equal((await h.store.getById(job.job.jobId))?.status, "completed");
