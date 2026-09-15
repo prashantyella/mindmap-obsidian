@@ -687,3 +687,35 @@ void test("hierarchical reduction makes a distinct root request with configured 
   assert.ok(requests.some((request) => request.maxTokens === 384));
   assert.ok(requests.filter((request) => request.maxTokens !== 700).every((request) => request.maxTokens === 256 || request.maxTokens === 384));
 });
+
+void test("long path caps intermediate prompt limits at 50 while accepting a 50-item result", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/IntermediateCaps.md"));
+  const prompts: string[] = [];
+  const tags = Array.from({ length: 50 }, (_, i) => `tag-${i}`);
+  const concepts = Array.from({ length: 50 }, (_, i) => `concept-${i}`);
+  const provider: MetadataInferenceProvider = {
+    async complete(request) {
+      prompts.push(request.messages[1].content);
+      return JSON.stringify({ summary: "s", tags, concepts });
+    },
+  };
+  const output = await runMetadataPipeline(provider, baseConfig({ contextTokens: 4096, tagLimit: 100, conceptLimit: 100 }), { identity, text: "word ".repeat(5000), related: [] });
+  assert.ok(prompts.some((prompt) => prompt.includes("tags (3-50 kebab-case)")));
+  assert.ok(prompts.some((prompt) => prompt.includes("at most 50 tags and 50 concepts")));
+  assert.equal(output.tags.length, 50);
+  assert.equal(output.concepts.length, 50);
+});
+
+void test("short path preserves full configured tag/concept limits", async () => {
+  const identity = stableNoteIdentity(canonicalizePath("Notes/ShortCaps.md"));
+  let prompt = "";
+  const provider: MetadataInferenceProvider = {
+    async complete(request) {
+      prompt = request.messages[1].content;
+      return '{"summary":"s","tags":[],"concepts":[]}';
+    },
+  };
+  await runMetadataPipeline(provider, baseConfig({ tagLimit: 100, conceptLimit: 100 }), { identity, text: "short", related: [] });
+  assert.match(prompt, /tags \(3-100 kebab-case\)/);
+  assert.match(prompt, /concepts \(3-100 core noun phrases\)/);
+});

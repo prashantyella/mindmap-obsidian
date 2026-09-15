@@ -7,6 +7,7 @@ const MAX_CONTEXT_TOKENS = 131_072;
 export const CHAT_TEMPLATE_RESERVE_BYTES = 512;
 const LEAF_OUTPUT_ALLOWANCE = 256;
 export const INTERMEDIATE_OUTPUT_ALLOWANCE = 384;
+export const MAX_INTERMEDIATE_ITEM_COUNT = 50;
 
 export interface ResolvedBudget {
   contextTokens: number;

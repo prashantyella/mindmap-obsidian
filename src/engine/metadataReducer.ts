@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { EngineError } from "./errors";
 import type { ChatMessage, MetadataInferenceProvider, MetadataInferenceProviderCallOptions, MetadataInferenceRequest, MetadataNodeCache } from "./metadataPipeline";
 import { parseMetadataResponse } from "./metadataPipeline";
-import { assertFitsInputBudget, messagesTotalBytes, type ResolvedBudget } from "./metadataBudget";
+import { assertFitsInputBudget, messagesTotalBytes, MAX_INTERMEDIATE_ITEM_COUNT, type ResolvedBudget } from "./metadataBudget";
 
 export interface IntermediateMetadata {
   summary: string;
@@ -11,8 +11,8 @@ export interface IntermediateMetadata {
 }
 
 const MAX_INTERMEDIATE_SUMMARY_LENGTH = 2000;
-const MAX_INTERMEDIATE_TAG_COUNT = 50;
-const MAX_INTERMEDIATE_CONCEPT_COUNT = 50;
+const MAX_INTERMEDIATE_TAG_COUNT = MAX_INTERMEDIATE_ITEM_COUNT;
+const MAX_INTERMEDIATE_CONCEPT_COUNT = MAX_INTERMEDIATE_ITEM_COUNT;
 const MAX_INTERMEDIATE_ENTRY_LENGTH = 500;
 const MAX_REDUCTION_DEPTH = 20;
 
