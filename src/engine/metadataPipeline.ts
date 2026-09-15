@@ -4,7 +4,11 @@ import { parseMetadataOutputV1 } from "./contracts";
 import { hasControlCharacter } from "./controlCharacters";
 import { EngineError } from "./errors";
 import { validateBoundedIdentifier } from "./identifierValidation";
+import { validateContextTokens, resolveRootBudget, resolveLeafBudget, fitsInputBudget, assertFitsInputBudget, messagesTotalBytes } from "./metadataBudget";
+import { chunkMarkdown } from "./metadataChunker";
+import { reduceIntermediates, validateIntermediate, type IntermediateMetadata } from "./metadataReducer";
 import { closestMatches } from "./textSimilarity";
+import { createHash } from "node:crypto";
 
 /** True only for `{}`/`Object.create(null)`-shaped values -- never a `Date`, `Map`, array, or other class instance, which `typeof value === "object"` alone cannot distinguish from a plain settings object. Exported for reuse by `localMetadataProvider.ts`'s recursive JSON-value validator. */
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -52,7 +56,7 @@ export interface ChatMessage {
 }
 
 /** Mirrors `build_metadata_messages`. `text` is the note body fed to the model; bounded to `MAX_METADATA_INPUT_CHARS` before use so an oversized note fails closed rather than building an unbounded prompt. */
-export function buildMetadataMessages(text: string, tagLimit: number, conceptLimit: number, controlledTags: readonly string[], allowFreeTags: boolean): ChatMessage[] {
+export function buildMetadataMessages(text: string, tagLimit: number, conceptLimit: number, controlledTags: readonly string[], allowFreeTags: boolean, contextText = ""): ChatMessage[] {
   if (text.length > MAX_METADATA_INPUT_CHARS) {
     throw new EngineError("METADATA_PROMPT_TOO_LARGE", "Note text exceeds the maximum bounded length for metadata inference.", { length: text.length, maxChars: MAX_METADATA_INPUT_CHARS });
   }
@@ -73,7 +77,7 @@ export function buildMetadataMessages(text: string, tagLimit: number, conceptLim
     "- Tags must be lowercase kebab-case, no single letters, 1-3 words.",
     "- Concepts should be the core ideas only (no fluff).",
     "",
-    `Note:\n${text.trim()}`,
+    contextText ? `Context:\n${contextText}\n\nNote:\n${text.trim()}` : `Note:\n${text.trim()}`,
   ].join("\n");
   return [
     { role: "system", content: system },
@@ -86,6 +90,7 @@ export interface MetadataInferenceRequest {
   model: string;
   messages: ChatMessage[];
   maxTokens: number;
+  contextTokens?: number;
 }
 
 export interface MetadataInferenceProviderCallOptions {
@@ -95,6 +100,18 @@ export interface MetadataInferenceProviderCallOptions {
 export interface MetadataInferenceProvider {
   /** Returns the raw model response content string (not yet parsed as JSON). */
   complete(request: MetadataInferenceRequest, options?: MetadataInferenceProviderCallOptions): Promise<string>;
+}
+
+export interface MetadataNodeCache {
+  get(key: string): IntermediateMetadataLike | undefined;
+  set(key: string, value: IntermediateMetadataLike): void;
+  clear(): void;
+}
+
+export interface IntermediateMetadataLike {
+  summary: string;
+  tags: string[];
+  concepts: string[];
 }
 
 interface RawMetadataResponse {
@@ -333,6 +350,7 @@ const MAX_RELATED_TOTAL_CHARS = 200_000;
 export interface MetadataPipelineConfig {
   model: string;
   maxTokens: number;
+  contextTokens?: number;
   tagLimit: number;
   conceptLimit: number;
   conceptMaxWords: number;
@@ -359,6 +377,13 @@ export interface MetadataPipelineInput {
 
 export interface RunMetadataPipelineOptions {
   signal?: AbortSignal;
+  nodeCache?: MetadataNodeCache;
+  nodeCacheKeyPrefix?: string;
+}
+
+function nodeKey(prefix: string | undefined, kind: string, value: unknown): string {
+  const digest = createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+  return JSON.stringify([prefix ?? "metadata", kind, digest]);
 }
 
 function validatePositiveIntBound(value: number, field: string, max: number): number {
@@ -524,6 +549,47 @@ function validateMetadataPipelineInput(input: MetadataPipelineInput): { identity
   return { identity, text: input.text, related: input.related };
 }
 
+function normalizeOutput(
+  parsed: { summary: string; tags: string[]; concepts: string[] },
+  config: MetadataPipelineConfig,
+  identity: NoteIdentityV1,
+  related: string[],
+): MetadataOutputV1 {
+  let tags = normalizeTags(parsed.tags);
+  tags = applyTagAliases(tags, config.tagAliases);
+  tags = filterAndMapTags(tags, config.controlledTags, config.allowFreeTags, config.tagMinLen, config.tagMaxWords).slice(0, config.tagLimit);
+  const concepts = normalizeConcepts(parsed.concepts, config.conceptLimit, config.conceptMaxWords, config.conceptCaseMode);
+  return buildMetadataOutputV1(identity, parsed.summary.trim(), tags, concepts, related);
+}
+
+async function callProviderAndParseWithRetry<T>(
+  provider: MetadataInferenceProvider,
+  request: MetadataInferenceRequest,
+  signal: AbortSignal | undefined,
+  parse: (raw: string) => T,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (signal?.aborted) {
+      throw new EngineError("METADATA_CANCELLED", "Metadata inference request was cancelled.");
+    }
+    try {
+      const raw = await provider.complete(request, { signal });
+      return parse(raw);
+    } catch (error) {
+      if (error instanceof EngineError) {
+        if (error.code === "METADATA_RESPONSE_INVALID" && attempt === 0) {
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
+      throw new EngineError("METADATA_PROVIDER_FAILED", "Metadata inference provider call failed.");
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Pure coordinator: builds bounded messages, calls the injected
  * `MetadataInferenceProvider` (with cancellation), strictly parses the
@@ -534,11 +600,15 @@ function validateMetadataPipelineInput(input: MetadataPipelineInput): { identity
  * `normalize_concepts` (limit/max-words/case together). `related` is
  * accepted as already-selected plain paths and passed straight through.
  *
+ * When `contextTokens` is configured and the note text fits the single-call
+ * budget, the existing short-note path is used (exactly one provider call).
+ * When the text exceeds the budget, the hierarchical pipeline chunks the
+ * text, maps each chunk to an intermediate `{summary, tags, concepts}`,
+ * recursively reduces intermediates until one root, and normalizes only
+ * the final output.
+ *
  * Never writes a note, index record, job, or piece of state -- returns a
- * plain `MetadataOutputV1` only. A provider failure that is not already a
- * structured `EngineError` is wrapped in a static, redacted
- * `METADATA_PROVIDER_FAILED` rather than propagating the provider's raw
- * thrown error/message.
+ * plain `MetadataOutputV1` only.
  */
 export async function runMetadataPipeline(
   provider: MetadataInferenceProvider,
@@ -550,23 +620,85 @@ export async function runMetadataPipeline(
   const { identity, text, related: relatedInput } = validateMetadataPipelineInput(input);
   const related = validateRelatedPaths(relatedInput);
 
-  const messages = buildMetadataMessages(text, config.tagLimit, config.conceptLimit, config.controlledTags, config.allowFreeTags);
+  const contextTokens = validateContextTokens(config.contextTokens);
+  const rootBudget = resolveRootBudget(contextTokens, config.maxTokens);
 
-  let raw: string;
-  try {
-    raw = await provider.complete({ model, messages, maxTokens: config.maxTokens }, { signal: options.signal });
-  } catch (error) {
-    if (error instanceof EngineError) throw error;
-    throw new EngineError("METADATA_PROVIDER_FAILED", "Metadata inference provider call failed.");
+  // Short-note single-call path: exactly one provider call, no retry.
+  if (text.length <= MAX_METADATA_INPUT_CHARS) {
+    const messages = buildMetadataMessages(text, config.tagLimit, config.conceptLimit, config.controlledTags, config.allowFreeTags);
+    if (fitsInputBudget(messages, rootBudget)) {
+      assertFitsInputBudget(messages, rootBudget);
+      if (options.signal?.aborted) {
+        throw new EngineError("METADATA_CANCELLED", "Metadata inference request was cancelled.");
+      }
+      let raw: string;
+      try {
+        raw = await provider.complete({ model, messages, maxTokens: config.maxTokens, contextTokens }, { signal: options.signal });
+      } catch (error) {
+        if (error instanceof EngineError) throw error;
+        throw new EngineError("METADATA_PROVIDER_FAILED", "Metadata inference provider call failed.");
+      }
+      const parsed = parseMetadataResponse(raw);
+      return normalizeOutput(parsed, config, identity, related);
+    }
   }
 
-  const parsed = parseMetadataResponse(raw);
+  // Long-note hierarchical path: chunk → map (with retry) → reduce (with retry) → normalize.
+  const leafBudget = resolveLeafBudget(contextTokens);
+  const promptOverheadBytes = messagesTotalBytes(buildMetadataMessages("", config.tagLimit, config.conceptLimit, config.controlledTags, config.allowFreeTags));
+  const contextWrapperBytes = 12;
+  const chunkByteBudget = leafBudget.inputBudgetBytes - promptOverheadBytes - contextWrapperBytes;
+  if (chunkByteBudget <= 0) {
+    throw new EngineError("METADATA_CONFIG_INVALID", "The leaf wrapper leaves no capacity for source content.");
+  }
+  const chunks = chunkMarkdown(text, chunkByteBudget);
+  if (chunks.length === 0) {
+    throw new EngineError("METADATA_CONFIG_INVALID", "Chunker produced no chunks for non-empty input.");
+  }
 
-  let tags = normalizeTags(parsed.tags);
-  tags = applyTagAliases(tags, config.tagAliases);
-  tags = filterAndMapTags(tags, config.controlledTags, config.allowFreeTags, config.tagMinLen, config.tagMaxWords).slice(0, config.tagLimit);
+  if (options.signal?.aborted) {
+    throw new EngineError("METADATA_CANCELLED", "Metadata inference request was cancelled.");
+  }
 
-  const concepts = normalizeConcepts(parsed.concepts, config.conceptLimit, config.conceptMaxWords, config.conceptCaseMode);
+  const chunkRequests = chunks.map((chunk) => {
+    const promptBody = chunk.sourceText;
+    const context = [chunk.headingBreadcrumb, chunk.fenceContext].filter(Boolean).join("\n");
+    const chunkMessages = buildMetadataMessages(promptBody, config.tagLimit, config.conceptLimit, config.controlledTags, config.allowFreeTags, context);
+    assertFitsInputBudget(chunkMessages, leafBudget);
+    return { chunk, chunkMessages };
+  });
 
-  return buildMetadataOutputV1(identity, parsed.summary.trim(), tags, concepts, related);
+  const intermediates: IntermediateMetadata[] = [];
+  for (const { chunk, chunkMessages } of chunkRequests) {
+    if (options.signal?.aborted) {
+      throw new EngineError("METADATA_CANCELLED", "Metadata inference request was cancelled.");
+    }
+    const key = nodeKey(options.nodeCacheKeyPrefix, "leaf", { chunk: chunk.sourceText, breadcrumb: chunk.headingBreadcrumb, fenceContext: chunk.fenceContext, config });
+    const cached = options.nodeCache?.get(key);
+    if (cached) {
+      intermediates.push(validateIntermediate(cached));
+      continue;
+    }
+    const intermediate = await callProviderAndParseWithRetry(
+      provider,
+      { model, messages: chunkMessages, maxTokens: leafBudget.maxOutputTokens, contextTokens },
+      options.signal,
+      (raw) => validateIntermediate(parseMetadataResponse(raw)),
+    );
+    options.nodeCache?.set(key, intermediate);
+    intermediates.push(intermediate);
+  }
+
+  const reduced = await reduceIntermediates(intermediates, {
+    provider,
+    model,
+    contextTokens,
+    budget: leafBudget,
+    rootBudget,
+    nodeCache: options.nodeCache,
+    nodeCacheKeyPrefix: options.nodeCacheKeyPrefix,
+    signal: options.signal,
+  });
+
+  return normalizeOutput(reduced, config, identity, related);
 }

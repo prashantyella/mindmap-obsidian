@@ -835,3 +835,22 @@ void test("buildCatalogPredicate: null catalog → throws STORE_READ_FAILED", ()
     (error: unknown) => isEngineError(error) && error.code === "STORE_READ_FAILED",
   );
 });
+
+void test("PRODUCTION_PIPELINE_VERSION in main.ts is 2 (hierarchical metadata pipeline bump)", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const mainPath = path.resolve(__dirname, "../main.ts");
+  const mainContent = fs.readFileSync(mainPath, "utf8");
+  assert.match(mainContent, /PRODUCTION_PIPELINE_VERSION\s*=\s*2/, "PRODUCTION_PIPELINE_VERSION must be 2 after the hierarchical metadata pipeline bump");
+});
+
+void test("pipelineVersion 2 does not bump PRODUCTION_RELATED_VERSION", () => {
+  assert.equal(PRODUCTION_RELATED_VERSION, 2, "PRODUCTION_RELATED_VERSION must stay at 2 (no change from this pipeline bump)");
+});
+
+void test("ProductionEngine with pipelineVersion 2 composes and starts without full rerun", async () => {
+  const engine = new ProductionEngine(baseOptions({ pipelineVersion: 2 }));
+  const report = await engine.start();
+  assert.ok(report.summary);
+  await engine.dispose();
+});

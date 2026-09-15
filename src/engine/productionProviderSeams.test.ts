@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { canonicalizePath, stableNoteIdentity } from "./contracts";
-import { isEngineError } from "./errors";
+import { EngineError, isEngineError } from "./errors";
 import { projectSource } from "./sourceProjection";
 import { createProductionNoteEmbeddingSeam, createProductionNoteMetadataSeam } from "./productionProviderSeams";
 import type { EmbeddingBatchRequest, EmbeddingProvider } from "./embeddingProvider";
@@ -147,9 +147,15 @@ void test("createProductionNoteEmbeddingSeam passes the CONFIGURED chunk target/
   assert.ok(observedItemCountSmall > observedItemCountLarge, "a smaller configured targetTokens must produce more chunk items -- the configured value must actually drive chunking");
 });
 
-void test("createProductionNoteMetadataSeam never truncates the note text before running the pipeline -- an oversized note fails closed with METADATA_PROMPT_TOO_LARGE rather than being silently cut", async () => {
-  const projection = makeProjection(50_000); // exceeds runMetadataPipeline's own 40,000-char bound
-  const provider: MetadataInferenceProvider = { complete: async () => '{"summary":"s","tags":[],"concepts":[]}' };
+void test("createProductionNoteMetadataSeam processes an oversized note (>40K chars) through the hierarchical pipeline without truncation", async () => {
+  const projection = makeProjection(50_000);
+  let callCount = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() {
+      callCount++;
+      return '{"summary":"s","tags":["t"],"concepts":["c"]}';
+    },
+  };
   const seam = createProductionNoteMetadataSeam(provider, {
     model: "m",
     maxTokens: 200,
@@ -163,7 +169,9 @@ void test("createProductionNoteMetadataSeam never truncates the note text before
     tagMaxWords: 3,
     tagAliases: {},
   });
-  await assert.rejects(() => seam.extract(projection, new AbortController().signal), (error: unknown) => isEngineError(error) && error.code === "METADATA_PROMPT_TOO_LARGE");
+  const result = await seam.extract(projection, new AbortController().signal);
+  assert.ok(callCount > 1, "oversized note should use hierarchical pipeline with multiple provider calls");
+  assert.ok(result.summary.length > 0);
 });
 
 void test("createProductionNoteMetadataSeam passes the full, untruncated projected body through to a well-behaved provider for an ordinary-sized note", async () => {
@@ -190,4 +198,222 @@ void test("createProductionNoteMetadataSeam passes the full, untruncated project
   });
   await seam.extract(projection, new AbortController().signal);
   assert.ok(observedTextLength >= projection.projectedBody.length, "the full note body must be reflected in the built prompt, never pre-sliced");
+});
+
+void test("createProductionNoteMetadataSeam never caches completed short-note output", async () => {
+  let callCount = 0;
+  const metadataProvider: MetadataInferenceProvider = {
+    async complete() {
+      callCount++;
+      return '{"summary":"cached","tags":["t"],"concepts":["c"]}';
+    },
+  };
+  const config = {
+    model: "m",
+    maxTokens: 200,
+    tagLimit: 5,
+    conceptLimit: 5,
+    conceptMaxWords: 3,
+    conceptCaseMode: "lower" as const,
+    controlledTags: [] as string[],
+    allowFreeTags: true,
+    tagMinLen: 2,
+    tagMaxWords: 3,
+    tagAliases: {},
+  };
+  const seam = createProductionNoteMetadataSeam(metadataProvider, config);
+  const projection = projectSource(IDENTITY, "---\n---\nShort note body text for caching test.");
+  const result1 = await seam.extract(projection, new AbortController().signal);
+  const result2 = await seam.extract(projection, new AbortController().signal);
+  assert.equal(callCount, 2, "short-note reprocesses must make fresh provider calls");
+  assert.deepEqual(result1, result2);
+  assert.equal((seam as { cacheSize: number }).cacheSize, 0);
+});
+
+void test("createProductionNoteMetadataSeam clearCache drops all cached entries", async () => {
+  let callCount = 0;
+  let failOnce = true;
+  const metadataProvider: MetadataInferenceProvider = {
+    async complete() {
+      callCount++;
+      if (failOnce && callCount === 2) {
+        failOnce = false;
+        throw new EngineError("METADATA_TIMEOUT", "transient");
+      }
+      return '{"summary":"s","tags":[],"concepts":[]}';
+    },
+  };
+  const config = {
+    model: "m",
+    maxTokens: 200,
+    tagLimit: 5,
+    conceptLimit: 5,
+    conceptMaxWords: 3,
+    conceptCaseMode: "lower" as const,
+    controlledTags: [] as string[],
+    allowFreeTags: true,
+    tagMinLen: 2,
+    tagMaxWords: 3,
+    tagAliases: {},
+  };
+  const seam = createProductionNoteMetadataSeam(metadataProvider, config);
+  const projection = projectSource(IDENTITY, `---\n---\n${"word ".repeat(12_000)}`);
+  await assert.rejects(seam.extract(projection, new AbortController().signal), (error: unknown) => error instanceof EngineError && error.code === "METADATA_TIMEOUT");
+  assert.ok((seam as { cacheSize: number }).cacheSize > 0, "failed long extraction should retain completed nodes");
+  (seam as { clearCache: () => void }).clearCache();
+  const changed = projectSource(IDENTITY, `---\n---\n${"changed ".repeat(12_000)}`);
+  await seam.extract(changed, new AbortController().signal);
+  assert.ok(callCount > 2, "clearCache and source change must force fresh node calls");
+  assert.equal((seam as { cacheSize: number }).cacheSize, 0);
+});
+
+const BASE_METADATA_CONFIG = {
+  model: "m",
+  maxTokens: 200,
+  tagLimit: 5,
+  conceptLimit: 5,
+  conceptMaxWords: 3,
+  conceptCaseMode: "lower" as const,
+  controlledTags: [] as string[],
+  allowFreeTags: true,
+  tagMinLen: 2,
+  tagMaxWords: 3,
+  tagAliases: {} as Record<string, string>,
+};
+
+void test("Apple identity remains stable for node-cache ownership", async () => {
+  let callCount = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() { callCount++; return '{"summary":"apple","tags":[],"concepts":[]}'; },
+  };
+  const appleIdentity = stableNoteIdentity(canonicalizePath("Reading/Ann.md"), "anno-123");
+  const seam = createProductionNoteMetadataSeam(provider, BASE_METADATA_CONFIG);
+  const proj = projectSource(appleIdentity, "---\n---\nApple note.");
+  await seam.extract(proj, new AbortController().signal);
+  assert.equal(callCount, 1);
+  await seam.extract(proj, new AbortController().signal);
+  assert.equal(callCount, 2, "completed short outputs are never cached");
+
+  const differentPathSameAnno = stableNoteIdentity(canonicalizePath("Reading/Other.md"), "anno-123");
+  const proj2 = projectSource(differentPathSameAnno, "---\n---\nApple note.");
+  await seam.extract(proj2, new AbortController().signal);
+  assert.equal(callCount, 3, "completed short outputs are never cached");
+});
+
+void test("cache invalidates on config change (full fingerprint)", async () => {
+  let callCount = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() { callCount++; return '{"summary":"s","tags":[],"concepts":[]}'; },
+  };
+  const seam1 = createProductionNoteMetadataSeam(provider, { ...BASE_METADATA_CONFIG, tagLimit: 5 });
+  const seam2 = createProductionNoteMetadataSeam(provider, { ...BASE_METADATA_CONFIG, tagLimit: 10 });
+  const proj = projectSource(IDENTITY, "---\n---\nConfig test.");
+  await seam1.extract(proj, new AbortController().signal);
+  assert.equal(callCount, 1);
+  await seam2.extract(proj, new AbortController().signal);
+  assert.equal(callCount, 2, "different config fingerprint must miss cache");
+});
+
+void test("completed long-note outputs are not retained after success", async () => {
+  let callCount = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() { callCount++; return '{"summary":"s","tags":[],"concepts":[]}'; },
+  };
+  const seam = createProductionNoteMetadataSeam(provider, BASE_METADATA_CONFIG);
+  const identities = Array.from({ length: 65 }, (_, i) =>
+    stableNoteIdentity(canonicalizePath(`Notes/evict-${i}.md`)),
+  );
+  for (let i = 0; i < 64; i++) {
+    await seam.extract(projectSource(identities[i], `---\n---\nNote ${i}.`), new AbortController().signal);
+  }
+  assert.equal(callCount, 64);
+  assert.equal((seam as { cacheSize: number }).cacheSize, 0);
+
+  await seam.extract(projectSource(identities[0], `---\n---\nNote 0.`), new AbortController().signal);
+  assert.equal(callCount, 65, "completed output must not be reused");
+
+  await seam.extract(projectSource(identities[64], `---\n---\nNote 64.`), new AbortController().signal);
+  assert.equal(callCount, 66);
+  assert.equal((seam as { cacheSize: number }).cacheSize, 0);
+
+  await seam.extract(projectSource(identities[0], `---\n---\nNote 0.`), new AbortController().signal);
+  assert.equal(callCount, 67);
+});
+
+void test("completed output cache entry count remains zero", async () => {
+  const provider: MetadataInferenceProvider = {
+    async complete() { return '{"summary":"s","tags":[],"concepts":[]}'; },
+  };
+  const seam = createProductionNoteMetadataSeam(provider, BASE_METADATA_CONFIG);
+  for (let i = 0; i < 70; i++) {
+    const id = stableNoteIdentity(canonicalizePath(`Notes/bound-${i}.md`));
+    await seam.extract(projectSource(id, `---\n---\nNote ${i}.`), new AbortController().signal);
+  }
+  assert.equal((seam as { cacheSize: number }).cacheSize, 0);
+});
+
+void test("config fingerprint includes controlledTags and tagAliases", async () => {
+  let callCount = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() { callCount++; return '{"summary":"s","tags":[],"concepts":[]}'; },
+  };
+  const seam1 = createProductionNoteMetadataSeam(provider, { ...BASE_METADATA_CONFIG, controlledTags: ["a"] });
+  const seam2 = createProductionNoteMetadataSeam(provider, { ...BASE_METADATA_CONFIG, controlledTags: ["b"] });
+  const proj = projectSource(IDENTITY, "---\n---\nControlled test.");
+  await seam1.extract(proj, new AbortController().signal);
+  await seam2.extract(proj, new AbortController().signal);
+  assert.equal(callCount, 2, "different controlledTags must produce different cache fingerprint");
+
+  const seam3 = createProductionNoteMetadataSeam(provider, { ...BASE_METADATA_CONFIG, tagAliases: { x: "y" } });
+  await seam3.extract(proj, new AbortController().signal);
+  assert.equal(callCount, 3, "different tagAliases must produce different cache fingerprint");
+});
+
+void test("node cache resumes completed leaves after a transient provider failure", async () => {
+  const projection = makeProjection(50_000);
+  let calls = 0;
+  let failOnce = true;
+  const seen = new Map<string, number>();
+  const provider: MetadataInferenceProvider = {
+    async complete(request) {
+      calls++;
+      const body = request.messages.map((message) => message.content).join("\n");
+      seen.set(body, (seen.get(body) ?? 0) + 1);
+      if (failOnce && calls === 2) {
+        failOnce = false;
+        throw new EngineError("METADATA_TIMEOUT", "transient");
+      }
+      return '{"summary":"s","tags":[],"concepts":[]}';
+    },
+  };
+  const seam = createProductionNoteMetadataSeam(provider, BASE_METADATA_CONFIG);
+  await assert.rejects(seam.extract(projection, new AbortController().signal), (error: unknown) => error instanceof EngineError && error.code === "METADATA_TIMEOUT");
+  const firstLeaf = [...seen.keys()][0];
+  await seam.extract(projectSource(stableNoteIdentity(canonicalizePath("Notes/unrelated.md")), `---\n---\n${"otherword ".repeat(12_000)}`), new AbortController().signal);
+  await seam.extract(projection, new AbortController().signal);
+  assert.equal(seen.get(firstLeaf), 1, "a completed leaf must be served from the node cache on retry");
+  assert.ok(calls > 2, "retry should continue with uncached leaves and reductions");
+
+  const cancelled = new AbortController();
+  cancelled.abort();
+  await assert.rejects(seam.extract(projection, cancelled.signal), (error: unknown) => error instanceof EngineError && error.code === "METADATA_CANCELLED");
+  await seam.extract(projection, new AbortController().signal);
+  assert.equal(seen.get(firstLeaf), 2, "cancellation clears only the cancelled document's nodes");
+});
+
+void test("terminal metadata failure clears that document's partial nodes", async () => {
+  let calls = 0;
+  const provider: MetadataInferenceProvider = {
+    async complete() {
+      calls++;
+      if (calls === 2) throw new EngineError("METADATA_CONFIG_INVALID", "terminal");
+      return '{"summary":"s","tags":[],"concepts":[]}';
+    },
+  };
+  const seam = createProductionNoteMetadataSeam(provider, BASE_METADATA_CONFIG);
+  await assert.rejects(
+    seam.extract(makeProjection(50_000), new AbortController().signal),
+    (error: unknown) => error instanceof EngineError && error.code === "METADATA_CONFIG_INVALID",
+  );
+  assert.equal((seam as { cacheSize: number }).cacheSize, 0);
 });

@@ -99,7 +99,7 @@ interface RuntimeContext {
 }
 
 /** Checkpoint 10B: the current TypeScript engine pipeline (chunking/embedding/metadata) version this vault's engine is composed under -- bumped only if this cutover's own pipeline shape changes, never tied to the retired Python pipeline's own versioning. */
-const PRODUCTION_PIPELINE_VERSION = 1;
+const PRODUCTION_PIPELINE_VERSION = 2;
 
 /**
  * Best-effort, explicitly-documented fallback for a handful of common
