@@ -4,7 +4,6 @@ import type { CanonicalPath, MetadataOutputV1, NoteIdentityV1, RelatedCandidateV
 import { EngineError, isEngineError } from "../engine/errors";
 import { MAX_EMBEDDING_DIMENSION } from "../engine/embeddingLimits";
 import type { NoteWriter } from "../engine/noteWriter";
-import type { RelatedSectionLink } from "../engine/relatedSectionWriter";
 import { projectSource } from "../engine/sourceProjection";
 import { isUnitNorm } from "../engine/vectorValidation";
 import type { JobPhaseRunner, PhaseStepOutcome } from "./jobEngine";
@@ -91,8 +90,6 @@ export interface NoteJobDeps {
   metadata: NoteMetadataSeam;
   noteWriter: NoteWriter;
   indexStore: UpsertNoteOverlaySeam;
-  /** Ordinary notes only; Apple-annotation notes always render `related` as wikilinks instead (see `NoteWriter`). Omit to leave the managed related-section body region untouched for this checkpoint's job engine. */
-  buildRelatedLinks?: (metadata: MetadataOutputV1) => RelatedSectionLink[];
   selectRelated?: (embedded: EmbeddedNote, selfPath: CanonicalPath) => Promise<RelatedCandidateV1[]>;
   relatedVersion?: number;
   mindmapHeading?: string;
@@ -458,14 +455,12 @@ export class NoteJobRunner implements JobPhaseRunner {
     let metadata = metadataResult.value;
     const resolved = this.resolvedIdentityFor(jobId, identity);
     const isAppleAnnotation = resolved.kind === "apple-annotation";
-    let relatedLinks: RelatedSectionLink[] | undefined;
     if (!isAppleAnnotation && this.deps.selectRelated) {
       const embeddedResult = await this.ensureEmbedded(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
       if (!embeddedResult.ok) return embeddedResult.outcome;
       const selected = await this.deps.selectRelated(embeddedResult.value, resolved.canonicalPath);
       metadata = { ...metadata, related: selected.map((r) => r.path) };
       this.memoryFor(jobId).metadata = metadata;
-      relatedLinks = undefined;
       const postSelectFresh = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
       if (!postSelectFresh.ok) return postSelectFresh.outcome;
     }
@@ -477,10 +472,10 @@ export class NoteJobRunner implements JobPhaseRunner {
         expectedSourceHash,
         metadata,
         isAppleAnnotation,
-        relatedLinks: isAppleAnnotation ? relatedLinks : undefined,
+        relatedLinks: undefined,
         mindmapHeading: this.deps.mindmapHeading,
-        writeMindmapSection: isAppleAnnotation ? false : false,
-        removeMindmapSection: isAppleAnnotation ? false : true,
+        writeMindmapSection: false,
+        removeMindmapSection: !isAppleAnnotation,
       });
     } catch (error) {
       if (isEngineError(error) && error.code === "SOURCE_STALE") {
