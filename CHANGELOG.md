@@ -9,6 +9,13 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.5
+
+### Fixed
+- Send configured metadata `maxTokens` to Ollama as `options.num_predict` so generation stays within the configured bound.
+
+`minAppVersion` remains `1.7.2`.
+
 ## 0.3.4
 
 ### Fixed

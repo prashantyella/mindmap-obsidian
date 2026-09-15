@@ -68,6 +68,16 @@ void test("createOllamaMetadataProvider sends /api/chat with format:json and ext
   assert.equal(sentBody.format, "json");
   assert.equal(sentBody.stream, false);
   assert.equal(sentBody.model, "m");
+  assert.deepEqual(sentBody.options, { num_predict: 100 });
+});
+
+void test("createOllamaMetadataProvider sends configured maxTokens as Ollama options.num_predict", async () => {
+  const { fetchImpl, calls } = createFakeFetch([() => jsonResponse({ message: { content: "{}" } })]);
+  const provider = createOllamaMetadataProvider({ baseUrl: LOOPBACK_URL }, { fetchImpl });
+  await provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], maxTokens: 1024 });
+  const payload = JSON.parse(String(calls[0].init?.body)) as Record<string, unknown>;
+  assert.equal((payload.options as Record<string, unknown>).num_predict, 1024);
+  assert.deepEqual({ model: payload.model, messages: payload.messages, format: payload.format, stream: payload.stream }, { model: "m", messages: [{ role: "user", content: "hi" }], format: "json", stream: false });
 });
 
 void test("createOllamaMetadataProvider rejects a remote endpoint", () => {

@@ -323,7 +323,7 @@ export interface OllamaMetadataConfig {
   maxResponseChars?: number;
 }
 
-/** Ports the `provider == "ollama"` branch of `llm_extract`: `POST {baseUrl}/api/chat` with `{model, messages, format: "json", stream: false}`; content extracted from `response.message.content`. */
+/** Ports the `provider == "ollama"` branch of `llm_extract`: `POST {baseUrl}/api/chat` with bounded generation options; content extracted from `response.message.content`. */
 export function createOllamaMetadataProvider(config: OllamaMetadataConfig, deps: LocalMetadataProviderDeps): MetadataInferenceProvider {
   const { baseUrl } = validateLoopbackEndpoint(config.baseUrl, "METADATA_ENDPOINT_INVALID", "Ollama metadata");
   const timeoutMs = clampTimeout(config.timeoutMs, "METADATA_ENDPOINT_INVALID");
@@ -333,8 +333,8 @@ export function createOllamaMetadataProvider(config: OllamaMetadataConfig, deps:
     async complete(request: MetadataInferenceRequest, options: MetadataInferenceProviderCallOptions = {}): Promise<string> {
       const model = validateModel(request.model);
       validateChatMessages(request.messages);
-      validateMaxTokens(request.maxTokens);
-      const body = JSON.stringify({ model, messages: request.messages, format: "json", stream: false });
+      const maxTokens = validateMaxTokens(request.maxTokens);
+      const body = JSON.stringify({ model, messages: request.messages, format: "json", stream: false, options: { num_predict: maxTokens } });
       assertBoundedBody(body);
       const text = await postJson(deps.fetchImpl, `${baseUrl}/api/chat`, body, {}, timeoutMs, maxResponseChars, options.signal);
       const parsed = parseJsonObject(text);
