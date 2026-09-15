@@ -68,6 +68,11 @@ void test("buildReductionMessages includes all intermediates", () => {
   assert.ok(messages[1].content.includes("Part 2:"));
 });
 
+void test("buildReductionMessages caps configured limits to validated intermediate bounds", () => {
+  const messages = buildReductionMessages([im("A")], 100, 100);
+  assert.match(messages[1].content, /at most 50 tags and 50 concepts/);
+});
+
 void test("reduceIntermediates makes a distinct configured root call for one intermediate", async () => {
   const single = im("solo", ["tag"], ["concept"]);
   const result = await reduceIntermediates([single], baseOpts(fakeReduceProvider('{"summary":"root","tags":[],"concepts":[]}')));

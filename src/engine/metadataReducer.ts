@@ -63,6 +63,8 @@ export function validateIntermediate(raw: { summary: string; tags: string[]; con
 }
 
 export function buildReductionMessages(intermediates: readonly IntermediateMetadata[], tagLimit = 50, conceptLimit = 50, corrective = false): ChatMessage[] {
+  const effectiveTagLimit = Math.min(tagLimit, MAX_INTERMEDIATE_TAG_COUNT);
+  const effectiveConceptLimit = Math.min(conceptLimit, MAX_INTERMEDIATE_CONCEPT_COUNT);
   const system = corrective
     ? "Correct the previous reduction. Return compact JSON only, with no prose or markdown."
     : "You merge partial metadata extracts into one combined extract. Return compact JSON only, with no prose or markdown.";
@@ -72,7 +74,7 @@ export function buildReductionMessages(intermediates: readonly IntermediateMetad
   const user = [
     "Merge the following partial metadata extracts into one combined extract.",
     'Return a single JSON object: {"summary":"...","tags":[...],"concepts":[...]}.',
-    `Combine summaries into 1-2 sentences. Return at most ${tagLimit} tags and ${conceptLimit} concepts. Deduplicate and keep only the most relevant items.`,
+    `Combine summaries into 1-2 sentences. Return at most ${effectiveTagLimit} tags and ${effectiveConceptLimit} concepts. Deduplicate and keep only the most relevant items.`,
     "",
     ...parts,
   ].join("\n");
