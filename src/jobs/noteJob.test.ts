@@ -134,7 +134,7 @@ class FakeMetadata implements NoteMetadataSeam {
 }
 
 class FakeIndex implements UpsertNoteOverlaySeam {
-  calls: unknown[] = [];
+  calls: Parameters<UpsertNoteOverlaySeam["upsertNote"]>[0][] = [];
   errorCountRemaining = 0;
   nextError: Error | null = null;
 
