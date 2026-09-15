@@ -9,6 +9,13 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.6
+
+### Added
+- Bounded hierarchical metadata for long documents with explicit context budgeting and retry-resume node caching.
+
+`minAppVersion` remains `1.7.2`.
+
 ## 0.3.5
 
 ### Fixed
