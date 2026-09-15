@@ -89,6 +89,18 @@ void test("writeMetadata updates managed frontmatter and Related section for an 
   assert.match(result.content, /\[\[Notes\/Other\.md\|Other]]/);
 });
 
+void test("writeMetadata removes an existing managed Mindmap footer without changing related frontmatter or user body", async () => {
+  const vault = new FakeVault();
+  const path = canonicalizePath("Notes/Footer.md");
+  const raw = "---\ntitle: Footer\nrelated:\n  - Existing\n---\nUser body.\n\n---\n\n> [!mindmap]- Mindmap\n> - <span class=\"mindmap-link is-core\">[[Notes/Other.md|Other]]</span>\n";
+  vault.files.set(path, raw);
+  const identity = identityFor(path);
+  const result = await new NoteWriter(vault).writeMetadata({ identity, path, expectedSourceHash: projectSource(identity, raw).sourceHash, metadata: metadataFor({ identity, related: ["Existing"] }), isAppleAnnotation: false, writeMindmapSection: false, removeMindmapSection: true });
+  assert.doesNotMatch(result.content, /\[!mindmap\]/);
+  assert.match(result.content, /related:\n\x20{2}- Existing/);
+  assert.match(result.content, /User body\./);
+});
+
 void test("writeMetadata clears summary/tags, renders concept/related wikilinks, and keeps the body annotation-only for Apple annotation notes", async () => {
   const vault = new FakeVault();
   const path = canonicalizePath("Books/Apple Books/Author/Book/Annotations/Quote.md");

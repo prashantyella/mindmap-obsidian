@@ -214,6 +214,9 @@ const ACTIONABLE_HEALTH = new Set<LaunchAgentHealth>(["overdue", "failing"]);
 function batchFailureSummary(batch: NonNullable<EngineActivitySnapshot["latestFailureBatch"]>): string {
   return batch.status === "completed-with-failures" ? `${batch.failed} failed` : batch.status === "failed" ? "root failed" : "cancelled";
 }
+function batchDisplaySummary(batch: NonNullable<EngineActivitySnapshot["batch"]>): string {
+  return batch.preparing || batch.total === undefined ? "preparing" : `${batch.processed}/${batch.total}`;
+}
 
 export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBarPresentation {
   const activity = state.activity;
@@ -237,8 +240,7 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
       : `Reading · ${state.readingPending}`
     : researchBusy
     ? `Research · ${state.webResearchActivity}`
-    : activity?.batch?.total === undefined && activity?.batch ? "Mindmap · preparing"
-    : activity?.batch?.total !== undefined ? `Mindmap · ${activity.batch.processed}/${activity.batch.total}`
+    : activity?.batch ? `Mindmap · ${batchDisplaySummary(activity.batch)}`
     : activity && activity.queuedCount > 0 ? `Mindmap · ${activity.queuedCount} queued`
     : visibleLatestFailure && activity?.latestFailureBatch ? `Mindmap · ${batchFailureSummary(activity.latestFailureBatch)}`
     : state.running
@@ -264,7 +266,7 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
   const ariaLabel = engineAlert
     ? `Mindmap engine ${status}. ${engineDetail}. Activate to open the Mindmap menu.`
     : engineBusy
-      ? `Mindmap engine ${activity?.batch?.total !== undefined ? `${activity.batch.processed}/${activity.batch.total}` : activity?.batch ? "preparing" : `${activity?.queuedCount ?? 0} queued`}. ${engineDetail}. Activate to open the Mindmap menu.`
+      ? `Mindmap engine ${activity?.batch ? batchDisplaySummary(activity.batch) : `${activity?.queuedCount ?? 0} queued`}. ${engineDetail}. Activate to open the Mindmap menu.`
     : readingActionable
     ? `Mindmap Reading Mode: ${state.readingError ?? state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
     : webResearchActionable
@@ -373,7 +375,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     ...(topRecoveryRow ? [topRecoveryRow] : []),
     ...(state.activity?.operatorPause ? [{ title: "Resume processing", icon: "play" as IconName, action: "resumeProcessing" as const }] : state.activity && state.activity.state !== "idle" ? [{ title: "Pause processing", icon: "pause" as IconName, action: "pauseProcessing" as const }] : []),
     ...(state.activity && (state.activity.state !== "idle" || visibleLatestFailure) ? [{
-      title: `Engine: ${state.activity.current?.phase ?? state.activity.state}${state.activity.current?.path ? ` · ${state.activity.current.path}` : ""} · ${state.activity.queuedCount} queued${visibleLatestFailure && state.activity.latestFailureBatch ? ` · ${batchFailureSummary(state.activity.latestFailureBatch)}` : ""}`,
+      title: `Engine: ${state.activity.current?.phase ?? state.activity.state}${state.activity.current?.path ? ` · ${state.activity.current.path}` : ""} · ${state.activity.batch ? batchDisplaySummary(state.activity.batch) : `${state.activity.queuedCount} queued`}${visibleLatestFailure && state.activity.latestFailureBatch ? ` · ${batchFailureSummary(state.activity.latestFailureBatch)}` : ""}`,
       icon: "info" as IconName,
       disabled: true,
     }] : []),

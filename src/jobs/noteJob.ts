@@ -459,18 +459,15 @@ export class NoteJobRunner implements JobPhaseRunner {
     const resolved = this.resolvedIdentityFor(jobId, identity);
     const isAppleAnnotation = resolved.kind === "apple-annotation";
     let relatedLinks: RelatedSectionLink[] | undefined;
-    const hasRelated = !isAppleAnnotation && (this.deps.selectRelated !== undefined || this.deps.buildRelatedLinks !== undefined);
     if (!isAppleAnnotation && this.deps.selectRelated) {
       const embeddedResult = await this.ensureEmbedded(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
       if (!embeddedResult.ok) return embeddedResult.outcome;
       const selected = await this.deps.selectRelated(embeddedResult.value, resolved.canonicalPath);
       metadata = { ...metadata, related: selected.map((r) => r.path) };
       this.memoryFor(jobId).metadata = metadata;
-      relatedLinks = selected.map((r) => ({ path: r.path, kind: r.kind }));
+      relatedLinks = undefined;
       const postSelectFresh = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
       if (!postSelectFresh.ok) return postSelectFresh.outcome;
-    } else if (this.deps.buildRelatedLinks && !isAppleAnnotation) {
-      relatedLinks = this.deps.buildRelatedLinks(metadata);
     }
     let result;
     try {
@@ -480,10 +477,10 @@ export class NoteJobRunner implements JobPhaseRunner {
         expectedSourceHash,
         metadata,
         isAppleAnnotation,
-        relatedLinks,
+        relatedLinks: isAppleAnnotation ? relatedLinks : undefined,
         mindmapHeading: this.deps.mindmapHeading,
-        writeMindmapSection: hasRelated,
-        removeMindmapSection: false,
+        writeMindmapSection: isAppleAnnotation ? false : false,
+        removeMindmapSection: isAppleAnnotation ? false : true,
       });
     } catch (error) {
       if (isEngineError(error) && error.code === "SOURCE_STALE") {

@@ -3,7 +3,7 @@ import type { Vault, Workspace } from "obsidian";
 import type { AtomicStoreFs } from "./atomicStore";
 import { EngineError, isEngineError } from "./errors";
 import type { IndexFs } from "../index/indexFs";
-import { IndexStore } from "../index/indexStore";
+import { IndexStore, type IndexedCatalogRecord } from "../index/indexStore";
 import { JobEngine, type JobEngineFault, type JobPhaseRunner } from "../jobs/jobEngine";
 import type { EngineActivitySnapshot } from "../jobs/jobActivity";
 import { JobStore } from "../jobs/jobStore";
@@ -12,6 +12,7 @@ import { canonicalizePath, stableNoteIdentity, type JobTrigger } from "./contrac
 import { projectSource } from "./sourceProjection";
 import { RebuildJobRunner } from "../jobs/rebuildJob";
 import { ScopeJobRunner } from "../jobs/scopeJob";
+import { noteIdentityStableKey } from "../jobs/jobTypes";
 import { CoreScheduler, type IntervalRegistrar, type SchedulerClock, type SchedulerFault } from "../scheduling/coreScheduler";
 import { ScheduleStore } from "../scheduling/scheduleStore";
 import { BackgroundScheduler, type BackgroundSchedulerOptions } from "../scheduling/backgroundScheduler";
@@ -55,7 +56,23 @@ import { MigrationDriver } from "../migration/migrationDriver";
 export const PRODUCTION_SCOPE_CURRENT = "current";
 export const PRODUCTION_SCOPE_ALL = "all";
 export const PRODUCTION_SCOPE_READING = "reading";
-export const PRODUCTION_RELATED_VERSION = 1;
+export const PRODUCTION_RELATED_VERSION = 2;
+
+export function buildCatalogPredicate(records: IndexedCatalogRecord[] | null, expectedRelatedVersion: number | undefined): (identity: import("./contracts").NoteIdentityV1, sourceHash: string) => boolean {
+  if (records === null) {
+    throw new EngineError("STORE_READ_FAILED", "Catalog snapshot returned null (generation verification failed).", {});
+  }
+  const map = new Map<string, { sourceHash: string; relatedVersion?: number }>();
+  for (const r of records) {
+    map.set(noteIdentityStableKey(r.identity), { sourceHash: r.sourceHash, relatedVersion: r.relatedVersion });
+  }
+  return (identity, sourceHash) => {
+    const entry = map.get(noteIdentityStableKey(identity));
+    if (!entry || entry.sourceHash !== sourceHash) return false;
+    if (expectedRelatedVersion !== undefined && (entry.relatedVersion ?? 0) < expectedRelatedVersion) return false;
+    return true;
+  };
+}
 
 /** Exported for direct, focused testing of the exact registry `ProductionEngine` itself composes -- see `productionEngine.test.ts`'s own scope-registry regression tests. Never imported/used by any other production module. */
 export function buildProductionScopeRegistry(options: Pick<ProductionEngineOptions, "scopeFolders" | "currentScopeFolders">): ScopeRegistry {
@@ -336,19 +353,17 @@ export class ProductionEngine {
         })
         : createDeferredScopeImportSeam();
       const expectedRelatedVersion = relatedConfig ? PRODUCTION_RELATED_VERSION : undefined;
-      const indexCheckSeam = {
-        isAlreadyIndexed: async (identity: import("./contracts").NoteIdentityV1, sourceHash: string): Promise<boolean> => {
-          const record = await this.indexStore.getRecord(identity);
-          if (!record || record.sourceHash !== sourceHash) return false;
-          if (expectedRelatedVersion !== undefined && (record.relatedVersion ?? 0) < expectedRelatedVersion) return false;
-          return true;
+      const catalogSnapshot = {
+        prepareLookup: async (): Promise<(identity: import("./contracts").NoteIdentityV1, sourceHash: string) => boolean> => {
+          const records = await this.indexStore.snapshotCatalog();
+          return buildCatalogPredicate(records, expectedRelatedVersion);
         },
       };
       const scopeRunner = new ScopeJobRunner({
         discovery: createProductionScopeDiscoverySeam({ vault: options.vault, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses }, scopeRegistry, options.embeddingModel),
         import: importSeam,
         enqueue: createProductionScopeEnqueueSeam(lateJobSubmitter, "manual"),
-        indexCheck: indexCheckSeam,
+        catalogSnapshot,
       });
       runners["scope-refresh"] = scopeRunner;
       runners["reading-sync"] = scopeRunner;
