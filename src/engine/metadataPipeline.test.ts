@@ -503,12 +503,12 @@ void test("hierarchical pipeline normalizes only at final output, not intermedia
 void test("hierarchical pipeline request bytes never exceed contextTokens estimate", async () => {
   const identity = stableNoteIdentity(canonicalizePath("Notes/Budget.md"));
   const contextTokens = 2048;
-  const observedRequests: { bytes: number; maxTokens: number; contextTokens?: number }[] = [];
+  const observedRequests: { bytes: number; maxTokens: number; contextTokens?: number; responseFormat?: string }[] = [];
   const provider: MetadataInferenceProvider = {
     async complete(request) {
       let total = 0;
       for (const m of request.messages) total += Buffer.byteLength(m.content, "utf8");
-      observedRequests.push({ bytes: total, maxTokens: request.maxTokens, contextTokens: request.contextTokens });
+      observedRequests.push({ bytes: total, maxTokens: request.maxTokens, contextTokens: request.contextTokens, responseFormat: request.responseFormat });
       return '{"summary":"ok","tags":["t"],"concepts":["c"]}';
     },
   };
@@ -516,6 +516,7 @@ void test("hierarchical pipeline request bytes never exceed contextTokens estima
   await runMetadataPipeline(provider, baseConfig({ contextTokens }), { identity, text: longText, related: [] });
   for (const request of observedRequests) {
     assert.equal(request.contextTokens, contextTokens);
+    assert.equal(request.responseFormat, "metadata-v1");
     assert.ok(request.bytes + 512 + request.maxTokens <= contextTokens, `request exceeds hard context equation: ${request.bytes}+512+${request.maxTokens} > ${contextTokens}`);
   }
 });
@@ -671,10 +672,10 @@ void test("hierarchical provider input includes breadcrumbs and each source body
 
 void test("hierarchical reduction makes a distinct root request with configured output allowance", async () => {
   const identity = stableNoteIdentity(canonicalizePath("Notes/RootBudget.md"));
-  const requests: { maxTokens: number; contextTokens?: number }[] = [];
+  const requests: { maxTokens: number; contextTokens?: number; responseFormat?: string }[] = [];
   const provider: MetadataInferenceProvider = {
     async complete(request) {
-      requests.push({ maxTokens: request.maxTokens, contextTokens: request.contextTokens });
+      requests.push({ maxTokens: request.maxTokens, contextTokens: request.contextTokens, responseFormat: request.responseFormat });
       return '{"summary":"s","tags":[],"concepts":[]}';
     },
   };
@@ -682,5 +683,7 @@ void test("hierarchical reduction makes a distinct root request with configured 
   await runMetadataPipeline(provider, config, { identity, text: "word ".repeat(5000), related: [] });
   assert.equal(requests[requests.length - 1]?.maxTokens, 700);
   assert.equal(requests[requests.length - 1]?.contextTokens, 2048);
-  assert.ok(requests.slice(0, -1).every((request) => request.maxTokens === 256));
+  assert.ok(requests.every((request) => request.responseFormat === "metadata-v1"));
+  assert.ok(requests.some((request) => request.maxTokens === 384));
+  assert.ok(requests.filter((request) => request.maxTokens !== 700).every((request) => request.maxTokens === 256 || request.maxTokens === 384));
 });
