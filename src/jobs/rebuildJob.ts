@@ -24,6 +24,7 @@ import { toFailureCode, type JobReceiptV1, type PersistedJobV1, type RebuildSnap
 export interface RebuildJobDeps {
   fs: IndexFs;
   root: string;
+  onActivated?: () => void;
 }
 
 type RebuildReceipt = Extract<JobReceiptV1, { kind: "rebuild" }>;
@@ -347,6 +348,7 @@ export class RebuildJobRunner implements JobPhaseRunner {
         // on retry, and re-deleting an already-deleted/already-mismatched overlay is a no-op) but
         // never rolls the switch back.
         await finalizeCompactionFromSnapshot(this.deps.fs, this.deps.root, targetId, snapshot.overlays);
+        this.deps.onActivated?.();
       } catch (error) {
         return { type: "retry", failureCode: toFailureCode(error) };
       }

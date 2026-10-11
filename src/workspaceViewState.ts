@@ -10,6 +10,29 @@ export interface SidebarLiveState {
   error: string | null;
 }
 
+export interface MindmapViewState {
+  [key: string]: unknown;
+  heatmapOpen: boolean;
+  expandedByNote: Record<string, string | null>;
+}
+
+export function normalizeMindmapViewState(value: unknown): MindmapViewState {
+  if (typeof value !== "object" || value === null) return { heatmapOpen: false, expandedByNote: {} };
+  const record = value as Record<string, unknown>;
+  const entries = typeof record.expandedByNote === "object" && record.expandedByNote !== null
+    ? Object.entries(record.expandedByNote as Record<string, unknown>)
+      .filter((entry): entry is [string, string | null] => typeof entry[0] === "string" && (typeof entry[1] === "string" || entry[1] === null))
+      .slice(-100)
+    : [];
+  return { heatmapOpen: record.heatmapOpen === true, expandedByNote: Object.fromEntries(entries) };
+}
+
+export function rememberExpandedPath(state: MindmapViewState, notePath: string, expandedPath: string | null): MindmapViewState {
+  const entries = Object.entries(state.expandedByNote).filter(([path]) => path !== notePath);
+  entries.push([notePath, expandedPath]);
+  return { ...state, expandedByNote: Object.fromEntries(entries.slice(-100)) };
+}
+
 export function createIdleLiveState(path: string, response: LiveRelatedResponse | null = null): SidebarLiveState {
   return {
     path,

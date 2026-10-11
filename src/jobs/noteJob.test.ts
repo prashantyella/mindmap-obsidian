@@ -53,8 +53,10 @@ class FakeFs implements AtomicStoreFs {
 class FakeVault implements NoteVaultAdapter {
   files = new Map<string, string>();
   modifyCount = 0;
+  onRead: (() => void) | null = null;
 
   async read(path: string): Promise<string | null> {
+    this.onRead?.();
     return this.files.get(path) ?? null;
   }
   async modify(path: string, content: string): Promise<void> {
@@ -871,6 +873,28 @@ void test("deferWrite: an explicit (non-batch) note job is NOT deferred even whe
   const noteJob = jobs.find((j) => j.job.kind === "process-note");
   assert.equal(noteJob?.status, "completed", "non-batch job must complete even when deferWrite returns true");
   assert.equal(h.vault.modifyCount, 1, "note must be written");
+});
+
+void test("deferWrite: automatic non-batch work is deferred", async () => {
+  const h = buildHarnessWithDefer(() => true);
+  const job = await h.engine.submit({ trigger: "scheduled", kind: "process-note", identity: identity(), sourceHash: sourceHashOf(RAW_CONTENT), embeddingModel: "test-model", pipelineVersion: 1 });
+  await h.engine.drain();
+  assert.equal((await h.store.getById(job.job.jobId))?.job.phase, "write-note");
+  assert.equal((await h.store.getById(job.job.jobId))?.status, "queued");
+  assert.equal(h.vault.modifyCount, 0);
+});
+
+void test("deferWrite: focus arriving during the writer's final source read prevents mutation", async () => {
+  let protectedNow = false;
+  const h = buildHarnessWithDefer(() => protectedNow);
+  const root = await h.engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "test-scope", pipelineVersion: 1 });
+  const child = await h.engine.submitBulkChild(root.job.batchId!, { trigger: "manual", kind: "process-note", identity: identity(), sourceHash: sourceHashOf(RAW_CONTENT), embeddingModel: "test-model", pipelineVersion: 1 });
+  assert.ok(child);
+  let reads = 0;
+  h.vault.onRead = () => { reads += 1; if (reads >= 1) protectedNow = true; };
+  await h.engine.drain();
+  assert.equal((await h.store.getById(child!.job.jobId))?.status, "queued");
+  assert.equal(h.vault.modifyCount, 0);
 });
 
 void test("deferWrite: a batched note job proceeds when deferWrite returns false", async () => {

@@ -254,7 +254,24 @@
   flex-direction: column;
   background: var(--background-primary);
   color: var(--text-normal);
-  font-family: Geist, var(--font-interface);
+  font-family: var(--font-interface);
+}
+
+.mindmap-sidebar-content {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.mindmap-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 
 .mindmap-sidebar-folder {
@@ -338,8 +355,19 @@
 .mindmap-heatmap {
   position: relative;
   flex: 0 0 auto;
-  padding: 25px 25px 18px;
+  padding: 8px 12px 12px;
+}
+
+.mindmap-heatmap-disclosure {
   border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mindmap-heatmap-disclosure > summary {
+  padding: 9px 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
 }
 
 .mindmap-inline-loading {
@@ -384,7 +412,7 @@
 .mindmap-heatmap-chart {
   display: block;
   width: 100%;
-  height: 300px;
+  height: 180px;
   overflow: visible;
 }
 
@@ -534,16 +562,13 @@
 
 .mindmap-sidebar-card {
   position: relative;
-  padding: 25px;
+  padding: 12px;
   border-bottom: 1px solid var(--background-modifier-border);
   background: transparent;
   color: var(--text-normal);
   cursor: default;
   outline: none;
-  will-change: opacity, transform, background-color;
-  transition:
-    background-color 140ms ease-out,
-    opacity 140ms ease-out;
+  transition: background-color 140ms cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 .mindmap-sidebar-card:hover,
@@ -553,8 +578,8 @@
 
 .mindmap-sidebar-card.is-expanded {
   background: color-mix(in srgb, var(--interactive-accent) 13%, var(--background-secondary));
-  gap: 15px;
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--interactive-accent) 78%, var(--text-normal));
+  outline: 1px solid color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
+  outline-offset: -1px;
 }
 
 .mindmap-sidebar-card.is-expanded .mindmap-sidebar-title {
@@ -565,17 +590,13 @@
   min-width: 0;
 }
 
-.mindmap-sidebar-card.is-pin-revealed .mindmap-sidebar-card-body {
-  transform: translateX(32px);
-}
-
 .mindmap-sidebar-card-top {
   display: flex;
   min-width: 0;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 10px;
+  margin-bottom: 4px;
 }
 
 .mindmap-sidebar-title-wrap {
@@ -606,24 +627,25 @@
 
 .mindmap-sidebar-pin {
   position: absolute;
-  top: 24px;
-  left: 18px;
+  top: 9px;
+  right: 48px;
   width: 26px;
   height: 26px;
   flex-basis: 26px;
   opacity: 0;
   pointer-events: none;
-  transform: translateX(-4px);
   transition:
     background-color 140ms ease-out,
     border-color 140ms ease-out,
     color 140ms ease-out;
 }
 
-.mindmap-sidebar-card.is-pin-revealed .mindmap-sidebar-pin {
+.mindmap-sidebar-card:hover .mindmap-sidebar-pin,
+.mindmap-sidebar-card:focus-within .mindmap-sidebar-pin,
+.mindmap-sidebar-card.is-pin-revealed .mindmap-sidebar-pin,
+.mindmap-sidebar-pin.is-pinned {
   opacity: 1;
   pointer-events: auto;
-  transform: translateX(0);
 }
 
 .mindmap-sidebar-pin.is-pinned {
@@ -642,24 +664,43 @@
 .mindmap-sidebar-title {
   display: block;
   color: var(--text-normal);
-  font-family: "Geist Pixel", "Geist Mono", var(--font-monospace);
-  font-size: 19px;
-  font-weight: 400;
-  line-height: 28px;
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+  line-height: 1.35;
   overflow-wrap: anywhere;
   text-decoration: none;
 }
 
 .mindmap-sidebar-detail {
-  margin-top: 15px;
+  margin-top: 8px;
 }
 
 .mindmap-sidebar-summary {
   color: var(--text-normal);
-  font-family: "Geist Mono", var(--font-monospace);
-  font-size: 14px;
-  font-weight: 400;
-  line-height: 20px;
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+}
+
+.mindmap-sidebar-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.mindmap-sidebar-status.is-error { color: var(--text-error); }
+.mindmap-update-connections { flex: 0 0 auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mindmap-sidebar-card,
+  .mindmap-sidebar-pin { transition: none; }
+  .mindmap-loading-spinner-icon { animation-duration: 1.5s; }
 }
 
 .mindmap-sidebar-empty {

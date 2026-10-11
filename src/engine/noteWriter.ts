@@ -74,11 +74,14 @@ export interface WriteNoteMetadataOptions {
   writeMindmapSection: boolean;
   /** Ordinary notes only. */
   removeMindmapSection: boolean;
+  /** Last-moment write gate, evaluated after the fresh source read and transformation. */
+  shouldDeferCommit?: () => boolean;
 }
 
 export type WriteNoteMetadataResult =
   | { status: "written"; content: string }
-  | { status: "unchanged"; content: string };
+  | { status: "unchanged"; content: string }
+  | { status: "deferred"; content: string };
 
 /**
  * The single UI-free mutation boundary for note frontmatter/body. Composes
@@ -183,6 +186,9 @@ export class NoteWriter {
     const finalContent = replaceBody(withFrontmatter, newBody);
     if (finalContent === rawContent) {
       return { status: "unchanged", content: finalContent };
+    }
+    if (options.shouldDeferCommit?.()) {
+      return { status: "deferred", content: rawContent };
     }
     try {
       await this.vault.modify(options.path, finalContent);

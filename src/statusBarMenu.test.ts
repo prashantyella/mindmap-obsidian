@@ -143,6 +143,16 @@ void test("operator pause has distinct accessible presentation and only Resume a
   assert.match(provider.ariaLabel, /provider paused/);
 });
 
+void test("editing deferral is explicit, non-animated, and retains pause control", () => {
+  const waiting = state({ activity: { state: "running", queuedCount: 1, activeCount: 0, processNoteCount: 1, bulkBlocked: false, waitingForEditingCount: 1 } });
+  const presentation = buildStatusBarPresentation(waiting);
+  assert.equal(presentation.label, "Mindmap · waiting for editing");
+  assert.equal(presentation.animateIcon, false);
+  const items = buildStatusBarMenuItems(waiting);
+  assert.equal(items.some((item) => item.title === "Waiting until you finish editing"), true);
+  assert.equal(items.some((item) => item.action === "pauseProcessing"), true);
+});
+
 void test("active engine work takes priority over passive Reading count", () => {
   const presentation = buildStatusBarPresentation(state({ readingMode: "reading", readingActivity: "ready", readingPending: 9, activity: { state: "running", queuedCount: 1, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", preparing: false, processed: 1, total: 3, failed: 0 } } }));
   assert.equal(presentation.label, "Mindmap · 1/3");

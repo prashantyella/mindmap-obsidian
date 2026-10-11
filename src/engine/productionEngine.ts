@@ -43,6 +43,7 @@ import { MigrationRunner, MIGRATION_SCOPE_ID } from "../migration/migrationRunne
 import { MigrationStore } from "../migration/migrationStore";
 import type { MigrationStatusV1 } from "../migration/migrationContract";
 import { MigrationDriver } from "../migration/migrationDriver";
+import { createWorkspaceEditingProtection, type EditingProtection } from "../editingProtection";
 
 /**
  * Checkpoint 10B blocker resolution: the CLOSED set of scope ids a
@@ -276,6 +277,10 @@ export class ProductionEngine {
   private readonly noteEmbeddingSeam: CachedLiveEmbeddingSeam | null;
   /** Checkpoint 10B PENDING: discovery is pure text/hash work (no embedding call), so this is constructed UNCONDITIONALLY -- unlike `noteEmbeddingSeam`, a pending-notes count must stay available even before any provider is configured. Reused by `getPendingCandidates` only; the `"scope-refresh"`/migration runners above keep their own separately-constructed seams unchanged. */
   private readonly pendingDiscoverySeam: import("../jobs/scopeJob").ScopeDiscoverySeam;
+  private readonly editingProtection: EditingProtection | null;
+  private disposeEditingProtection: (() => void) | null = null;
+  private readonly indexChangeListeners = new Set<(change: { revision: number; paths?: readonly string[] }) => void>();
+  private indexRevision = 0;
 
   constructor(options: ProductionEngineOptions) {
     this.options = options;
@@ -309,6 +314,13 @@ export class ProductionEngine {
     const noteVaultAdapter = createProductionNoteVaultAdapter(options.vault, options.vaultFileClasses);
     const noteWriter = new NoteWriter(noteVaultAdapter);
     const sourceReader = createProductionNoteSourceReader({ vault: options.vault, scopeFolders: options.scopeFolders, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses });
+    if (options.workspace && typeof options.workspace.getLeavesOfType === "function" && typeof options.workspace.on === "function") {
+      const editing = createWorkspaceEditingProtection(options.workspace, options.vault);
+      this.editingProtection = editing.protection;
+      this.disposeEditingProtection = editing.dispose;
+    } else {
+      this.editingProtection = null;
+    }
     this.noteSourceReader = sourceReader;
     this.noteEmbeddingSeam =
       options.embeddingProvider && options.embeddingModel && options.chunkOptions
@@ -336,7 +348,7 @@ export class ProductionEngine {
         noteWriter,
         indexStore: { upsertNote: (input) => this.indexStoreUpsert(input) },
         replacement: createProductionNoteReplacementSeam(lateJobSubmitter, "manual"),
-        deferWrite: (_persisted, identity) => options.workspace?.getActiveFile()?.path === identity.canonicalPath,
+        deferWrite: (_persisted, identity) => this.editingProtection?.isProtected(identity.canonicalPath) ?? false,
         selectRelated: relatedConfig ? async (embedded, selfPath) => {
           const candidates = await this.indexStore.queryRelated({
             queryVector: embedded.noteVector,
@@ -373,7 +385,7 @@ export class ProductionEngine {
       runners["scope-refresh"] = scopeRunner;
       runners["reading-sync"] = scopeRunner;
     }
-    runners["rebuild-index"] = new RebuildJobRunner({ fs: options.fs, root: options.dataRoot });
+    runners["rebuild-index"] = new RebuildJobRunner({ fs: options.fs, root: options.dataRoot, onActivated: () => this.emitIndexChange() });
     // Item 3: migration is now fully self-contained inside `MigrationRunner` (it builds/verifies/
     // activates its own generation directly -- see that module's own doc comment, "Depends on
     // NEITHER JobEngine NOR JobStore") -- there is no longer a "migrate-index" JOB KIND for this
@@ -386,6 +398,7 @@ export class ProductionEngine {
       safelyNotify(() => options.onFault?.({ source: "job-engine", code: fault.code, atMs: fault.atMs }));
     });
     jobEngineRef.current = this.jobEngine;
+    this.editingProtection?.subscribeSafeTransition(() => this.jobEngine.wake());
 
     this.scheduleStore = new ScheduleStore(options.fs, options.dataRoot);
     this.coreScheduler = new CoreScheduler({
@@ -456,13 +469,20 @@ export class ProductionEngine {
     // capability).
     this.unsubscribeMigration = this.migrationRunner.subscribe((status) => {
       if (status.phase !== "complete") return;
+      this.emitIndexChange();
       safelyNotify(() => options.onMigrationComplete?.());
       void this.tryStartOrdinaryWork();
     });
   }
 
-  private indexStoreUpsert(input: Parameters<IndexStore["upsertNote"]>[0]): Promise<void> {
-    return this.indexStore.upsertNote(input);
+  private async indexStoreUpsert(input: Parameters<IndexStore["upsertNote"]>[0]): Promise<void> {
+    await this.indexStore.upsertNote(input);
+    this.emitIndexChange([input.identity.canonicalPath]);
+  }
+
+  private emitIndexChange(paths?: readonly string[]): void {
+    const change = { revision: ++this.indexRevision, ...(paths ? { paths: [...paths] } : {}) };
+    for (const listener of this.indexChangeListeners) safelyNotify(() => listener(change));
   }
 
   getPhase(): ProductionEnginePhase {
@@ -1066,12 +1086,17 @@ export class ProductionEngine {
     this.lifecycleAbort.abort();
     this.unsubscribeMigration?.();
     this.unsubscribeMigration = null;
+    this.indexChangeListeners.clear();
     return this.enqueue(async () => {
       if (this.phase === "disposed") return;
       this.coreScheduler.dispose();
       this.noteEmbeddingSeam?.clear();
       this.indexStore.clearQueryCaches();
+      const jobsSettled = this.jobEngine.whenSettled();
       this.jobEngine.dispose();
+      const disposeEditingProtection = this.disposeEditingProtection;
+      this.disposeEditingProtection = null;
+      void jobsSettled.finally(() => disposeEditingProtection?.());
       this.migrationDriver.dispose();
       this.migrationRunner.dispose();
       this.pumpStarted = false;
@@ -1090,6 +1115,11 @@ export class ProductionEngine {
 
   subscribeActivity(listener: (snapshot: EngineActivitySnapshot) => void): () => void {
     return this.jobEngine.subscribeActivity(listener);
+  }
+  whenJobsSettled(): Promise<void> { return this.jobEngine.whenSettled(); }
+  subscribeIndexChanges(listener: (change: { revision: number; paths?: readonly string[] }) => void): () => void {
+    this.indexChangeListeners.add(listener);
+    return () => this.indexChangeListeners.delete(listener);
   }
   pauseProcessing(): Promise<void> { return this.jobEngine.pauseProcessing(); }
   resumeProcessing(): Promise<void> { return this.jobEngine.resumeProcessing(); }

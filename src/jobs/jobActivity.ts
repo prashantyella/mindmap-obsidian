@@ -9,6 +9,7 @@ export interface EngineActivitySnapshot {
   activeCount: number;
   processNoteCount: number;
   bulkBlocked: boolean;
+  waitingForEditingCount?: number;
   current?: { kind: PersistedJobV1["job"]["kind"]; phase: string; path?: string; attempt: number };
   providerPause?: string;
   operatorPause?: boolean;

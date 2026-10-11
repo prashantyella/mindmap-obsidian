@@ -240,6 +240,7 @@ export class JobEngine {
   private async emitActivity(): Promise<void> {
     const revision = ++this.activityRevision;
     const snapshot = deriveEngineActivity(await this.store.list(), await this.store.getBulkBatches(), await this.store.getProviderPause(), await this.store.getOperatorPause(), this.running || this.explicitDispatchCount > 0, this.disposed, this.fault?.code);
+    snapshot.waitingForEditingCount = this.deferredJobIds.size;
     if (revision !== this.activityRevision) return;
     for (const listener of this.activityListeners) { try { listener(snapshot); } catch { /* isolated observer */ } }
   }
@@ -472,7 +473,10 @@ export class JobEngine {
   }
 
   /** Wakes deferred/background work after an external state change, without altering pause semantics. */
-  wake(): void { this.deferredJobIds.clear(); this.wakeGeneration++; this.kick(); }
+  wake(): void { this.deferredJobIds.clear(); this.wakeGeneration++; this.kick(); void this.emitActivity(); }
+
+  /** Settles after every phase-step already queued on the serialized dispatch tail. */
+  whenSettled(): Promise<void> { return this.dispatchTail; }
 
   /**
    * Requests that the background pump run (or keep running). Setting
@@ -844,6 +848,7 @@ export class JobEngine {
         if (this.wakeGeneration === gen) {
           this.deferredJobIds.add(entry.job.jobId);
         }
+        await this.emitActivity();
         return;
       }
     }

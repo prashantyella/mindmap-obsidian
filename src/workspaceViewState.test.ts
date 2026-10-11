@@ -11,10 +11,21 @@ import {
   createReadyLiveState,
   getDisplayLiveRelated,
   NO_MINDMAP_CONNECTIONS_MESSAGE,
+  normalizeMindmapViewState,
+  rememberExpandedPath,
   shouldApplyLiveResponse,
   shouldSkipLiveQuery,
   type SidebarLiveState,
 } from "./workspaceViewState";
+
+void test("view state restores heatmap and bounds per-note expansion to 100 entries", () => {
+  let state = normalizeMindmapViewState({ heatmapOpen: true, expandedByNote: {} });
+  for (let index = 0; index < 105; index += 1) state = rememberExpandedPath(state, `Note-${index}.md`, `Related-${index}.md`);
+  assert.equal(state.heatmapOpen, true);
+  assert.equal(Object.keys(state.expandedByNote).length, 100);
+  assert.equal(state.expandedByNote["Note-0.md"], undefined);
+  assert.equal(state.expandedByNote["Note-104.md"], "Related-104.md");
+});
 
 function createLiveResponse(pathValue: string, relatedPath = "Related.md", indexed = true): LiveRelatedResponse {
   return {
@@ -200,14 +211,14 @@ void test("workspace view exposes lookup, pin, and score affordances", () => {
 
   assert.equal(workspaceViewSource.includes("mindmap-lookup-input"), true);
   assert.equal(workspaceViewSource.includes("queryLookupRelated"), true);
-  assert.equal(workspaceViewSource.includes("captureLookupInputState"), true);
+  assert.equal(workspaceViewSource.includes("compositionstart"), true);
   assert.equal(workspaceViewSource.includes("requestAnimationFrame"), true);
   assert.equal(workspaceViewSource.includes("togglePinnedConnection"), true);
   assert.equal(workspaceViewSource.includes("contextmenu"), true);
   assert.equal(workspaceViewSource.includes("ContextMenu"), true);
   assert.equal(workspaceViewSource.includes("event.shiftKey"), true);
   assert.equal(workspaceViewSource.includes("is-pin-revealed"), true);
-  assert.equal(workspaceViewSource.includes("animatePinReveal"), true);
+  assert.equal(workspaceViewSource.includes("animatePinReveal"), false);
   assert.equal(workspaceViewSource.includes("mindmap-sidebar-score"), true);
   assert.equal(mainSource.includes("pinnedConnections"), true);
   assert.equal(commandSource.includes("mindmap-open-lookup"), true);
