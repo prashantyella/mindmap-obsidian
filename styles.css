@@ -254,7 +254,7 @@
   flex-direction: column;
   background: var(--background-primary);
   color: var(--text-normal);
-  font-family: var(--font-interface);
+  font-family: Geist, var(--font-interface);
 }
 
 .mindmap-sidebar-content {
@@ -664,10 +664,10 @@
 .mindmap-sidebar-title {
   display: block;
   color: var(--text-normal);
-  font-family: var(--font-interface);
-  font-size: var(--font-ui-medium);
-  font-weight: 600;
-  line-height: 1.35;
+  font-family: "Geist Pixel", "Geist Mono", var(--font-monospace);
+  font-size: 19px;
+  font-weight: 400;
+  line-height: 28px;
   overflow-wrap: anywhere;
   text-decoration: none;
 }
@@ -678,9 +678,10 @@
 
 .mindmap-sidebar-summary {
   color: var(--text-normal);
-  font-family: var(--font-interface);
-  font-size: var(--font-ui-small);
-  line-height: 1.45;
+  font-family: "Geist Mono", var(--font-monospace);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
 }
 
 .mindmap-sidebar-status {
