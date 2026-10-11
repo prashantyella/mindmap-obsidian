@@ -1914,7 +1914,7 @@ export default class MindmapPlugin extends Plugin {
       this.appendLog(`[migration] Legacy config.json migration skipped: ${error instanceof Error ? error.message : "unknown error"}`);
     } finally {
       this.settings.legacyConfigMigrated = true;
-      await this.saveSettings({ explicitEngineActivation: true });
+      await this.saveSettings();
     }
   }
 
