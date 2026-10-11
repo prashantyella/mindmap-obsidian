@@ -43,6 +43,7 @@ const MAX_BOUNDED_READ_BYTES = 64 * 1024 * 1024;
 const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 
 export class NodeOwnedFs implements IndexFs {
+  readonly readFileBytesReturnsPrivateBuffer = true as const;
   private readonly root: string;
   /**
    * Pinned once a successful `realpath` of the owned root has been

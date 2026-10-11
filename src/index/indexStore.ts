@@ -47,6 +47,7 @@ import type { ChunkShardNoteOffset, ScoredNote } from "./vectorTypes";
 import { selectTopK } from "./topK";
 import { QueryGenerationCache } from "./queryGenerationCache";
 import { rankCompositeCooperatively } from "./cooperativeRanking";
+import { runCooperativeBlocks, throwIfAborted } from "./cooperativeWork";
 
 /**
  * Top-level orchestrator: the merged, searchable "committed view" (base
@@ -102,6 +103,9 @@ export interface QueryRelatedOptions {
   queryChunkVectors: Float32Array[];
   excludePath?: CanonicalPath;
   limit: number;
+  signal?: AbortSignal;
+  onLoadStage?: import("./generationStore").GenerationLoadOptions["onStage"];
+  onQueryStage?: (measurement: { stage: "refinement"; wallMs: number; maxSynchronousSliceMs: number; yieldCount: number }) => void;
 }
 
 interface ShadowInfo {
@@ -134,6 +138,7 @@ async function rankCompositeAsync(
   queryVector: Float32Array,
   excludePath: CanonicalPath | undefined,
   limit: number,
+  signal?: AbortSignal,
 ): Promise<ScoredNote[]> {
   if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_RANKING_LIMIT) throw new IndexStoreError(`limit must be an integer in (0, ${MAX_RANKING_LIMIT}].`);
   const shadow = buildShadowInfo(overlays);
@@ -155,7 +160,27 @@ async function rankCompositeAsync(
     if (excludePath !== undefined && overlay.identity.canonicalPath === excludePath) return null;
     const score = dotProduct(queryVector, overlay.noteVector, 0, 0, overlay.noteVector.length);
     return Number.isFinite(score) ? { path: overlay.identity.canonicalPath, score } : null;
-  }, limit);
+  }, limit, { signal });
+}
+
+async function maxChunkScoreCooperatively(
+  queryChunkVectors: readonly Float32Array[],
+  matrix: VectorMatrix,
+  rowStart: number,
+  rowCount: number,
+  signal?: AbortSignal,
+): Promise<{ score: number; maxSynchronousSliceMs: number; yieldCount: number }> {
+  let bestScore = Number.NEGATIVE_INFINITY;
+  const pairCount = rowCount * queryChunkVectors.length;
+  const metrics = await runCooperativeBlocks(pairCount, 64, (start, end) => {
+    for (let pair = start; pair < end; pair += 1) {
+      const row = rowStart + Math.floor(pair / queryChunkVectors.length);
+      const query = queryChunkVectors[pair % queryChunkVectors.length];
+      const score = dotProduct(query, matrix.data, 0, row * matrix.dimension, matrix.dimension);
+      if (Number.isFinite(score) && score > bestScore) bestScore = score;
+    }
+  }, { signal });
+  return { score: bestScore, maxSynchronousSliceMs: metrics.maxSliceMs, yieldCount: metrics.yieldCount };
 }
 
 /**
@@ -166,8 +191,10 @@ async function rankCompositeAsync(
  * `IndexStoreError` (fail closed) if any OWNED overlay file is corrupt.
  */
 export async function queryRelated(fs: IndexFs, root: string, options: QueryRelatedOptions): Promise<ScoredNote[]> {
+  throwIfAborted(options.signal);
   const generationId = await loadCurrentGenerationId(fs, root);
-  const generation = generationId === null ? null : await loadGeneration(fs, root, generationId);
+  throwIfAborted(options.signal);
+  const generation = generationId === null ? null : await loadGeneration(fs, root, generationId, { signal: options.signal, onStage: options.onLoadStage });
   return queryRelatedWithGeneration(fs, root, generation, options);
 }
 
@@ -175,7 +202,7 @@ async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation:
   const overlays = await loadOverlayPrefixesOrThrow(fs, root);
 
   const queryVector = normalizeVector(options.queryVector);
-  const candidates = await rankCompositeAsync(generation, overlays, queryVector, options.excludePath, options.limit);
+  const candidates = await rankCompositeAsync(generation, overlays, queryVector, options.excludePath, options.limit, options.signal);
   if (candidates.length === 0) return [];
 
   const queryChunkVectors = options.queryChunkVectors.map((v) => normalizeVector(v));
@@ -206,14 +233,10 @@ async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation:
       throw wrapOverlayError(error, `cannot refine candidate "${path}": its overlay failed validation`);
     });
     if (!full || !full.chunkMatrix || full.chunkMatrix.count === 0) continue;
-    let bestScore = Number.NEGATIVE_INFINITY;
-    for (let row = 0; row < full.chunkMatrix.count; row += 1) {
-      for (const qv of queryChunkVectors) {
-        const score = dotProduct(qv, full.chunkMatrix.data, 0, row * full.chunkMatrix.dimension, full.chunkMatrix.dimension);
-        if (Number.isFinite(score) && score > bestScore) bestScore = score;
-      }
-    }
-    if (Number.isFinite(bestScore)) refined.push({ path, score: bestScore });
+    const refinementStarted = performance.now();
+    const result = await maxChunkScoreCooperatively(queryChunkVectors, full.chunkMatrix, 0, full.chunkMatrix.count, options.signal);
+    options.onQueryStage?.({ stage: "refinement", wallMs: performance.now() - refinementStarted, maxSynchronousSliceMs: result.maxSynchronousSliceMs, yieldCount: result.yieldCount });
+    if (Number.isFinite(result.score)) refined.push({ path, score: result.score });
   }
 
   // Base-sourced candidates: grouped by shard, exactly one shard's matrix resident at a time.
@@ -225,7 +248,7 @@ async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation:
   }
   for (const [shardId, paths] of byShardId) {
     if (!generation) continue;
-    const shard = await generation.loadShard(shardId);
+    const shard = await generation.loadShard(shardId, { signal: options.signal, onStage: options.onLoadStage });
     const pathSet = new Set(paths);
     const offsetsByKey = new Map(shard.offsets.map((o) => [identityKey(o.identity), o]));
     for (const path of pathSet) {
@@ -233,15 +256,10 @@ async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation:
       if (!row) continue;
       const offset = offsetsByKey.get(identityKey(row.identity));
       if (!offset) continue;
-      let bestScore = Number.NEGATIVE_INFINITY;
-      for (let i = 0; i < offset.length; i += 1) {
-        const chunkRow = offset.start + i;
-        for (const qv of queryChunkVectors) {
-          const score = dotProduct(qv, shard.matrix.data, 0, chunkRow * shard.matrix.dimension, shard.matrix.dimension);
-          if (Number.isFinite(score) && score > bestScore) bestScore = score;
-        }
-      }
-      if (Number.isFinite(bestScore)) refined.push({ path, score: bestScore });
+      const refinementStarted = performance.now();
+      const result = await maxChunkScoreCooperatively(queryChunkVectors, shard.matrix, offset.start, offset.length, options.signal);
+      options.onQueryStage?.({ stage: "refinement", wallMs: performance.now() - refinementStarted, maxSynchronousSliceMs: result.maxSynchronousSliceMs, yieldCount: result.yieldCount });
+      if (Number.isFinite(result.score)) refined.push({ path, score: result.score });
     }
   }
 
@@ -307,14 +325,16 @@ export interface IndexedCatalogRecord {
  * `null`) when there is genuinely no current generation yet (a fresh,
  * not-yet-built index is a legitimate "nothing indexed", not a failure).
  */
-export async function snapshotIndexedCatalog(fs: IndexFs, root: string): Promise<IndexedCatalogRecord[] | null> {
+export async function snapshotIndexedCatalog(fs: IndexFs, root: string, signal?: AbortSignal): Promise<IndexedCatalogRecord[] | null> {
+  throwIfAborted(signal);
   const generationId = await loadCurrentGenerationId(fs, root);
   let baseRecords: readonly NoteRowMetadataV1[] = [];
   if (generationId !== null) {
     try {
-      const { noteMetadata } = await verifyGenerationFully(fs, root, generationId);
+      const { noteMetadata } = await verifyGenerationFully(fs, root, generationId, { signal });
       baseRecords = noteMetadata;
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       return null;
     }
   }
@@ -708,8 +728,8 @@ export async function planCompaction(fs: IndexFs, root: string): Promise<Compact
  * `buildGeneration` succeeded leaves the new generation on disk but
  * unreferenced -- never partially activated.
  */
-export async function finalizeCompaction(fs: IndexFs, root: string, newGenerationId: number, plan: CompactionPlan): Promise<void> {
-  await switchCurrentGeneration(fs, root, newGenerationId);
+export async function finalizeCompaction(fs: IndexFs, root: string, newGenerationId: number, plan: CompactionPlan, signal?: AbortSignal): Promise<void> {
+  await switchCurrentGeneration(fs, root, newGenerationId, { signal });
   for (const overlay of plan.overlaysSnapshot) {
     await deleteOverlayIfSnapshotMatches(fs, root, overlayFileName(overlay.identity), overlay.version, overlay.fingerprint);
   }
@@ -836,8 +856,8 @@ export function compactionSnapshotMatchesGeneration(descriptor: CompactionSnapsh
  * version+fingerprint-checked (`deleteOverlayIfSnapshotMatches`) against
  * the snapshot -- never a replacement written after planning.
  */
-export async function finalizeCompactionFromSnapshot(fs: IndexFs, root: string, newGenerationId: number, overlays: readonly CompactionSnapshotOverlayEntry[]): Promise<void> {
-  await switchCurrentGeneration(fs, root, newGenerationId);
+export async function finalizeCompactionFromSnapshot(fs: IndexFs, root: string, newGenerationId: number, overlays: readonly CompactionSnapshotOverlayEntry[], signal?: AbortSignal): Promise<void> {
+  await switchCurrentGeneration(fs, root, newGenerationId, { signal });
   for (const overlay of overlays) {
     await deleteOverlayIfSnapshotMatches(fs, root, overlay.fileName, overlay.version, overlay.fingerprint);
   }
@@ -928,12 +948,12 @@ export class IndexStore {
   }
 
   async queryRelated(options: QueryRelatedOptions): Promise<ScoredNote[]> {
-    return this.queryGenerationCache.run((generation) => queryRelatedWithGeneration(this.fs, this.root, generation, options));
+    return this.queryGenerationCache.run((generation) => queryRelatedWithGeneration(this.fs, this.root, generation, options), { signal: options.signal, onStage: options.onLoadStage });
   }
 
   /** Read-only single-identity lookup -- see `getIndexedRecord`'s own doc comment. */
-  async getRecord(identity: NoteIdentityV1): Promise<IndexRecordV1 | null> {
-    return this.queryGenerationCache.run((generation) => getIndexedRecordWithGeneration(this.fs, this.root, identity, generation));
+  async getRecord(identity: NoteIdentityV1, signal?: AbortSignal): Promise<IndexRecordV1 | null> {
+    return this.queryGenerationCache.run((generation) => getIndexedRecordWithGeneration(this.fs, this.root, identity, generation), { signal });
   }
 
   /** Conservative combined index/overlay/query-cache budget check; false until a verified base is resident. */
@@ -946,8 +966,8 @@ export class IndexStore {
   }
 
   /** Read-only, fully-verified catalog snapshot -- see `snapshotIndexedCatalog`'s own doc comment. */
-  snapshotCatalog(): Promise<IndexedCatalogRecord[] | null> {
-    return snapshotIndexedCatalog(this.fs, this.root);
+  snapshotCatalog(signal?: AbortSignal): Promise<IndexedCatalogRecord[] | null> {
+    return snapshotIndexedCatalog(this.fs, this.root, signal);
   }
 
   getRevision(): number { return this.queue.getRevision(); }
@@ -987,13 +1007,14 @@ export class IndexStore {
    * trust a failed verification. Read-only: never writes/activates
    * anything, unlike `compact()`'s own use of the same underlying check.
    */
-  async verifyCurrentGenerationFully(): Promise<{ noteCount: number } | null> {
+  async verifyCurrentGenerationFully(signal?: AbortSignal): Promise<{ noteCount: number } | null> {
     const generationId = await loadCurrentGenerationId(this.fs, this.root);
     if (generationId === null) return null;
     try {
-      const { manifest } = await verifyGenerationFully(this.fs, this.root, generationId);
+      const { manifest } = await verifyGenerationFully(this.fs, this.root, generationId, { signal });
       return { noteCount: manifest.noteCount };
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       return null;
     }
   }
@@ -1075,7 +1096,7 @@ export class IndexStore {
         throw new GenerationBuildCancelledError();
       }
 
-      await finalizeCompaction(this.fs, this.root, newGenerationId, plan);
+      await finalizeCompaction(this.fs, this.root, newGenerationId, plan, options.signal);
       this.queryGenerationCache.clear();
     });
   }

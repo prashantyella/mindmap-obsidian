@@ -169,6 +169,35 @@ void test("filesystems without statFingerprint retain the uncached behavior", as
   assert.ok(fs.readFileCalls.filter((item) => item.endsWith("notes.mvx")).length > firstReads);
 });
 
+void test("a cancelled cold cached query does not poison the next query", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2031);
+  const fixture = [makeNote("A.md", 0, random), makeNote("B.md", 0, random)];
+  await seedBaseGeneration(fs, fixture, 1);
+  const store = new IndexStore(fs, "/root");
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    () => store.queryRelated({ queryVector: fixture[0].vector, queryChunkVectors: [], limit: 2, signal: controller.signal }),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+  const recovered = await store.queryRelated({ queryVector: fixture[0].vector, queryChunkVectors: [], limit: 2 });
+  assert.equal(recovered.length, 2);
+});
+
+void test("aborting the signal that populated the generation cache never poisons a later shard query", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2032);
+  const fixture = [makeNote("A.md", 2, random), makeNote("B.md", 2, random)];
+  await seedBaseGeneration(fs, fixture, 1);
+  const store = new IndexStore(fs, "/root");
+  const firstSignal = new AbortController();
+  await store.queryRelated({ queryVector: fixture[0].vector, queryChunkVectors: [fixture[0].vector], limit: 2, signal: firstSignal.signal });
+  firstSignal.abort();
+  const later = await store.queryRelated({ queryVector: fixture[0].vector, queryChunkVectors: [fixture[0].vector], limit: 2 });
+  assert.equal(later.length, 2);
+});
+
 void test("an upsert overlay shadows the base row entirely (different vector wins the ranking), scored WITHOUT a second full note matrix", async () => {
   const fs = new FakeIndexFs();
   const random = seededRandom(3);
@@ -944,13 +973,10 @@ void test("computeProjectedOverlayResourceUsage returns null when no dimension i
 });
 
 void test("upsertNote enforces PROJECTED ACTUAL steady-state memory at a legal higher-dimensional, near-budget base generation -- rejecting a SECOND resident overlay note vector once budget is exhausted, while still allowing a replacement of the ALREADY-PENDING one and a tombstone, even though the fixed pending-overlay COUNT budget alone would have allowed all of it", async () => {
-  // dimension=8192 (the legal MAX_DIMENSION) x noteCount=3838 lands the base generation's own
-  // steady-state EXACTLY one note-vector's worth (32768 bytes) below the 128MB budget --
-  // computeSteadyStateBytes({dimension:8192, noteCount:3838, largestShardCount:0}) ===
-  // BUDGET_STEADY_STATE_MEMORY_BYTES - 32768 -- legal on its own (parseVectorIndexManifestV1
-  // accepts it), with room for EXACTLY one resident overlay note vector and no more.
+  // dimension=8192 x noteCount=3837 leaves room for exactly one overlay after accounting for
+  // the retained MVX1 backing's 48-byte header/checksum framing; a second exceeds the ceiling.
   const highDim = 8192;
-  const nearBudgetNoteCount = 3838;
+  const nearBudgetNoteCount = 3837;
   const fs = new FakeIndexFs();
   const random = seededRandom(200);
   const notes = Array.from({ length: nearBudgetNoteCount }, (_, i) => {

@@ -484,6 +484,43 @@ void test("(acceptance guard 3) rebuild activation and an independent concurrent
   assert.equal(await loadCurrentGenerationId(h.indexFs, "/root"), 2, "rebuild activated generation 1 first, then compact activated generation 2 -- strictly sequential, never interleaved");
 });
 
+void test("activation abort racing after current.json commit stays retryable and resumes cleanup", async () => {
+  const h = buildHarness();
+  const index = new IndexStore(h.indexFs, "/root");
+  await index.upsertNote({ identity: stableNoteIdentity(canonicalizePath("A.md")), sourceHash: HASH, embeddingModel: MODEL, dimension: DIM, noteVector: new Float32Array([1, 0, 0]), chunkVectors: [new Float32Array([1, 0, 0])] });
+  const job = await h.engine.submit({ trigger: "manual", kind: "rebuild-index", pipelineVersion: 1 });
+  await h.engine.runOnce();
+  await h.engine.runOnce();
+  await h.engine.runOnce();
+  const activationEntry = await h.store.getById(job.job.jobId);
+  assert.equal(activationEntry?.job.phase, "activate-generation");
+  assert.equal(activationEntry?.receipt?.kind, "rebuild");
+  if (!activationEntry || activationEntry.receipt?.kind !== "rebuild") throw new Error("missing activation receipt");
+
+  let release!: () => void;
+  let paused = false;
+  h.indexFs.pauseSignal = new Promise<void>((resolve) => { release = resolve; });
+  h.indexFs.pauseMatcher = (point, path) => point === "rename" && path.includes("current.json");
+  h.indexFs.onPaused = () => { paused = true; };
+  h.indexFs.faultOnce.add("unlink");
+  h.indexFs.pathFailPredicate = (path) => path.includes("/overlays/");
+  const controller = new AbortController();
+  const firstAttempt = h.runner.step(activationEntry, controller.signal);
+  while (!paused) await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  release();
+  const firstOutcome = await firstAttempt;
+  assert.equal(firstOutcome.type, "retry", "a possibly committed activation must remain resumable, never terminally cancelled");
+  assert.equal(await loadCurrentGenerationId(h.indexFs, "/root"), activationEntry.receipt.targetGenerationId);
+
+  h.indexFs.pauseMatcher = undefined;
+  h.indexFs.pauseSignal = undefined;
+  h.indexFs.onPaused = undefined;
+  h.indexFs.pathFailPredicate = () => true;
+  const resumed = await h.runner.step(activationEntry, new AbortController().signal);
+  assert.equal(resumed.type, "complete", "idempotent retry finishes cleanup and receipt progression");
+});
+
 void test("(acceptance guard 4) activation with currentId==baseGenerationId but a changed base manifest (artifact fingerprint mismatch) is treated as superseded, not blindly activated over a moved base", async () => {
   const h = buildHarness();
   await buildGeneration(h.indexFs, "/root", { generationId: 1, embeddingModel: MODEL, dimension: DIM, notes: [makeNote("A.md")] });

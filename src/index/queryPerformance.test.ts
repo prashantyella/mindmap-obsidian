@@ -72,23 +72,34 @@ void test("opt-in 1k/10k full-query benchmark", { skip: process.env.MINDMAP_RUN_
         uncachedMs.push(performance.now() - started);
       }
       const store = new IndexStore(storage, root);
+      const stageMeasurements: Array<{ stage: string; wallMs: number; maxSynchronousSliceMs: number }> = [];
+      const measuredOptions = {
+        ...options,
+        onLoadStage: (stage: { stage: string; wallMs: number; maxSynchronousSliceMs: number }) => stageMeasurements.push(stage),
+        onQueryStage: (stage: { stage: string; wallMs: number; maxSynchronousSliceMs: number }) => stageMeasurements.push(stage),
+      };
       const histogram = monitorEventLoopDelay({ resolution: 1 });
       histogram.enable();
       await new Promise<void>((resolve) => setImmediate(resolve));
       const coldStarted = performance.now();
       const readsBeforeCold = storage instanceof FakeIndexFs ? storage.readFileCalls.length : 0;
-      await store.queryRelated(options);
+      await store.queryRelated(measuredOptions);
       const coldMs = performance.now() - coldStarted;
       const readsAfterCold = storage instanceof FakeIndexFs ? storage.readFileCalls.length : 0;
       const warmMs: number[] = [];
       for (let iteration = 0; iteration < 20; iteration += 1) {
         const started = performance.now();
-        await store.queryRelated(options);
+        await store.queryRelated(measuredOptions);
         warmMs.push(performance.now() - started);
       }
       await new Promise<void>((resolve) => setImmediate(resolve));
       histogram.disable();
       const largestShardCount = 10_000;
+      const stageNames = [...new Set(stageMeasurements.map((stage) => stage.stage))];
+      const stageAverageWallMs = Object.fromEntries(stageNames.map((stageName) => {
+        const matching = stageMeasurements.filter((stage) => stage.stage === stageName);
+        return [stageName, Number((matching.reduce((sum, stage) => sum + stage.wallMs, 0) / matching.length).toFixed(2))];
+      }));
       const output = {
         notes: noteCount,
         chunks: noteCount * chunksPerNote,
@@ -107,6 +118,8 @@ void test("opt-in 1k/10k full-query benchmark", { skip: process.env.MINDMAP_RUN_
         coldFullReads: storage instanceof FakeIndexFs ? readsAfterCold - readsBeforeCold : "see Node timing",
         warmFullReadsPerQuery: storage instanceof FakeIndexFs ? Number(((storage.readFileCalls.length - readsAfterCold) / warmMs.length).toFixed(2)) : "see Node timing",
         providerCalls: 0,
+        stageAverageWallMs,
+        maxMeasuredSynchronousSliceMs: Number(Math.max(0, ...stageMeasurements.map((stage) => stage.maxSynchronousSliceMs)).toFixed(2)),
         runtime: process.version,
         hardware: `${os.cpus()[0]?.model ?? "unknown"}; ${os.cpus().length} logical CPUs; ${Math.round(os.totalmem() / 1024 / 1024 / 1024)} GiB RAM`,
       };

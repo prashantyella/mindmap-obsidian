@@ -355,6 +355,7 @@ export class ProductionEngine {
             queryChunkVectors: embedded.chunkVectors,
             excludePath: selfPath,
             limit: relatedConfig.candidateLimit,
+            signal: this.lifecycleAbort.signal,
           });
           return selectRelatedCandidates(
             candidates.map((c): RelatedCandidateScore => ({ path: c.path, score: c.score })),
@@ -372,7 +373,7 @@ export class ProductionEngine {
       const expectedRelatedVersion = relatedConfig ? PRODUCTION_RELATED_VERSION : undefined;
       const catalogSnapshot = {
         prepareLookup: async (): Promise<(identity: import("./contracts").NoteIdentityV1, sourceHash: string) => boolean> => {
-          const records = await this.indexStore.snapshotCatalog();
+          const records = await this.indexStore.snapshotCatalog(this.lifecycleAbort.signal);
           return buildCatalogPredicate(records, expectedRelatedVersion);
         },
       };
@@ -975,7 +976,7 @@ export class ProductionEngine {
       throw new EngineError("SOURCE_STALE", "queryLiveRelated: the given path does not currently resolve to a note.");
     }
     const projection = projectSource(resolved.identity, resolved.rawContent);
-    const record = await this.indexStore.getRecord(resolved.identity);
+    const record = await this.indexStore.getRecord(resolved.identity, this.lifecycleAbort.signal);
     const indexed = record !== null;
     const stale = !indexed || record.sourceHash !== projection.sourceHash;
 
@@ -997,6 +998,7 @@ export class ProductionEngine {
       queryChunkVectors: embedded.chunkVectors,
       excludePath: canonical,
       limit: config.candidateLimit,
+      signal: this.lifecycleAbort.signal,
     });
     const related = selectRelatedCandidates(
       candidates.map((c): RelatedCandidateScore => ({ path: c.path, score: c.score })),
@@ -1026,7 +1028,7 @@ export class ProductionEngine {
     const embedded = await this.noteEmbeddingSeam.embed(projection, this.lifecycleAbort.signal);
     const boundedLimit = Math.max(1, limit);
     const candidateLimit = Math.max(boundedLimit, this.options.relatedSelectionConfig.candidateLimit);
-    const candidates = await this.indexStore.queryRelated({ queryVector: embedded.noteVector, queryChunkVectors: embedded.chunkVectors, limit: candidateLimit });
+    const candidates = await this.indexStore.queryRelated({ queryVector: embedded.noteVector, queryChunkVectors: embedded.chunkVectors, limit: candidateLimit, signal: this.lifecycleAbort.signal });
     return candidates.slice(0, boundedLimit).map((c) => ({ schemaVersion: 1, path: c.path, score: c.score, kind: "lookup" }));
   }
 

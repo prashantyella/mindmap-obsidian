@@ -16,6 +16,8 @@ import { joinRelative, validateOwnedRelativePath } from "../engine/atomicStore";
  * just "don't decode it once you have the bytes".
  */
 export interface IndexFs extends AtomicStoreFs {
+  /** True only when readFileBytes returns caller-private bytes; codec alignment/exact-backing checks still gate zero-copy views. */
+  readonly readFileBytesReturnsPrivateBuffer?: true;
   /** Idempotent: must succeed (as a no-op) if the directory already exists, and must create any missing parent segments -- callers never need to check existence first. */
   mkdir(dirPath: string): Promise<void>;
   /** Removes an EMPTY directory only -- mirrors real `fs.promises.rmdir`'s non-recursive semantics: must reject if `dirPath` still has any children, and must reject if `dirPath` is not a directory at all. Every recursive removal in this layer (`generationStore.ts`'s `cleanupStaleStaging`) calls this bottom-up, one already-emptied directory at a time -- never given `{ recursive: true }` semantics, and never used as a substitute for `unlink` on a file. */

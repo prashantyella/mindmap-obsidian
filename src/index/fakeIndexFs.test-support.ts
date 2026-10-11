@@ -40,6 +40,7 @@ export type FaultPoint =
   | "statSize";
 
 export class FakeIndexFs implements IndexFs {
+  readonly readFileBytesReturnsPrivateBuffer = true as const;
   files = new Map<string, string>();
   binaryFiles = new Map<string, Uint8Array>();
   dirs = new Set<string>();

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { runCooperativeBlocks, throwIfAborted, yieldWithWindowTimer, type CooperativeWorkOptions } from "./cooperativeWork";
 
 /**
  * Stable, versioned little-endian binary format for a contiguous matrix of
@@ -190,6 +191,136 @@ export function encodeVectorMatrix(matrix: VectorMatrix): Uint8Array {
 export interface DecodeVectorMatrixOptions {
   /** When given, the decoded `kind` must match exactly, or decoding fails closed -- lets a caller assert "this must be a chunk shard" instead of accepting either. */
   expectedKind?: VectorMatrixKind;
+}
+
+export interface VectorCodecStageMeasurement {
+  stage: "snapshot-copy" | "embedded-hash" | "validation-materialization" | "manifest-hash";
+  wallMs: number;
+  maxSynchronousSliceMs: number;
+  yieldCount: number;
+  usedOwnedView?: boolean;
+}
+
+export interface DecodeVectorMatrixCooperativeOptions extends DecodeVectorMatrixOptions, CooperativeWorkOptions {
+  /** Opt-in only for a caller that exclusively owns an exact, private backing allocation. */
+  ownedBufferView?: boolean;
+  /** Distinct whole-artifact checksum from the manifest, bound to the same stable working snapshot as the embedded checksum. */
+  expectedArtifactChecksum?: string;
+  onStage?: (measurement: VectorCodecStageMeasurement) => void;
+}
+
+const IS_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+function parseHeader(bytes: Uint8Array, expectedKind?: VectorMatrixKind): { view: DataView; kind: VectorMatrixKind; dimension: number; count: number; vectorByteLength: number } {
+  if (bytes.length < HEADER_BYTES + CHECKSUM_BYTES) throw new VectorCodecError("buffer is too short to contain even an empty vector matrix.");
+  for (let i = 0; i < MAGIC_BYTES.length; i += 1) {
+    if (bytes[i] !== MAGIC_BYTES[i]) throw new VectorCodecError(`bad magic: expected "${VECTOR_MATRIX_MAGIC}".`);
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const kindByte = view.getUint8(4);
+  const kind = BYTE_TO_KIND[kindByte];
+  if (!kind) throw new VectorCodecError(`unrecognized matrix kind byte: ${kindByte}.`);
+  if (expectedKind && kind !== expectedKind) throw new VectorCodecError(`expected a "${expectedKind}" matrix, got "${kind}".`);
+  if (view.getUint8(5) !== 0) throw new VectorCodecError("reserved header byte must be 0.");
+  const schemaVersion = view.getUint16(6, true);
+  if (schemaVersion !== VECTOR_MATRIX_SCHEMA_VERSION) throw new VectorCodecError(`unsupported schemaVersion ${schemaVersion}; expected ${VECTOR_MATRIX_SCHEMA_VERSION}.`);
+  const dimension = view.getUint32(8, true);
+  const count = view.getUint32(12, true);
+  assertBoundedDimensionAndCount(dimension, count);
+  const expectedLength = encodedMatrixByteLength(dimension, count);
+  if (bytes.length !== expectedLength) {
+    throw new VectorCodecError(bytes.length < expectedLength ? `buffer is truncated: expected ${expectedLength} bytes, got ${bytes.length}.` : `buffer has trailing bytes: expected ${expectedLength} bytes, got ${bytes.length}.`);
+  }
+  return { view, kind, dimension, count, vectorByteLength: count * dimension * BYTES_PER_FLOAT32 };
+}
+
+async function sha256Cooperatively(bytes: Uint8Array, options: CooperativeWorkOptions): Promise<{ digest: Uint8Array; maxSliceMs: number; yieldCount: number }> {
+  const hash = createHash("sha256");
+  const metrics = await runCooperativeBlocks(bytes.length, 64 * 1024, (start, end) => hash.update(bytes.subarray(start, end)), options);
+  throwIfAborted(options.signal);
+  return { digest: new Uint8Array(hash.digest()), ...metrics };
+}
+
+/** Cooperative SHA-256 used for the distinct whole-artifact manifest checksum. */
+export async function checksumHexCooperatively(bytes: Uint8Array, options: CooperativeWorkOptions & { onStage?: DecodeVectorMatrixCooperativeOptions["onStage"] } = {}): Promise<string> {
+  const started = (options.now ?? (() => performance.now()))();
+  const result = await sha256Cooperatively(bytes, options);
+  options.onStage?.({ stage: "manifest-hash", wallMs: (options.now ?? (() => performance.now()))() - started, maxSynchronousSliceMs: result.maxSliceMs, yieldCount: result.yieldCount });
+  return Buffer.from(result.digest).toString("hex");
+}
+
+/** Async validated decoder for privately-owned production buffers; the synchronous decoder remains copy-independent. */
+export async function decodeVectorMatrixCooperatively(bytes: Uint8Array, options: DecodeVectorMatrixCooperativeOptions = {}): Promise<VectorMatrix> {
+  throwIfAborted(options.signal);
+  const now = options.now ?? (() => performance.now());
+  const initial = parseHeader(bytes, options.expectedKind);
+  const canView = options.ownedBufferView === true && IS_LITTLE_ENDIAN && bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength && (bytes.byteOffset + HEADER_BYTES) % BYTES_PER_FLOAT32 === 0;
+  let workingBytes = bytes;
+  if (!canView) {
+    // Bounds/header are validated above before this allocation. The private snapshot is copied
+    // cooperatively, then independently reparsed and checksum-validated; mutation during a yield
+    // can therefore only produce a coherent valid snapshot or a closed validation failure.
+    const snapshot = new Uint8Array(bytes.length);
+    const snapshotStarted = now();
+    const snapshotMetrics = await runCooperativeBlocks(bytes.length, 64 * 1024, (start, end) => snapshot.set(bytes.subarray(start, end), start), options);
+    options.onStage?.({ stage: "snapshot-copy", wallMs: now() - snapshotStarted, maxSynchronousSliceMs: snapshotMetrics.maxSliceMs, yieldCount: snapshotMetrics.yieldCount, usedOwnedView: false });
+    workingBytes = snapshot;
+    await (options.yieldControl ?? yieldWithWindowTimer)(options.signal);
+    throwIfAborted(options.signal);
+  }
+  const { view, kind, dimension, count, vectorByteLength } = canView ? initial : parseHeader(workingBytes, options.expectedKind);
+  const checksumStarted = now();
+  const checksumResult = await sha256Cooperatively(workingBytes.subarray(0, HEADER_BYTES + vectorByteLength), options);
+  options.onStage?.({ stage: "embedded-hash", wallMs: now() - checksumStarted, maxSynchronousSliceMs: checksumResult.maxSliceMs, yieldCount: checksumResult.yieldCount });
+  const declaredChecksum = workingBytes.subarray(HEADER_BYTES + vectorByteLength, HEADER_BYTES + vectorByteLength + CHECKSUM_BYTES);
+  if (!bytesEqual(declaredChecksum, checksumResult.digest)) throw new VectorCodecError("checksum mismatch: the vector matrix bytes have been altered or are corrupt.");
+
+  await (options.yieldControl ?? yieldWithWindowTimer)(options.signal);
+  throwIfAborted(options.signal);
+  if (options.expectedArtifactChecksum !== undefined) {
+    const manifestHashStarted = now();
+    const manifestHash = await sha256Cooperatively(workingBytes, options);
+    options.onStage?.({ stage: "manifest-hash", wallMs: now() - manifestHashStarted, maxSynchronousSliceMs: manifestHash.maxSliceMs, yieldCount: manifestHash.yieldCount });
+    if (Buffer.from(manifestHash.digest).toString("hex") !== options.expectedArtifactChecksum) {
+      throw new VectorCodecError("manifest checksum mismatch: the encoded matrix artifact does not match its manifest.");
+    }
+    await (options.yieldControl ?? yieldWithWindowTimer)(options.signal);
+    throwIfAborted(options.signal);
+  }
+  const snapshotView = !canView && IS_LITTLE_ENDIAN && workingBytes.buffer instanceof ArrayBuffer && workingBytes.byteOffset === 0 && workingBytes.byteLength === workingBytes.buffer.byteLength;
+  const usesView = canView || snapshotView;
+  const data = usesView ? new Float32Array(workingBytes.buffer, HEADER_BYTES, count * dimension) : new Float32Array(count * dimension);
+  const validationStarted = now();
+  let currentRow = -1;
+  let sumSquares = 0;
+  const validation = await runCooperativeBlocks(count * dimension, 4_096, (start, end) => {
+    let flatIndex = start;
+    while (flatIndex < end) {
+      const row = Math.floor(flatIndex / dimension);
+      if (currentRow !== row) {
+        currentRow = row;
+        sumSquares = 0;
+      }
+      const rowStart = row * dimension;
+      const segmentEnd = Math.min(end, rowStart + dimension);
+      for (; flatIndex < segmentEnd; flatIndex += 1) {
+        const value = usesView ? data[flatIndex] : view.getFloat32(HEADER_BYTES + flatIndex * BYTES_PER_FLOAT32, true);
+        if (!Number.isFinite(value)) throw new VectorCodecError(`decoded component at row ${row}, dimension ${flatIndex - rowStart} is not finite (NaN/Infinity).`);
+        if (!usesView) data[flatIndex] = value;
+        sumSquares += value * value;
+      }
+      if (flatIndex === rowStart + dimension) {
+        assertRowIsUnitNormOrZeroCount(sumSquares, row);
+        currentRow = -1;
+      }
+    }
+  }, options);
+  if (currentRow >= 0) assertRowIsUnitNormOrZeroCount(sumSquares, currentRow);
+  throwIfAborted(options.signal);
+  options.onStage?.({ stage: "validation-materialization", wallMs: now() - validationStarted, maxSynchronousSliceMs: validation.maxSliceMs, yieldCount: validation.yieldCount, usedOwnedView: canView });
+  await (options.yieldControl ?? yieldWithWindowTimer)(options.signal);
+  throwIfAborted(options.signal);
+  return { kind, dimension, count, data };
 }
 
 /** Decodes and fully validates a buffer produced by `encodeVectorMatrix`. Every failure mode is a `VectorCodecError`; nothing is ever partially trusted. */
