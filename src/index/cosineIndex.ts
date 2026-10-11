@@ -1,6 +1,9 @@
 import { canonicalizePath, type CanonicalPath } from "../engine/contracts";
 import { isApproximatelyUnitNorm, rowL2Norm, type VectorMatrix } from "./vectorCodec";
 import type { ChunkShardNoteOffset, ScoredNote } from "./vectorTypes";
+import { compareScored, selectTopK } from "./topK";
+
+export { compareScored } from "./topK";
 
 /**
  * Pure, deterministic exact-search core: L2 normalization, cosine scoring
@@ -139,14 +142,6 @@ function assertNormalizedFiniteVector(vector: Float32Array, label: string): void
   }
 }
 
-/** Deterministic tie-break: higher score first; on an exact score tie, ascending canonical path -- stable and reproducible across runs/machines, never dependent on original array/insertion order. Exported so any caller that assembles/merges `ScoredNote[]` from more than one source (e.g. `indexStore.ts` combining lazily-loaded-shard and overlay refinement results) can re-sort with the exact same tie-break `rankNotes`/`refineWithChunks` themselves use. */
-export function compareScored(a: ScoredNote, b: ScoredNote): number {
-  if (a.score !== b.score) return b.score - a.score;
-  if (a.path < b.path) return -1;
-  if (a.path > b.path) return 1;
-  return 0;
-}
-
 export interface RankNotesOptions {
   /** Must already be L2-normalized (see `normalizeVector`); this function does not renormalize it, so it can be called once per query rather than once per candidate row. */
   queryVector: Float32Array;
@@ -191,16 +186,15 @@ export function rankNotes(options: RankNotesOptions): ScoredNote[] {
     seenIds.add(id);
   }
 
-  const scored: ScoredNote[] = [];
-  for (let row = 0; row < matrix.count; row += 1) {
-    const path = ids[row];
-    if (excludePath !== undefined && path === excludePath) continue;
-    const score = dotProduct(queryVector, matrix.data, 0, row * matrix.dimension, matrix.dimension);
-    if (!Number.isFinite(score)) continue;
-    scored.push({ path, score });
+  function* scores(): Generator<ScoredNote> {
+    for (let row = 0; row < matrix.count; row += 1) {
+      const path = ids[row];
+      if (excludePath !== undefined && path === excludePath) continue;
+      const score = dotProduct(queryVector, matrix.data, 0, row * matrix.dimension, matrix.dimension);
+      if (Number.isFinite(score)) yield { path, score };
+    }
   }
-  scored.sort(compareScored);
-  return scored.slice(0, limit);
+  return selectTopK(scores(), limit);
 }
 
 export interface RefineWithChunksOptions {

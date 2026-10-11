@@ -27,6 +27,8 @@ export interface IndexFs extends AtomicStoreFs {
   readFileBytesRange(path: string, offset: number, length: number): Promise<Uint8Array>;
   /** Returns the exact byte length of the file at `path` WITHOUT reading (or allocating for) its contents -- lets a caller reject an oversized file before ever calling `readFileBytes` on it. Must throw if `path` does not exist. */
   statSize(path: string): Promise<number>;
+  /** Optional stable file identity for verified query-generation reuse. Adapters without it always use uncached reads. */
+  statFingerprint?(path: string): Promise<string>;
 }
 
 export class IndexFsError extends Error {

@@ -1,4 +1,5 @@
 import type { IndexFs } from "./indexFs";
+import { createHash } from "node:crypto";
 
 /** A genuinely-missing-path error carrying a REAL typed `.code` (mirrors `NodeJS.ErrnoException`/real `fs` errors) -- callers that need to distinguish "this path just doesn't exist" from "some other failure occurred" (e.g. `migrationStaging.ts`'s `isMissingPathError`) must be able to check `.code`, never parse free-text `.message`. An injected fault (`maybeFail`) deliberately does NOT get a `.code` -- it must never be mistaken for a genuine "missing" condition. */
 function missingPathError(message: string, code: "ENOENT" | "ENOTDIR" = "ENOENT"): NodeJS.ErrnoException {
@@ -219,6 +220,14 @@ export class FakeIndexFs implements IndexFs {
     if (binary !== undefined) return binary.length;
     const text = this.files.get(path);
     if (text !== undefined) return Buffer.byteLength(text, "utf8");
+    throw missingPathError(`ENOENT stat: ${path}`);
+  }
+
+  async statFingerprint(path: string): Promise<string> {
+    const binary = this.binaryFiles.get(path);
+    if (binary !== undefined) return `binary:${binary.length}:${createHash("sha256").update(binary).digest("hex")}`;
+    const text = this.files.get(path);
+    if (text !== undefined) return `text:${Buffer.byteLength(text, "utf8")}:${text}`;
     throw missingPathError(`ENOENT stat: ${path}`);
   }
 

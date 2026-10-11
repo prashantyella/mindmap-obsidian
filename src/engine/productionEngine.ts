@@ -34,9 +34,10 @@ import {
   type VaultFileClasses,
 } from "./productionVaultAdapter";
 import { createProductionNoteEmbeddingSeam, createProductionNoteMetadataSeam } from "./productionProviderSeams";
+import { createCachedLiveEmbeddingSeam, type CachedLiveEmbeddingSeam } from "./liveEmbeddingCache";
+import { LIVE_QUERY_EMBEDDING_CACHE_MAX_BYTES } from "../index/budgets";
 import { selectRelatedCandidates, type RelatedCandidateScore } from "./relatedSelector";
 import type { CanonicalPath, RelatedCandidateKind } from "./contracts";
-import type { NoteEmbeddingSeam } from "../jobs/noteJob";
 import { NoteWriter } from "./noteWriter";
 import { MigrationRunner, MIGRATION_SCOPE_ID } from "../migration/migrationRunner";
 import { MigrationStore } from "../migration/migrationStore";
@@ -272,7 +273,7 @@ export class ProductionEngine {
   /** Reused by `submitNoteForProcessing` -- the SAME `NoteSourceReader` `"process-note"` jobs themselves resolve identities through, never a second, parallel adapter. */
   private readonly noteSourceReader: NoteSourceReader;
   /** Checkpoint 10B SIDEBAR: the SAME strict embedding seam `NoteJobRunner`'s own `"embed"` phase uses -- `null` only when no embedding provider/model/chunkOptions is configured (mirrors `migrationEmbeddingSeam`'s own construction above). `queryLiveRelated`/`queryLookupRelated` throw a closed `JOB_SHAPE_INVALID` rather than silently falling back to a different embedding path when this is `null`. */
-  private readonly noteEmbeddingSeam: NoteEmbeddingSeam | null;
+  private readonly noteEmbeddingSeam: CachedLiveEmbeddingSeam | null;
   /** Checkpoint 10B PENDING: discovery is pure text/hash work (no embedding call), so this is constructed UNCONDITIONALLY -- unlike `noteEmbeddingSeam`, a pending-notes count must stay available even before any provider is configured. Reused by `getPendingCandidates` only; the `"scope-refresh"`/migration runners above keep their own separately-constructed seams unchanged. */
   private readonly pendingDiscoverySeam: import("../jobs/scopeJob").ScopeDiscoverySeam;
 
@@ -311,7 +312,11 @@ export class ProductionEngine {
     this.noteSourceReader = sourceReader;
     this.noteEmbeddingSeam =
       options.embeddingProvider && options.embeddingModel && options.chunkOptions
-        ? createProductionNoteEmbeddingSeam(options.embeddingProvider, options.embeddingModel, options.chunkOptions)
+        ? createCachedLiveEmbeddingSeam(createProductionNoteEmbeddingSeam(options.embeddingProvider, options.embeddingModel, options.chunkOptions), {
+            maxEntries: 256,
+            maxBytes: LIVE_QUERY_EMBEDDING_CACHE_MAX_BYTES,
+            canRetain: (bytes) => this.indexStore.canRetainLiveEmbeddingBytes(bytes),
+          })
         : null;
     this.pendingDiscoverySeam = createProductionScopeDiscoverySeam({ vault: options.vault, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses }, scopeRegistry, options.embeddingModel ?? "");
     // Item 6 (10A blocker pass): "reading-sync"/"scope-refresh" both ultimately ENQUEUE
@@ -1064,6 +1069,8 @@ export class ProductionEngine {
     return this.enqueue(async () => {
       if (this.phase === "disposed") return;
       this.coreScheduler.dispose();
+      this.noteEmbeddingSeam?.clear();
+      this.indexStore.clearQueryCaches();
       this.jobEngine.dispose();
       this.migrationDriver.dispose();
       this.migrationRunner.dispose();

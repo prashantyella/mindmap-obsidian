@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { CanonicalPath, IndexRecordV1, NoteIdentityV1 } from "../engine/contracts";
 import { EngineError } from "../engine/errors";
-import { compareScored, CosineIndexError, dotProduct, MAX_RANKING_LIMIT, normalizeVector } from "./cosineIndex";
+import { CosineIndexError, dotProduct, MAX_RANKING_LIMIT, normalizeVector } from "./cosineIndex";
 import { identityKey, type NoteRowMetadataV1 } from "./generationMetadata";
 import {
   buildGeneration,
@@ -44,6 +44,9 @@ import {
 import { MAX_MANIFEST_CHUNK_COUNT, MAX_MANIFEST_NOTE_COUNT } from "./indexManifest";
 import type { VectorMatrix } from "./vectorCodec";
 import type { ChunkShardNoteOffset, ScoredNote } from "./vectorTypes";
+import { selectTopK } from "./topK";
+import { QueryGenerationCache } from "./queryGenerationCache";
+import { rankCompositeCooperatively } from "./cooperativeRanking";
 
 /**
  * Top-level orchestrator: the merged, searchable "committed view" (base
@@ -125,50 +128,34 @@ function buildShadowInfo(overlays: readonly OverlayPrefixRecord[]): ShadowInfo {
  * however many overlay note vectors are currently pending (bounded by
  * `MAX_PENDING_OVERLAY_COUNT`), never a base-sized duplicate.
  */
-function rankComposite(
+async function rankCompositeAsync(
   generation: LoadedGeneration | null,
   overlays: readonly OverlayPrefixRecord[],
   queryVector: Float32Array,
   excludePath: CanonicalPath | undefined,
   limit: number,
-): ScoredNote[] {
-  if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_RANKING_LIMIT) {
-    throw new IndexStoreError(`limit must be an integer in (0, ${MAX_RANKING_LIMIT}].`);
-  }
+): Promise<ScoredNote[]> {
+  if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_RANKING_LIMIT) throw new IndexStoreError(`limit must be an integer in (0, ${MAX_RANKING_LIMIT}].`);
   const shadow = buildShadowInfo(overlays);
-  const scored: ScoredNote[] = [];
-
+  const baseCount = generation?.noteMetadata.length ?? 0;
   if (generation) {
-    const { noteMatrix, noteMetadata } = generation;
-    if (noteMatrix.data.length !== noteMatrix.count * noteMatrix.dimension) {
-      throw new IndexStoreError("base note matrix shape is invalid (data length does not match count * dimension).");
-    }
-    if (queryVector.length !== noteMatrix.dimension) {
-      throw new IndexStoreError(`queryVector dimension (${queryVector.length}) does not match the base generation's dimension (${noteMatrix.dimension}).`);
-    }
-    noteMetadata.forEach((row, rowIndex) => {
-      const key = identityKey(row.identity);
-      if (shadow.byKey.has(key)) return; // shadowed by an upsert (scored below) or removed by a tombstone
-      const path = row.identity.canonicalPath;
-      if (excludePath !== undefined && path === excludePath) return;
-      const score = dotProduct(queryVector, noteMatrix.data, 0, rowIndex * noteMatrix.dimension, noteMatrix.dimension);
-      if (Number.isFinite(score)) scored.push({ path, score });
-    });
+    if (generation.noteMatrix.data.length !== generation.noteMatrix.count * generation.noteMatrix.dimension) throw new IndexStoreError("base note matrix shape is invalid (data length does not match count * dimension).");
+    if (queryVector.length !== generation.noteMatrix.dimension) throw new IndexStoreError(`queryVector dimension (${queryVector.length}) does not match the base generation's dimension (${generation.noteMatrix.dimension}).`);
   }
-
-  for (const overlay of overlays) {
-    if (overlay.operation !== "upsert" || !overlay.noteVector) continue;
-    if (queryVector.length !== overlay.noteVector.length) {
-      throw new IndexStoreError(`queryVector dimension (${queryVector.length}) does not match overlay note vector dimension (${overlay.noteVector.length}).`);
+  return rankCompositeCooperatively(baseCount + overlays.length, (index) => {
+    if (index < baseCount && generation) {
+      const row = generation.noteMetadata[index];
+      if (shadow.byKey.has(identityKey(row.identity)) || (excludePath !== undefined && row.identity.canonicalPath === excludePath)) return null;
+      const score = dotProduct(queryVector, generation.noteMatrix.data, 0, index * generation.noteMatrix.dimension, generation.noteMatrix.dimension);
+      return Number.isFinite(score) ? { path: row.identity.canonicalPath, score } : null;
     }
-    const path = overlay.identity.canonicalPath;
-    if (excludePath !== undefined && path === excludePath) continue;
+    const overlay = overlays[index - baseCount];
+    if (overlay.operation !== "upsert" || !overlay.noteVector) return null;
+    if (queryVector.length !== overlay.noteVector.length) throw new IndexStoreError(`queryVector dimension (${queryVector.length}) does not match overlay note vector dimension (${overlay.noteVector.length}).`);
+    if (excludePath !== undefined && overlay.identity.canonicalPath === excludePath) return null;
     const score = dotProduct(queryVector, overlay.noteVector, 0, 0, overlay.noteVector.length);
-    if (Number.isFinite(score)) scored.push({ path, score });
-  }
-
-  scored.sort(compareScored);
-  return scored.slice(0, limit);
+    return Number.isFinite(score) ? { path: overlay.identity.canonicalPath, score } : null;
+  }, limit);
 }
 
 /**
@@ -181,10 +168,14 @@ function rankComposite(
 export async function queryRelated(fs: IndexFs, root: string, options: QueryRelatedOptions): Promise<ScoredNote[]> {
   const generationId = await loadCurrentGenerationId(fs, root);
   const generation = generationId === null ? null : await loadGeneration(fs, root, generationId);
+  return queryRelatedWithGeneration(fs, root, generation, options);
+}
+
+async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation: LoadedGeneration | null, options: QueryRelatedOptions): Promise<ScoredNote[]> {
   const overlays = await loadOverlayPrefixesOrThrow(fs, root);
 
   const queryVector = normalizeVector(options.queryVector);
-  const candidates = rankComposite(generation, overlays, queryVector, options.excludePath, options.limit);
+  const candidates = await rankCompositeAsync(generation, overlays, queryVector, options.excludePath, options.limit);
   if (candidates.length === 0) return [];
 
   const queryChunkVectors = options.queryChunkVectors.map((v) => normalizeVector(v));
@@ -254,8 +245,7 @@ export async function queryRelated(fs: IndexFs, root: string, options: QueryRela
     }
   }
 
-  refined.sort(compareScored);
-  return refined.slice(0, options.limit);
+  return selectTopK(refined, options.limit);
 }
 
 /**
@@ -279,6 +269,19 @@ export async function getIndexedRecord(fs: IndexFs, root: string, identity: Note
   const generationId = await loadCurrentGenerationId(fs, root);
   if (generationId === null) return null;
   const generation = await loadGeneration(fs, root, generationId);
+  const row = generation.noteMetadata.find((r) => identityKey(r.identity) === key);
+  return row ?? null;
+}
+
+async function getIndexedRecordWithGeneration(fs: IndexFs, root: string, identity: NoteIdentityV1, generation: LoadedGeneration | null): Promise<IndexRecordV1 | null> {
+  const overlays = await loadOverlayPrefixesOrThrow(fs, root);
+  const key = identityKey(identity);
+  const overlay = overlays.find((o) => identityKey(o.identity) === key);
+  if (overlay) {
+    if (overlay.operation !== "upsert" || overlay.sourceHash === undefined || overlay.embeddingModel === undefined || overlay.chunkCount === undefined) return null;
+    return { schemaVersion: 1, identity: overlay.identity, sourceHash: overlay.sourceHash, embeddingModel: overlay.embeddingModel, chunkCount: overlay.chunkCount, ...(overlay.relatedVersion !== undefined ? { relatedVersion: overlay.relatedVersion } : {}) };
+  }
+  if (generation === null) return null;
   const row = generation.noteMetadata.find((r) => identityKey(r.identity) === key);
   return row ?? null;
 }
@@ -914,21 +917,32 @@ export function runWithIndexMutationLock<T>(fs: IndexFs, root: string, fn: () =>
 
 export class IndexStore {
   private readonly queue: IndexMutationQueue;
+  private readonly queryGenerationCache: QueryGenerationCache;
 
   constructor(
     private readonly fs: IndexFs,
     private readonly root: string,
   ) {
     this.queue = sharedMutationQueueFor(fs, root);
+    this.queryGenerationCache = new QueryGenerationCache(fs, root);
   }
 
-  queryRelated(options: QueryRelatedOptions): Promise<ScoredNote[]> {
-    return queryRelated(this.fs, this.root, options);
+  async queryRelated(options: QueryRelatedOptions): Promise<ScoredNote[]> {
+    return this.queryGenerationCache.run((generation) => queryRelatedWithGeneration(this.fs, this.root, generation, options));
   }
 
   /** Read-only single-identity lookup -- see `getIndexedRecord`'s own doc comment. */
-  getRecord(identity: NoteIdentityV1): Promise<IndexRecordV1 | null> {
-    return getIndexedRecord(this.fs, this.root, identity);
+  async getRecord(identity: NoteIdentityV1): Promise<IndexRecordV1 | null> {
+    return this.queryGenerationCache.run((generation) => getIndexedRecordWithGeneration(this.fs, this.root, identity, generation));
+  }
+
+  /** Conservative combined index/overlay/query-cache budget check; false until a verified base is resident. */
+  canRetainLiveEmbeddingBytes(bytes: number): boolean {
+    return this.queryGenerationCache.canRetainAdditionalBytes(bytes);
+  }
+
+  clearQueryCaches(): void {
+    this.queryGenerationCache.clear();
   }
 
   /** Read-only, fully-verified catalog snapshot -- see `snapshotIndexedCatalog`'s own doc comment. */
@@ -1047,6 +1061,7 @@ export class IndexStore {
    */
   compact(newGenerationId: number, options: { signal?: AbortSignal } = {}): Promise<void> {
     return this.queue.run(async () => {
+      this.queryGenerationCache.clear();
       const plan = await planCompaction(this.fs, this.root);
       const buildInput: BuildGenerationInput = { generationId: newGenerationId, embeddingModel: plan.embeddingModel, dimension: plan.dimension, notes: plan.notes };
       await buildGeneration(this.fs, this.root, buildInput, { signal: options.signal });
@@ -1061,6 +1076,7 @@ export class IndexStore {
       }
 
       await finalizeCompaction(this.fs, this.root, newGenerationId, plan);
+      this.queryGenerationCache.clear();
     });
   }
 

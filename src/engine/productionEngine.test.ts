@@ -743,7 +743,15 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed I
   }, {});
   await switchCurrentGeneration(fs, dataRoot, 1);
 
-  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  let providerCalls = 0;
+  const fixedProvider = fixedVectorEmbeddingProvider(4);
+  const countingProvider: import("./embeddingProvider").EmbeddingProvider = {
+    async embedBatch(request, options) {
+      providerCalls += 1;
+      return fixedProvider.embedBatch(request, options);
+    },
+  };
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: countingProvider as never }) as ProductionEngineOptions);
   await engine.start();
   const result = await engine.queryLiveRelated("Notes/active.md", false);
   assert.equal(result.indexed, true);
@@ -751,6 +759,9 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed I
   assert.equal(result.related.length, 1);
   assert.equal(result.related[0].path, "Notes/other.md");
   assert.equal(result.related[0].kind, "core");
+  const repeated = await engine.queryLiveRelated("Notes/active.md", false);
+  assert.deepEqual(repeated, result);
+  assert.equal(providerCalls, 1, "identical validated live queries reuse one provider result");
   await engine.dispose();
 });
 

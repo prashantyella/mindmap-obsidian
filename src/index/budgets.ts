@@ -16,6 +16,7 @@ import { CHECKSUM_BYTES, encodedMatrixByteLength, HEADER_BYTES } from "./vectorC
 export const BUDGET_STEADY_STATE_MEMORY_BYTES = 128 * 1024 * 1024;
 export const BUDGET_REBUILD_PEAK_MEMORY_BYTES = 512 * 1024 * 1024;
 export const BUDGET_DISK_BYTES = 600 * 1024 * 1024;
+export const LIVE_QUERY_EMBEDDING_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Conservative, explicit allowance for bookkeeping that rides along with
@@ -108,6 +109,9 @@ export function computeCompactionRebuildPeakBytes({ dimension, oldNoteCount, new
     decodedMatrixByteLength(dimension, largestShardCount) + // one old input shard/overlay payload
     decodedMatrixByteLength(dimension, largestShardCount) + // one new output shard, raw
     encodedMatrixByteLength(dimension, largestShardCount) + // one new output shard, encoded
+    decodedMatrixByteLength(dimension, oldNoteCount) + // one concurrent query reader's leased old note matrix
+    decodedMatrixByteLength(dimension, largestShardCount) + // that reader's one lazy refinement shard
+    LIVE_QUERY_EMBEDDING_CACHE_MAX_BYTES * 2 + // retained live embeddings plus one caller-owned clone
     METADATA_ALLOWANCE_BYTES
   );
 }

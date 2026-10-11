@@ -456,6 +456,20 @@ export class NodeOwnedFs implements IndexFs {
     }
     return size;
   }
+
+  async statFingerprint(targetPath: string): Promise<string> {
+    const resolved = this.assertContained(targetPath, "statFingerprint");
+    await this.assertRealPathContained(resolved, "statFingerprint");
+    const handle = await this.openContained(resolved, fs.constants.O_RDONLY, "statFingerprint");
+    try {
+      const stat = await handle.stat({ bigint: true });
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch (error) {
+      throw this.redact(error, "statFingerprint");
+    } finally {
+      await this.closeHandle(handle, "statFingerprint");
+    }
+  }
 }
 
 /**

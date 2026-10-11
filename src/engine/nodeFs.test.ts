@@ -26,6 +26,21 @@ void test("NodeOwnedFs write/read/rename round-trip inside the owned root", asyn
   }
 });
 
+void test("NodeOwnedFs fingerprint changes on same-size replacement", async () => {
+  const root = await makeTempRoot();
+  try {
+    const adapter = new NodeOwnedFs(root);
+    const filePath = path.join(root, "state.json");
+    await adapter.writeFile(filePath, "aaaa");
+    const before = await adapter.statFingerprint(filePath);
+    await adapter.writeFile(filePath, "bbbb");
+    const after = await adapter.statFingerprint(filePath);
+    assert.notEqual(after, before);
+  } finally {
+    await fs.promises.rm(root, { recursive: true, force: true });
+  }
+});
+
 void test("NodeOwnedFs rejects a path that traverses outside the owned root", async () => {
   const root = await makeTempRoot();
   try {
