@@ -15,6 +15,7 @@ export class SidebarRefreshController {
   private indexTimer: unknown = null;
   private lookupGeneration = 0;
   private noteGeneration = 0;
+  private noteTimerGeneration = 0;
   private closed = false;
 
   constructor(
@@ -38,16 +39,18 @@ export class SidebarRefreshController {
   }
 
   scheduleNoteRefresh(): number {
-    if (this.noteTimer !== null) this.timers.clearTimeout(this.noteTimer);
-    const generation = ++this.noteGeneration;
+    this.cancelNoteTimer();
+    const generation = this.noteTimerGeneration;
     this.noteTimer = this.timers.setTimeout(() => {
+      if (this.closed || generation !== this.noteTimerGeneration) return;
       this.noteTimer = null;
-      if (!this.closed && generation === this.noteGeneration) this.callbacks.refreshNote();
+      this.callbacks.refreshNote();
     }, 1_000);
-    return generation;
+    return this.noteGeneration;
   }
 
   invalidateNoteRequest(): number {
+    this.cancelNoteTimer();
     return ++this.noteGeneration;
   }
 
@@ -71,8 +74,6 @@ export class SidebarRefreshController {
     this.closed = true;
     this.invalidateLookup();
     this.invalidateNoteRequest();
-    if (this.noteTimer !== null) this.timers.clearTimeout(this.noteTimer);
-    this.noteTimer = null;
     if (this.indexTimer !== null) this.timers.clearTimeout(this.indexTimer);
     this.indexTimer = null;
   }
@@ -80,5 +81,11 @@ export class SidebarRefreshController {
   private cancelLookupTimer(): void {
     if (this.lookupTimer !== null) this.timers.clearTimeout(this.lookupTimer);
     this.lookupTimer = null;
+  }
+
+  private cancelNoteTimer(): void {
+    this.noteTimerGeneration += 1;
+    if (this.noteTimer !== null) this.timers.clearTimeout(this.noteTimer);
+    this.noteTimer = null;
   }
 }

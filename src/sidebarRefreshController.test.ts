@@ -56,6 +56,80 @@ void test("note edits coalesce at 1000 ms and close cancels all callbacks", () =
   assert.equal(calls, 1);
 });
 
+void test("continuous metadata changes keep the in-flight result current until one queued refresh fires", () => {
+  const timers = new FakeTimers();
+  let refreshes = 0;
+  let refreshedGeneration: number | null = null;
+  const controller = new SidebarRefreshController({
+    runLookup: () => undefined,
+    refreshNote: () => { refreshes += 1; refreshedGeneration = controller.invalidateNoteRequest(); },
+  }, timers);
+  const inFlight = controller.invalidateNoteRequest();
+  controller.scheduleNoteRefresh();
+  timers.advance(700);
+  controller.scheduleNoteRefresh();
+  assert.equal(controller.isCurrentNote(inFlight), true, "rescheduling metadata debounce must not reject the active request");
+  timers.advance(999);
+  assert.equal(refreshes, 0);
+  assert.equal(controller.isCurrentNote(inFlight), true);
+  timers.advance(1);
+  assert.equal(refreshes, 1);
+  assert.equal(controller.isCurrentNote(inFlight), false, "the fired refresh invalidates the prior result");
+  assert.notEqual(refreshedGeneration, null);
+  assert.equal(controller.isCurrentNote(refreshedGeneration!), true);
+});
+
+void test("a stale timer callback cannot fire after reschedule, note switch, or close", () => {
+  class LeakyTimers extends FakeTimers {
+    override clearTimeout(_handle: unknown): void { /* intentionally leaves stale callbacks queued */ }
+  }
+  const timers = new LeakyTimers();
+  let refreshes = 0;
+  const controller = new SidebarRefreshController({ runLookup: () => undefined, refreshNote: () => { refreshes += 1; } }, timers);
+  controller.scheduleNoteRefresh();
+  timers.advance(500);
+  controller.scheduleNoteRefresh();
+  timers.advance(500);
+  assert.equal(refreshes, 0, "the cancelled first timer is rejected by its timer generation");
+  controller.invalidateNoteRequest();
+  timers.advance(500);
+  assert.equal(refreshes, 0, "a note switch cancels the queued refresh");
+  controller.scheduleNoteRefresh();
+  controller.close();
+  timers.advance(1_000);
+  assert.equal(refreshes, 0, "close rejects even a timer backend that delivers cancelled callbacks");
+});
+
+void test("a delivered stale callback cannot clear the newer timer handle", () => {
+  class RecordingLeakyTimers extends FakeTimers {
+    cleared: number[] = [];
+    override clearTimeout(handle: unknown): void { this.cleared.push(handle as number); }
+  }
+  const timers = new RecordingLeakyTimers();
+  const controller = new SidebarRefreshController({ runLookup: () => undefined, refreshNote: () => undefined }, timers);
+  const requestGeneration = controller.invalidateNoteRequest();
+  assert.equal(controller.scheduleNoteRefresh(), requestGeneration, "schedule preserves the current request-token return contract");
+  const staleCallback = timers.tasks.get(1)!.callback;
+  controller.scheduleNoteRefresh();
+  assert.equal(timers.next, 2);
+  staleCallback();
+  controller.close();
+  assert.equal(timers.cleared.includes(2), true, "close must still cancel the newer live timer handle");
+});
+
+void test("a fired refresh targets the current path, not the path active when it was scheduled", () => {
+  const timers = new FakeTimers();
+  let currentPath = "Before.md";
+  const refreshed: string[] = [];
+  const controller = new SidebarRefreshController({ runLookup: () => undefined, refreshNote: () => { controller.invalidateNoteRequest(); refreshed.push(currentPath); } }, timers);
+  const oldRequest = controller.invalidateNoteRequest();
+  controller.scheduleNoteRefresh();
+  currentPath = "Current.md";
+  timers.advance(1_000);
+  assert.deepEqual(refreshed, ["Current.md"]);
+  assert.equal(controller.isCurrentNote(oldRequest), false);
+});
+
 void test("global index revisions coalesce for one refresh and close cancels the burst", () => {
   const timers = new FakeTimers();
   let refreshes = 0;
