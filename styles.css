@@ -25,6 +25,69 @@
   line-height: 1.4;
 }
 
+.mindmap-settings {
+  container-type: inline-size;
+}
+
+.mindmap-readiness {
+  margin-bottom: 8px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mindmap-settings-section {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mindmap-settings-section > summary {
+  display: flex;
+  min-height: 52px;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.mindmap-settings-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.mindmap-settings-section > summary:focus-visible {
+  border-radius: var(--radius-s);
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.mindmap-settings-section-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.mindmap-settings-section-copy > span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mindmap-settings-edit {
+  color: var(--text-accent);
+  font-size: var(--font-ui-small);
+}
+
+.mindmap-settings-section-body {
+  padding: 0 0 16px 16px;
+}
+
+.mindmap-field-error {
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+}
+
 .callout[data-callout="mindmap"] {
   margin: 0.8rem 0 0;
   border-radius: 10px;
@@ -618,7 +681,7 @@
 }
 
 .mindmap-scope-manager {
-  margin-top: 12px;
+  margin-top: 4px;
 }
 
 .mindmap-scope-summary-grid {
@@ -628,10 +691,35 @@
 }
 
 .mindmap-scope-summary {
-  padding: 10px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  background: var(--background-secondary);
+  display: grid;
+  gap: 6px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+}
+
+.mindmap-scope-summary-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.3fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.mindmap-scope-summary-row > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mindmap-scope-separate {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.mindmap-scope-separate .mindmap-muted {
+  grid-column: 2;
 }
 
 .mindmap-scope-chip-row {
@@ -691,6 +779,34 @@
   margin: 12px 0 8px;
 }
 
+.mindmap-folder-actions {
+  position: relative;
+}
+
+.mindmap-folder-actions > summary {
+  min-height: var(--input-height);
+  padding: 4px 10px;
+  border-radius: var(--button-radius);
+  background: var(--interactive-normal);
+  box-shadow: var(--input-shadow);
+  cursor: pointer;
+  list-style: none;
+}
+
+.mindmap-folder-actions-menu {
+  position: absolute;
+  z-index: var(--layer-menu);
+  display: grid;
+  min-width: 150px;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+}
+
 .mindmap-scope-search {
   min-width: 220px;
   flex: 1 1 260px;
@@ -705,9 +821,14 @@
 .mindmap-folder-tree-header,
 .mindmap-folder-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 86px 86px;
+  grid-template-columns: minmax(0, 1fr) 86px;
   gap: 8px;
   align-items: center;
+}
+
+.mindmap-folder-tree-header.is-separated,
+.mindmap-folder-row.is-separated {
+  grid-template-columns: minmax(0, 1fr) 86px 86px;
 }
 
 .mindmap-folder-tree-header {
@@ -892,6 +1013,11 @@
 
   .mindmap-folder-tree-header,
   .mindmap-folder-row {
+    grid-template-columns: minmax(0, 1fr) 64px;
+  }
+
+  .mindmap-folder-tree-header.is-separated,
+  .mindmap-folder-row.is-separated {
     grid-template-columns: minmax(0, 1fr) 64px 64px;
   }
 }

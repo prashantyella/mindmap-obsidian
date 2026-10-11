@@ -61,3 +61,11 @@ void test("precedence: engine availability beats scope completeness", () => {
   const engineWins = buildOverviewState(input({ productionEngineAvailable: false, scopeComplete: false }));
   assert.equal(engineWins.message, "The Mindmap TypeScript engine is not available. Open Troubleshooting for details.");
 });
+
+void test("a replacement provider preflight invalidates an older ready overview", () => {
+  const before = buildOverviewState(input({ preflightOk: true }));
+  const afterUnavailableProvider = buildOverviewState(input({ preflightOk: false }));
+  assert.equal(before.ready, true);
+  assert.equal(afterUnavailableProvider.ready, false);
+  assert.match(afterUnavailableProvider.message, /Preflight checks failed/);
+});

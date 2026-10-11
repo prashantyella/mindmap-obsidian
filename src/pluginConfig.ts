@@ -35,6 +35,24 @@ export interface LlmProviderConfigStatus {
   guidance: string;
 }
 
+export interface LocalAiConfig {
+  embedBaseUrl: string;
+  embedModel: string;
+  embedDimension: number;
+  llmBaseUrl: string;
+  llmModel: string;
+  llmMaxTokens: number;
+}
+
+export function saveLocalAiConfig(settings: MindmapSettings, config: LocalAiConfig): void {
+  settings.embedBaseUrl = config.embedBaseUrl.trim();
+  settings.embedModel = config.embedModel.trim();
+  settings.embedDimension = Number.isFinite(config.embedDimension) && config.embedDimension >= 0 ? Math.trunc(config.embedDimension) : settings.embedDimension;
+  settings.llmBaseUrl = config.llmBaseUrl.trim();
+  settings.llmModel = config.llmModel.trim();
+  settings.llmMaxTokens = Number.isFinite(config.llmMaxTokens) && config.llmMaxTokens > 0 ? Math.trunc(config.llmMaxTokens) : settings.llmMaxTokens;
+}
+
 /** Ollama-only (Checkpoint 11: the TypeScript engine's local metadata provider is Ollama-only -- see `ProductionEngine`'s own composition -- so this surface no longer models a provider choice, API key, or "thinking" toggle at all). */
 export function getLlmProviderConfigStatus(settings: MindmapSettings): LlmProviderConfigStatus {
   return {

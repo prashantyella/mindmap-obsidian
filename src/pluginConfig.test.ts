@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { getLlmProviderConfigStatus, getScopeSetupStatus, saveLlmProviderConfig, saveScopeSetup } from "./pluginConfig";
+import { getLlmProviderConfigStatus, getScopeSetupStatus, saveLlmProviderConfig, saveLocalAiConfig, saveScopeSetup } from "./pluginConfig";
 import { DEFAULT_SETTINGS, type MindmapSettings } from "./settings";
 
 function freshSettings(): MindmapSettings {
@@ -29,6 +29,17 @@ void test("saveLlmProviderConfig trims baseUrl/model and only updates maxTokens 
 
   saveLlmProviderConfig(settings, { maxTokens: -1 });
   assert.equal(settings.llmMaxTokens, 2048, "an invalid maxTokens must never overwrite the last good value");
+});
+
+void test("saveLocalAiConfig preserves separate endpoints and a custom embedding dimension", () => {
+  const settings = freshSettings();
+  saveLocalAiConfig(settings, {
+    embedBaseUrl: " http://embed ", embedModel: " custom-embed ", embedDimension: 1536,
+    llmBaseUrl: " http://metadata ", llmModel: " local-model ", llmMaxTokens: 2048,
+  });
+  assert.equal(settings.embedBaseUrl, "http://embed");
+  assert.equal(settings.llmBaseUrl, "http://metadata");
+  assert.equal(settings.embedDimension, 1536);
 });
 
 void test("getScopeSetupStatus/saveScopeSetup round-trip through settings, normalizing and validating", () => {

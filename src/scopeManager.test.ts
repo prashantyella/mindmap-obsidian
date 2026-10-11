@@ -3,34 +3,29 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-// scopeManager.ts imports the "obsidian" module, which in this repo is
-// types-only (no runtime implementation), so it cannot be imported directly
-// in a Node test -- this audits the source text instead, the same approach
-// used for settingsTab.ts.
 const SOURCE = fs.readFileSync(path.join(__dirname, "scopeManager.ts"), "utf8");
 
-void test("healthy (complete) scope guidance is never rendered: renderSummary only renders guidance when the draft is incomplete", () => {
-  const renderCall = SOURCE.match(/this\.renderSummary\(([^)]*)\);/);
-  assert.ok(renderCall, "expected a this.renderSummary(...) call in render()");
-  assert.match(renderCall![1], /draftComplete \? null : status\.guidance/);
-
-  const renderSummaryBody = SOURCE.slice(SOURCE.indexOf("private renderSummary("));
-  assert.match(renderSummaryBody, /if \(guidance\)/, "guidance div must be conditionally rendered");
+void test("ScopeManager accepts stable external editor state and preserves distinct saved lists", () => {
+  assert.match(SOURCE, /state\?: ScopeEditorState/);
+  assert.match(SOURCE, /separateQuickRun: !samePaths/);
+  assert.match(SOURCE, /draft: cloneSelection\(status\)/);
 });
 
-void test("scope completeness for the guidance decision is computed from the live draft, not just the last-saved status", () => {
-  assert.match(SOURCE, /isScopeSetupComplete\(this\.draft\)/);
+void test("search stays mounted while only the folder tree rerenders", () => {
+  const inputHandler = SOURCE.slice(SOURCE.indexOf('search.addEventListener("input"'), SOURCE.indexOf("const actions"));
+  assert.match(inputHandler, /this\.renderTree\(\)/);
+  assert.doesNotMatch(inputHandler, /this\.render\(\)/);
 });
 
-void test("Current/All chips render exactly once via renderScopeSummary, and exactly one Save action exists", () => {
-  const renderSummaryBody = SOURCE.slice(SOURCE.indexOf("private renderSummary("), SOURCE.indexOf("private renderScopeSummary("));
-  const chipCalls = renderSummaryBody.match(/this\.renderScopeSummary\(/g) ?? [];
-  assert.equal(chipCalls.length, 2, "expected exactly one Current and one All renderScopeSummary call");
-
-  const saveButtonCalls = SOURCE.match(/createButton\(toolbar, "Save"/g) ?? [];
-  assert.equal(saveButtonCalls.length, 1, "expected exactly one Save action");
+void test("bulk actions are disclosed and save, reset, and clear stay local", () => {
+  assert.match(SOURCE, /createEl\("details", \{ cls: "mindmap-folder-actions" \}\)/);
+  assert.match(SOURCE, /"Clear"/);
+  assert.match(SOURCE, /"Reset"/);
+  assert.match(SOURCE, /"Save folders"/);
 });
 
-void test("no unconditional 'Scope folders are configured' style sentence is ever created directly in ScopeManager", () => {
-  assert.doesNotMatch(SOURCE, /createDiv\(\{\s*cls:\s*"mindmap-scope-guidance",\s*text:\s*"[^"]*configured/i);
+void test("failed Save retains the draft for retry", () => {
+  const save = SOURCE.slice(SOURCE.indexOf("private async save"), SOURCE.indexOf("private renderSummary"));
+  assert.match(save, /catch \(error\)/);
+  assert.doesNotMatch(save.slice(save.indexOf("catch")), /this\.state\.draft\s*=/);
 });
