@@ -678,7 +678,7 @@ export class MindmapWorkspaceView extends ItemView {
     const heatmap = container.createDiv({ cls: "mindmap-heatmap" });
     const svg = heatmap.createSvg("svg", {
       cls: "mindmap-heatmap-chart",
-      attr: { viewBox: "0 0 320 300", role: "img", "aria-label": "Mindmap connection graph for related notes" },
+      attr: { viewBox: "0 0 320 300", preserveAspectRatio: "none", role: "img", "aria-label": "Mindmap connection graph for related notes" },
     });
     const tooltip = heatmap.createDiv({ cls: "mindmap-heatmap-tooltip" });
 
