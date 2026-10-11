@@ -672,6 +672,7 @@ async function verifyGenerationIntegrity(
         score: dotProduct(sampleQueryVector as Float32Array, noteMatrix.data, 0, row * noteMatrix.dimension, noteMatrix.dimension),
       }), Math.min(10, noteMatrix.count), { signal: options.signal, yieldAfterMs: 4 });
     } catch (error) {
+      if (options.signal?.aborted) throw options.signal.reason ?? error;
       throw new GenerationStoreError(`sample rankNotes query failed against the staged generation: ${error instanceof Error ? error.message : String(error)}`);
     }
   }

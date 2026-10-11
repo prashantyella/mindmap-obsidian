@@ -404,6 +404,63 @@ void test("dispose() resolves immediately even while a runner hangs indefinitely
   void store;
 });
 
+void test("stop gates explicit runOnce/drain without writes and start reenables them", async () => {
+  const runner = new ScriptedRunner(linearAdvanceScript("process-note"));
+  const { engine, store } = makeEngine({ "process-note": runner });
+  const job = await engine.submit({ trigger: "manual", kind: "process-note", identity: noteIdentity("Notes/stopped.md"), sourceHash: "a".repeat(64), embeddingModel: "m1", pipelineVersion: 1 });
+  engine.stop();
+  assert.equal(await engine.runOnce(), "idle");
+  await engine.drain();
+  const stopped = await store.getById(job.job.jobId);
+  assert.equal(stopped?.status, "queued");
+  assert.equal(stopped?.attempt, 0);
+  assert.equal(runner.calls.length, 0);
+
+  engine.start();
+  await engine.drain();
+  assert.equal((await store.getById(job.job.jobId))?.status, "completed");
+  assert.ok(runner.calls.length > 0);
+  engine.stop();
+});
+
+void test("explicit work queued before stop cannot begin, and whenSettled stays safe against later explicit calls", async () => {
+  let release!: () => void;
+  let markStarted!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const calls: string[] = [];
+  const runner: JobPhaseRunner = {
+    async step(job) {
+      calls.push(job.job.phase);
+      markStarted();
+      await gate;
+      return linearAdvanceScript("process-note")(job);
+    },
+  };
+  const { engine, store } = makeEngine({ "process-note": runner });
+  const job = await engine.submit({ trigger: "manual", kind: "process-note", identity: noteIdentity("Notes/queued-before-stop.md"), sourceHash: "a".repeat(64), embeddingModel: "m1", pipelineVersion: 1 });
+  const inFlight = engine.runOnce();
+  await started;
+  const queuedBeforeStop = engine.runOnce();
+  engine.stop();
+  const settled = engine.whenSettled();
+  const afterStop = Promise.all([engine.runOnce(), engine.drain()]);
+  release();
+  assert.equal(await inFlight, "processed", "the already-running phase may finish and commit");
+  assert.equal(await queuedBeforeStop, "idle", "queued explicit work must recheck the stop gate inside the exclusive lane");
+  await settled;
+  await afterStop;
+  assert.deepEqual(calls, ["discover"], "no new phase starts after stop, including calls racing after whenSettled capture");
+  const paused = await store.getById(job.job.jobId);
+  assert.equal(paused?.status, "queued");
+  assert.equal(paused?.job.phase, "embed");
+
+  engine.start();
+  await engine.drain();
+  assert.equal((await store.getById(job.job.jobId))?.status, "completed");
+  engine.stop();
+});
+
 void test("(requirement 15) runner.forget(jobId) is called exactly once on every terminal outcome -- completed, failed, and cancelled -- and never for a still-active/queued job", async () => {
   const forgotten: string[] = [];
   const makeRunner = (script: (job: PersistedJobV1) => PhaseStepOutcome) => ({

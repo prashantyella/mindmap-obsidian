@@ -194,6 +194,10 @@ export interface JobEngineFault {
 
 export class JobEngine {
   private running = false;
+  /** Explicit dispatch starts enabled for headless/tests, closes on stop/dispose, and reopens on a successful start. */
+  private explicitDispatchAccepted = true;
+  /** Invalidates explicit calls queued before the latest stop/dispose even if a later start reopens dispatch. */
+  private explicitDispatchGeneration = 0;
   private disposed = false;
   private pumping: Promise<void> | null = null;
   /** Count of explicit `runOnce()`/`drain()` calls currently in flight (incremented on entry, decremented in a `finally`, before/after routing through `runExclusive`) -- tracked SEPARATELY from `pumping` (Checkpoint 7 last-contract guard 4) so `resetFault()` refuses while EITHER dispatch path is active, not just the background pump. A counter, not a boolean: `drain()`/`runOnce()` can be called concurrently by more than one caller (they simply queue behind each other on `dispatchTail`), and each must keep the guard up until its OWN call resolves. */
@@ -461,6 +465,7 @@ export class JobEngine {
    */
   start(): void {
     if (this.disposed || this.fault) return;
+    this.explicitDispatchAccepted = true;
     this.running = true;
     this.kick();
     void this.emitActivity();
@@ -469,6 +474,8 @@ export class JobEngine {
   /** Stops kicking new work; does not interrupt an in-flight phase-step. Idempotent. */
   stop(): void {
     this.running = false;
+    if (this.explicitDispatchAccepted) this.explicitDispatchGeneration += 1;
+    this.explicitDispatchAccepted = false;
     void this.emitActivity();
   }
 
@@ -515,7 +522,7 @@ export class JobEngine {
       if (!this.running || this.disposed) return;
       let outcome: JobDispatchOutcome;
       try {
-        outcome = await this.runOnceInner();
+        outcome = await this.runOnceInner(() => this.running && !this.disposed);
       } catch (error) {
         const fault: JobEngineFault = { code: toFailureCode(error), atMs: this.clock.now() };
         this.fault = fault;
@@ -544,17 +551,21 @@ export class JobEngine {
    * observe/handle a thrown rejection).
    */
   async runOnce(): Promise<JobDispatchOutcome> {
-    if (this.disposed) return "idle";
+    if (this.disposed || !this.explicitDispatchAccepted) return "idle";
+    const acceptedGeneration = this.explicitDispatchGeneration;
     this.explicitDispatchCount += 1;
     try {
-      return await this.runExclusive(() => this.runOnceInner());
+      return await this.runExclusive(async () => {
+        if (!this.explicitDispatchAccepted || this.disposed || acceptedGeneration !== this.explicitDispatchGeneration) return "idle";
+        return this.runOnceInner(() => this.explicitDispatchAccepted && !this.disposed && acceptedGeneration === this.explicitDispatchGeneration);
+      });
     } finally {
       this.explicitDispatchCount -= 1;
     }
   }
 
-  private async runOnceInner(): Promise<JobDispatchOutcome> {
-    if (this.disposed) return "idle";
+  private async runOnceInner(acceptsNewPhase: () => boolean = () => !this.disposed): Promise<JobDispatchOutcome> {
+    if (!acceptsNewPhase()) return "idle";
     const jobs = await this.store.list();
     const pause = await this.store.getProviderPause();
     this.storeOperatorPaused = (await this.store.getOperatorPause()).active;
@@ -563,6 +574,9 @@ export class JobEngine {
     if (!eligible) return "idle";
     this.storeOperatorPaused = (await this.store.getOperatorPause()).active;
     if (this.storeOperatorPaused) { await this.emitActivity(); return "idle"; }
+    // Discovery above awaits several store reads. Recheck the dispatch gate immediately before
+    // changing durable job state or starting a runner phase so stop()/dispose() wins that race.
+    if (!acceptsNewPhase()) return "idle";
     await this.runPhaseStep(eligible);
     await this.emitActivity();
     return "processed";
@@ -587,12 +601,13 @@ export class JobEngine {
    * nothing eligible and returns immediately once it gets its turn.
    */
   async drain(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || !this.explicitDispatchAccepted) return;
+    const acceptedGeneration = this.explicitDispatchGeneration;
     this.explicitDispatchCount += 1;
     try {
       await this.runExclusive(async () => {
-        while (!this.disposed) {
-          const outcome = await this.runOnceInner();
+        while (!this.disposed && this.explicitDispatchAccepted && acceptedGeneration === this.explicitDispatchGeneration) {
+          const outcome = await this.runOnceInner(() => this.explicitDispatchAccepted && !this.disposed && acceptedGeneration === this.explicitDispatchGeneration);
           if (outcome === "idle") break;
         }
       });
@@ -615,6 +630,8 @@ export class JobEngine {
     if (this.disposed) return;
     this.disposed = true;
     this.running = false;
+    this.explicitDispatchAccepted = false;
+    this.explicitDispatchGeneration += 1;
     this.abortController.abort();
     this.deferredJobIds.clear();
     void this.emitActivity();

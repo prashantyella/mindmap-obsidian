@@ -326,6 +326,34 @@ void test("full cooperative verification cancellation preserves the active point
   assert.equal(await loadCurrentGenerationId(fs, "/root"), 2029);
 });
 
+void test("abort during sample ranking preserves AbortError identity and never switches the pointer", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2030);
+  await buildGeneration(fs, "/root", buildInput([makeNote("Old.md", 1, random)], 2030));
+  await switchCurrentGeneration(fs, "/root", 2030);
+  await buildGeneration(fs, "/root", buildInput([makeNote("New.md", 1, random)], 2031));
+  const abortReason = new DOMException("sample ranking aborted", "AbortError");
+  let rankingAborted = false;
+  const rankingSignal = {
+    get aborted() {
+      if (new Error().stack?.includes("rankCompositeCooperatively")) rankingAborted = true;
+      return rankingAborted;
+    },
+    reason: abortReason,
+    onabort: null,
+    addEventListener() { /* ranking observes the aborted getter before registering a timer */ },
+    removeEventListener() { /* no listener is registered in this deterministic abort path */ },
+    dispatchEvent() { return true; },
+    throwIfAborted() { if (this.aborted) throw abortReason; },
+  } as AbortSignal;
+  await assert.rejects(
+    () => switchCurrentGeneration(fs, "/root", 2031, { signal: rankingSignal }),
+    (error: unknown) => error === abortReason,
+  );
+  assert.equal(await loadCurrentGenerationId(fs, "/root"), 2030);
+  assert.equal(await loadGeneration(fs, "/root", 2031).then((generation) => generation.manifest.generationId), 2031, "target generation remains complete but uncommitted");
+});
+
 void test("buildGeneration rejects a note with more chunks than fit in a single shard", async () => {
   const fs = new FakeIndexFs();
   const random = seededRandom(22);
