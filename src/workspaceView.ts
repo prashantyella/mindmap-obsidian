@@ -669,7 +669,7 @@ export class MindmapWorkspaceView extends ItemView {
   private renderHeatmapDisclosure(container: HTMLElement, candidates: RelatedCandidate[]): void {
     const disclosure = container.createEl("details", { cls: "mindmap-heatmap-disclosure" });
     disclosure.open = this.viewState.heatmapOpen;
-    disclosure.createEl("summary", { text: "Connection signals" });
+    disclosure.createEl("summary", { text: "Connection graph" });
     disclosure.addEventListener("toggle", () => { this.viewState = { ...this.viewState, heatmapOpen: disclosure.open }; });
     this.renderHeatmap(disclosure, candidates);
   }
@@ -678,7 +678,7 @@ export class MindmapWorkspaceView extends ItemView {
     const heatmap = container.createDiv({ cls: "mindmap-heatmap" });
     const svg = heatmap.createSvg("svg", {
       cls: "mindmap-heatmap-chart",
-      attr: { viewBox: "0 0 320 300", role: "img", "aria-label": "Mindmap relevance signals for related notes" },
+      attr: { viewBox: "0 0 320 300", role: "img", "aria-label": "Mindmap connection graph for related notes" },
     });
     const tooltip = heatmap.createDiv({ cls: "mindmap-heatmap-tooltip" });
 
