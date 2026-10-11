@@ -33,6 +33,10 @@ export function rememberExpandedPath(state: MindmapViewState, notePath: string, 
   return { ...state, expandedByNote: Object.fromEntries(entries.slice(-100)) };
 }
 
+export function getIndexRefreshTargets(activePath: string | null, lookupQuery: string): { live: boolean; lookup: boolean } {
+  return { live: activePath !== null, lookup: lookupQuery.trim().length > 0 };
+}
+
 export function createIdleLiveState(path: string, response: LiveRelatedResponse | null = null): SidebarLiveState {
   return {
     path,

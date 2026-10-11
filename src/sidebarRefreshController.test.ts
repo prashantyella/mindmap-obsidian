@@ -55,3 +55,20 @@ void test("note edits coalesce at 1000 ms and close cancels all callbacks", () =
   timers.advance(2_000);
   assert.equal(calls, 1);
 });
+
+void test("global index revisions coalesce for one refresh and close cancels the burst", () => {
+  const timers = new FakeTimers();
+  let refreshes = 0;
+  const controller = new SidebarRefreshController({ runLookup: () => undefined, refreshNote: () => undefined, refreshIndex: () => { refreshes += 1; } }, timers);
+  controller.scheduleIndexRefresh();
+  timers.advance(600);
+  controller.scheduleIndexRefresh();
+  timers.advance(999);
+  assert.equal(refreshes, 0);
+  timers.advance(1);
+  assert.equal(refreshes, 1);
+  controller.scheduleIndexRefresh();
+  controller.close();
+  timers.advance(1_000);
+  assert.equal(refreshes, 1);
+});

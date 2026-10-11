@@ -8,6 +8,7 @@ import {
   createLoadingLiveState,
   createReadyLiveState,
   getDisplayLiveRelated,
+  getIndexRefreshTargets,
   NO_MINDMAP_CONNECTIONS_MESSAGE,
   NO_MINDMAP_CONNECTIONS_TITLE,
   shouldApplyLiveResponse,
@@ -235,6 +236,7 @@ export class MindmapWorkspaceView extends ItemView {
   private readonly refreshController = new SidebarRefreshController({
     runLookup: () => this.runLookupQuery(),
     refreshNote: () => this.refreshActiveNoteQuery(),
+    refreshIndex: () => this.refreshIndexQueries(),
   });
   private lookupState: LookupState = {
     query: "",
@@ -278,10 +280,7 @@ export class MindmapWorkspaceView extends ItemView {
       subscribeIndexChanges?: (listener: (change: { revision: number; paths?: readonly string[] }) => void) => () => void;
     }).subscribeIndexChanges;
     if (subscribeIndexChanges) {
-      this.register(subscribeIndexChanges.call(this.plugin, (change) => {
-        if (change.paths && this.activePath && !change.paths.includes(this.activePath)) return;
-        this.refreshActiveNoteQuery();
-      }));
+      this.register(subscribeIndexChanges.call(this.plugin, () => this.refreshController.scheduleIndexRefresh()));
     }
     this.render();
   }
@@ -622,6 +621,20 @@ export class MindmapWorkspaceView extends ItemView {
     if (!this.activePath) return;
     this.liveRequestId += 1;
     this.liveState = createIdleLiveState(this.activePath, this.liveState.response);
+    this.render();
+  }
+
+  private refreshIndexQueries(): void {
+    const targets = getIndexRefreshTargets(this.activePath, this.lookupState.query);
+    if (targets.live && this.activePath) {
+      this.liveRequestId += 1;
+      this.liveState = createIdleLiveState(this.activePath, this.liveState.response);
+    }
+    if (targets.lookup) {
+      this.lookupRequestId += 1;
+      this.runLookupQuery();
+      return;
+    }
     this.render();
   }
 

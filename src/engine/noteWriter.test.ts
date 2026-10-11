@@ -12,9 +12,11 @@ class FakeVault implements NoteVaultAdapter {
   writeCount = 0;
   readCount = 0;
   failNextWrite = false;
+  beforeReadReturn: (() => Promise<void>) | null = null;
 
   async read(path: string): Promise<string | null> {
     this.readCount += 1;
+    await this.beforeReadReturn?.();
     return this.files.get(path) ?? null;
   }
 
@@ -153,6 +155,34 @@ void test("writeMetadata rejects a stale source (user-authored content changed s
     (error: unknown) => isEngineError(error) && error.code === "SOURCE_STALE",
   );
   assert.equal(vault.writeCount, 0);
+});
+
+void test("writeMetadata defers when editing protection activates during its awaited source read", async () => {
+  const vault = new FakeVault();
+  const path = canonicalizePath("Notes/Example.md");
+  const raw = "---\ntitle: Example\n---\nBody.\n";
+  const identity = identityFor(path);
+  vault.files.set(path, raw);
+  let protectedNow = false;
+  vault.beforeReadReturn = async () => {
+    await Promise.resolve();
+    protectedNow = true;
+  };
+
+  const result = await new NoteWriter(vault).writeMetadata({
+    identity,
+    path,
+    expectedSourceHash: projectSource(identity, raw).sourceHash,
+    metadata: metadataFor({ identity }),
+    isAppleAnnotation: false,
+    writeMindmapSection: false,
+    removeMindmapSection: false,
+    shouldDeferCommit: () => protectedNow,
+  });
+
+  assert.equal(result.status, "deferred");
+  assert.equal(vault.writeCount, 0);
+  assert.equal(vault.files.get(path), raw);
 });
 
 void test("writeMetadata does not treat Mindmap's own prior managed-output write as stale", async () => {

@@ -12,12 +12,13 @@ const browserTimers: SidebarRefreshTimers = {
 export class SidebarRefreshController {
   private lookupTimer: unknown | null = null;
   private noteTimer: unknown | null = null;
+  private indexTimer: unknown | null = null;
   private lookupGeneration = 0;
   private noteGeneration = 0;
   private closed = false;
 
   constructor(
-    private readonly callbacks: { runLookup(): void; refreshNote(): void },
+    private readonly callbacks: { runLookup(): void; refreshNote(): void; refreshIndex?(): void },
     private readonly timers: SidebarRefreshTimers = browserTimers,
   ) {}
 
@@ -50,6 +51,14 @@ export class SidebarRefreshController {
     return ++this.noteGeneration;
   }
 
+  scheduleIndexRefresh(): void {
+    if (this.indexTimer !== null) this.timers.clearTimeout(this.indexTimer);
+    this.indexTimer = this.timers.setTimeout(() => {
+      this.indexTimer = null;
+      if (!this.closed) this.callbacks.refreshIndex?.();
+    }, 1_000);
+  }
+
   isCurrentLookup(generation: number): boolean {
     return !this.closed && generation === this.lookupGeneration;
   }
@@ -64,6 +73,8 @@ export class SidebarRefreshController {
     this.invalidateNoteRequest();
     if (this.noteTimer !== null) this.timers.clearTimeout(this.noteTimer);
     this.noteTimer = null;
+    if (this.indexTimer !== null) this.timers.clearTimeout(this.indexTimer);
+    this.indexTimer = null;
   }
 
   private cancelLookupTimer(): void {

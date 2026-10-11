@@ -10,6 +10,7 @@ import {
   createLoadingLiveState,
   createReadyLiveState,
   getDisplayLiveRelated,
+  getIndexRefreshTargets,
   NO_MINDMAP_CONNECTIONS_MESSAGE,
   normalizeMindmapViewState,
   rememberExpandedPath,
@@ -17,6 +18,12 @@ import {
   shouldSkipLiveQuery,
   type SidebarLiveState,
 } from "./workspaceViewState";
+
+void test("any committed index revision refreshes both active-note and current lookup results", () => {
+  assert.deepEqual(getIndexRefreshTargets("Active.md", "semantic question"), { live: true, lookup: true });
+  assert.deepEqual(getIndexRefreshTargets("Active.md", "  "), { live: true, lookup: false });
+  assert.deepEqual(getIndexRefreshTargets(null, "semantic question"), { live: false, lookup: true });
+});
 
 void test("view state restores heatmap and bounds per-note expansion to 100 entries", () => {
   let state = normalizeMindmapViewState({ heatmapOpen: true, expandedByNote: {} });
