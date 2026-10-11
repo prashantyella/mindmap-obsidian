@@ -10,9 +10,9 @@ const browserTimers: SidebarRefreshTimers = {
 
 /** Owns sidebar debounce and request generations without owning any DOM. */
 export class SidebarRefreshController {
-  private lookupTimer: unknown | null = null;
-  private noteTimer: unknown | null = null;
-  private indexTimer: unknown | null = null;
+  private lookupTimer: unknown = null;
+  private noteTimer: unknown = null;
+  private indexTimer: unknown = null;
   private lookupGeneration = 0;
   private noteGeneration = 0;
   private closed = false;

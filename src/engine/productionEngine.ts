@@ -317,7 +317,7 @@ export class ProductionEngine {
     if (options.workspace && typeof options.workspace.getLeavesOfType === "function" && typeof options.workspace.on === "function") {
       const editing = createWorkspaceEditingProtection(options.workspace, options.vault);
       this.editingProtection = editing.protection;
-      this.disposeEditingProtection = editing.dispose;
+      this.disposeEditingProtection = () => editing.dispose();
     } else {
       this.editingProtection = null;
     }
@@ -348,7 +348,7 @@ export class ProductionEngine {
         noteWriter,
         indexStore: { upsertNote: (input) => this.indexStoreUpsert(input) },
         replacement: createProductionNoteReplacementSeam(lateJobSubmitter, "manual"),
-        deferWrite: (_persisted, identity) => this.editingProtection?.isProtected(identity.canonicalPath) ?? false,
+        deferWrite: (_persisted, identity, savedContent) => this.editingProtection?.isProtected(identity.canonicalPath, savedContent) ?? false,
         selectRelated: relatedConfig ? async (embedded, selfPath) => {
           const candidates = await this.indexStore.queryRelated({
             queryVector: embedded.noteVector,
@@ -1116,7 +1116,15 @@ export class ProductionEngine {
   subscribeActivity(listener: (snapshot: EngineActivitySnapshot) => void): () => void {
     return this.jobEngine.subscribeActivity(listener);
   }
-  whenJobsSettled(): Promise<void> { return this.jobEngine.whenSettled(); }
+  async whenJobsSettled(): Promise<void> {
+    // A stopped scheduler/migration can still enqueue or commit its last awaited operation.
+    // Drain those producers before taking the final job dispatch and persistence barriers.
+    await this.coreScheduler.whenSettled();
+    await this.migrationDriver.whenSettled();
+    await this.migrationRunner.whenSettled();
+    await this.jobEngine.whenSettled();
+    await this.jobStore.whenSettled();
+  }
   subscribeIndexChanges(listener: (change: { revision: number; paths?: readonly string[] }) => void): () => void {
     this.indexChangeListeners.add(listener);
     return () => this.indexChangeListeners.delete(listener);

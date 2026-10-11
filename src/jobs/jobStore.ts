@@ -138,6 +138,11 @@ export class JobStore {
     return run;
   }
 
+  /** Waits for queued durable mutations before another engine can own this store. */
+  whenSettled(): Promise<void> {
+    return this.tail;
+  }
+
   /** Read-only; never touches the mutation tail, so a query concurrent with an in-flight mutation simply observes the last committed document. Returns frozen references into `this.cached`. */
   async list(): Promise<readonly PersistedJobV1[]> {
     const doc = await this.loadOrInit();

@@ -193,6 +193,11 @@ export class MigrationRunner {
     this.listeners.clear();
   }
 
+  /** Waits for already-queued migration mutations, including explicit start/cancel calls. */
+  whenSettled(): Promise<void> {
+    return migrationReconcileLocks.get(this.deps.dataRoot) ?? Promise.resolve();
+  }
+
   private notify(status: MigrationStatusV1): void {
     for (const listener of this.listeners) safelyNotify(listener, status);
   }

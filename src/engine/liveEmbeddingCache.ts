@@ -66,7 +66,7 @@ export function createCachedLiveEmbeddingSeam(inner: NoteEmbeddingSeam, options:
           entries.delete(key);
         }
         while (entries.size >= options.maxEntries || bytes + entryBytes > options.maxBytes) {
-          const oldestKey = entries.keys().next().value as string | undefined;
+          const oldestKey = entries.keys().next().value;
           if (oldestKey === undefined) break;
           const oldest = entries.get(oldestKey);
           if (oldest) bytes -= oldest.bytes;

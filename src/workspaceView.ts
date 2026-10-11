@@ -276,12 +276,7 @@ export class MindmapWorkspaceView extends ItemView {
       if (file.path !== this.activePath) return;
       this.refreshController.scheduleNoteRefresh();
     }));
-    const subscribeIndexChanges = (this.plugin as unknown as {
-      subscribeIndexChanges?: (listener: (change: { revision: number; paths?: readonly string[] }) => void) => () => void;
-    }).subscribeIndexChanges;
-    if (subscribeIndexChanges) {
-      this.register(subscribeIndexChanges.call(this.plugin, () => this.refreshController.scheduleIndexRefresh()));
-    }
+    this.register(this.plugin.subscribeIndexChanges(() => this.refreshController.scheduleIndexRefresh()));
     this.render();
   }
 
@@ -599,8 +594,7 @@ export class MindmapWorkspaceView extends ItemView {
     const generation = this.refreshController.invalidateNoteRequest();
     this.liveState = createLoadingLiveState(activeFile.path, this.liveState);
 
-    const query = this.plugin.queryLiveRelated as (path: string, ensureIndex?: boolean) => Promise<import("./semanticTypes").LiveRelatedResponse>;
-    void query.call(this.plugin, activeFile.path, false)
+    void this.plugin.queryLiveRelated(activeFile.path, false)
       .then((response) => {
         if (!this.refreshController.isCurrentNote(generation) || !shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
           return;

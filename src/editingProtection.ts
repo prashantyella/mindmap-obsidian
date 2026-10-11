@@ -1,9 +1,10 @@
-import type { EventRef, MarkdownView, Vault, Workspace } from "obsidian";
+import type { EventRef, MarkdownView, TFile, Vault, Workspace } from "obsidian";
 
 export interface EditorSnapshot {
   path: string;
   focused: boolean;
   unsaved: boolean;
+  content?: string;
 }
 
 export interface EditingProtectionClock {
@@ -22,7 +23,8 @@ export class EditingProtection {
   private readonly editedAt = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
   private readonly protectedPaths = new Set<string>();
-  private timer: unknown | null = null;
+  private readonly savedContent = new Map<string, string>();
+  private timer: unknown = null;
   private disposed = false;
 
   constructor(
@@ -37,13 +39,31 @@ export class EditingProtection {
     this.scheduleNextTransition();
   }
 
-  isProtected(path: string): boolean {
+  isProtected(path: string, savedContent?: string): boolean {
     if (this.disposed) return false;
+    if (savedContent !== undefined) this.savedContent.set(path, savedContent);
     const lastEdit = this.editedAt.get(path);
     const protectedNow = (lastEdit !== undefined && this.clock.now() - lastEdit < this.idleMs)
-      || this.snapshots().some((snapshot) => snapshot.path === path && (snapshot.focused || snapshot.unsaved));
+      || this.snapshots().some((snapshot) => snapshot.path === path && this.snapshotProtected(snapshot));
     if (protectedNow) this.protectedPaths.add(path);
+    else this.savedContent.delete(path);
     return protectedNow;
+  }
+
+  private snapshotProtected(snapshot: EditorSnapshot): boolean {
+    const saved = this.savedContent.get(snapshot.path);
+    return snapshot.focused || snapshot.unsaved
+      || (saved !== undefined && snapshot.content !== undefined && snapshot.content !== saved);
+  }
+
+  recordSaved(path: string, content: string): void {
+    if (this.disposed || !this.savedContent.has(path)) return;
+    this.savedContent.set(path, content);
+    this.refresh();
+  }
+
+  needsSavedContent(path: string): boolean {
+    return !this.disposed && this.savedContent.has(path);
   }
 
   subscribeSafeTransition(listener: () => void): () => void {
@@ -64,6 +84,11 @@ export class EditingProtection {
       this.editedAt.delete(oldPath);
       this.editedAt.set(newPath, edited);
     }
+    const saved = this.savedContent.get(oldPath);
+    if (saved !== undefined) {
+      this.savedContent.delete(oldPath);
+      this.savedContent.set(newPath, saved);
+    }
     this.refresh();
   }
 
@@ -73,6 +98,7 @@ export class EditingProtection {
     this.timer = null;
     this.editedAt.clear();
     this.protectedPaths.clear();
+    this.savedContent.clear();
     this.listeners.clear();
   }
 
@@ -86,9 +112,10 @@ export class EditingProtection {
     for (const path of [...this.protectedPaths]) {
       const edited = this.editedAt.get(path);
       const stillProtected = (edited !== undefined && now - edited < this.idleMs)
-        || snapshots.some((snapshot) => snapshot.path === path && (snapshot.focused || snapshot.unsaved));
+        || snapshots.some((snapshot) => snapshot.path === path && this.snapshotProtected(snapshot));
       if (!stillProtected) {
         this.protectedPaths.delete(path);
+        this.savedContent.delete(path);
         becameSafe = true;
       }
     }
@@ -112,6 +139,7 @@ export function createWorkspaceEditingProtection(workspace: Workspace, vault: Va
   const snapshots = (): EditorSnapshot[] => workspace.getLeavesOfType("markdown").flatMap((leaf) => {
     const view = leaf.view as MarkdownView;
     if (!view.file || !view.editor || !view.containerEl) return [];
+    if (view.getMode?.() === "preview") return [];
     const file = view.file;
     if (!file) return [];
     const activeElement = view.containerEl.ownerDocument.activeElement;
@@ -119,6 +147,7 @@ export function createWorkspaceEditingProtection(workspace: Workspace, vault: Va
       path: file.path,
       focused: activeElement !== null && view.containerEl.contains(activeElement),
       unsaved: view.editor.getValue() !== view.data,
+      content: view.editor.getValue(),
     }];
   });
   const protection = new EditingProtection(snapshots);
@@ -127,10 +156,19 @@ export function createWorkspaceEditingProtection(workspace: Workspace, vault: Va
     for (const leaf of workspace.getLeavesOfType("markdown")) {
       const doc = leaf.view.containerEl.ownerDocument;
       if (documentCleanups.has(doc)) continue;
-      const onFocusChange = (): void => { (doc.defaultView ?? window).setTimeout(() => protection.refresh(), 0); };
+      const ownerWindow = doc.defaultView ?? window;
+      let focusTimer: number | null = null;
+      const onFocusChange = (): void => {
+        if (focusTimer !== null) ownerWindow.clearTimeout(focusTimer);
+        focusTimer = ownerWindow.setTimeout(() => {
+          focusTimer = null;
+          protection.refresh();
+        }, 0);
+      };
       doc.addEventListener("focusin", onFocusChange, true);
       doc.addEventListener("focusout", onFocusChange, true);
       documentCleanups.set(doc, () => {
+        if (focusTimer !== null) ownerWindow.clearTimeout(focusTimer);
         doc.removeEventListener("focusin", onFocusChange, true);
         doc.removeEventListener("focusout", onFocusChange, true);
       });
@@ -144,7 +182,13 @@ export function createWorkspaceEditingProtection(workspace: Workspace, vault: Va
     workspace.on("layout-change", () => { observeDocuments(); protection.refresh(); }),
   ];
   const vaultRefs: EventRef[] = [
-    vault.on("modify", () => protection.refresh()),
+    vault.on("modify", (file) => {
+      protection.refresh();
+      if ((file as TFile).extension !== "md" || !protection.needsSavedContent(file.path)) return;
+      void vault.read(file as TFile)
+        .then((content) => protection.recordSaved(file.path, content))
+        .catch(() => undefined);
+    }),
     vault.on("rename", (file, oldPath) => protection.rename(oldPath, file.path)),
   ];
   return {

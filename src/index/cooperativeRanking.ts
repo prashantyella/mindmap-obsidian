@@ -21,7 +21,7 @@ export async function rankCompositeCooperatively(
     throw new Error("invalid cooperative ranking bounds.");
   }
   const now = options.now ?? (() => performance.now());
-  const yieldToEventLoop = options.yieldToEventLoop ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  const yieldToEventLoop = options.yieldToEventLoop ?? (() => new Promise<void>((resolve) => window.setTimeout(resolve, 0)));
   const retained = new TopKAccumulator(limit);
   let segmentStarted = now();
   for (let start = 0; start < itemCount; start += blockSize) {

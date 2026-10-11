@@ -103,5 +103,5 @@ void test("migrationRunner.ts never imports NoteWriter, a metadata provider/pipe
 void test("Checkpoint 10B: main.ts now constructs/owns ProductionEngine directly -- the ONE production, write-capable engine this plugin ships", () => {
   const mainTs = read("src/main.ts");
   assert.match(mainTs, /import \{ ProductionEngine,[^}]*\} from "\.\/engine\/productionEngine";/);
-  assert.match(mainTs, /new ProductionEngine\(options\)/);
+  assert.match(mainTs, /new ProductionEngine\(engineOptions\)/);
 });

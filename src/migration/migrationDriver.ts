@@ -99,6 +99,11 @@ export class MigrationDriver {
     this.disposed = true;
   }
 
+  /** After stop(), waits for the last driven reconciliation without scheduling another. */
+  whenSettled(): Promise<void> {
+    return this.pumping ?? Promise.resolve();
+  }
+
   /**
    * External kick source (item 6: "pump may advance migration") -- a
    * caller (e.g. `ProductionEngine`, after observing job-store activity

@@ -70,6 +70,25 @@ function fakeAppleBooksOptions(): ProductionEngineOptions["appleBooks"] {
   };
 }
 
+void test("replacement drains scheduler/migration producers before job dispatch and durable queue writes", async () => {
+  const engine = new ProductionEngine(baseOptions());
+  const order: string[] = [];
+  let settleScheduler!: () => void;
+  const pendingScheduler = new Promise<void>((resolve) => { settleScheduler = resolve; });
+  engine.coreScheduler.whenSettled = async () => { order.push("scheduler"); await pendingScheduler; };
+  engine.migrationDriver.whenSettled = async () => { order.push("driver"); };
+  engine.migrationRunner.whenSettled = async () => { order.push("migration"); };
+  engine.jobEngine.whenSettled = async () => { order.push("dispatch"); };
+  engine.jobStore.whenSettled = async () => { order.push("queue"); };
+  const settling = engine.whenJobsSettled();
+  await Promise.resolve();
+  assert.deepEqual(order, ["scheduler"]);
+  settleScheduler();
+  await settling;
+  assert.deepEqual(order, ["scheduler", "driver", "migration", "dispatch", "queue"]);
+  await engine.dispose();
+});
+
 function baseOptions(overrides: Partial<ProductionEngineOptions> = {}): ProductionEngineOptions {
   return {
     dataRoot: "/data",

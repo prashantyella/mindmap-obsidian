@@ -32,7 +32,7 @@ export async function replaceEngineSafely<T extends ReplaceableEngine>(options: 
     return { engine: next, activationError: null, recoveryError: null, recovered: false, startResult };
   } catch (error) {
     const activationError = toError(error);
-    await next?.dispose();
+    if (next) await prepareReplaceableEngine(next, options.quiescenceTimeoutMs);
     if (!options.createRollback) return { engine: null, activationError, recoveryError: null, recovered: false };
     let rollback: T | null = null;
     try {
@@ -41,7 +41,7 @@ export async function replaceEngineSafely<T extends ReplaceableEngine>(options: 
       return { engine: rollback, activationError, recoveryError: null, recovered: true, startResult };
     } catch (error) {
       const recoveryError = toError(error);
-      await rollback?.dispose();
+      if (rollback) await prepareReplaceableEngine(rollback, options.quiescenceTimeoutMs);
       return { engine: null, activationError, recoveryError, recovered: false };
     }
   }

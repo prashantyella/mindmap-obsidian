@@ -93,3 +93,44 @@ void test("drain timeout disposes the old engine but never starts a new writer",
   }), /Timed out waiting/);
   assert.deepEqual(events, ["old:stop", "old:dispose"]);
 });
+
+void test("a failed candidate settles its durable phase before rollback starts", async () => {
+  let settle!: () => void;
+  const durablePhase = new Promise<void>((resolve) => { settle = resolve; });
+  let rollbackStarted = false;
+  const candidate: ReplaceableEngine = {
+    start: async () => { throw new Error("startup failed after dispatch"); },
+    stop: async () => {},
+    whenJobsSettled: async () => { await durablePhase; },
+    dispose: async () => {},
+  };
+  const replacing = replaceEngineSafely({
+    current: null,
+    createNext: () => candidate,
+    createRollback: () => ({ start: async () => { rollbackStarted = true; }, dispose: async () => {} }),
+  });
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  assert.equal(rollbackStarted, false);
+  settle();
+  const result = await replacing;
+  assert.equal(rollbackStarted, true);
+  assert.equal(result.recovered, true);
+});
+
+void test("retry retains the timed-out retired writer's barrier until its phase settles", async () => {
+  let settle!: () => void;
+  const durablePhase = new Promise<void>((resolve) => { settle = resolve; });
+  const retired: ReplaceableEngine = {
+    start: async () => {}, stop: async () => {},
+    whenJobsSettled: async () => { await durablePhase; }, dispose: async () => {},
+  };
+  let newWriters = 0;
+  const createNext = (): ReplaceableEngine => ({ start: async () => { newWriters += 1; }, dispose: async () => {} });
+  await assert.rejects(() => replaceEngineSafely({ current: retired, createNext, quiescenceTimeoutMs: 5 }), /Timed out/);
+  const retry = replaceEngineSafely({ current: retired, createNext });
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  assert.equal(newWriters, 0);
+  settle();
+  await retry;
+  assert.equal(newWriters, 1);
+});

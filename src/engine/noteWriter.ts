@@ -75,7 +75,7 @@ export interface WriteNoteMetadataOptions {
   /** Ordinary notes only. */
   removeMindmapSection: boolean;
   /** Last-moment write gate, evaluated after the fresh source read and transformation. */
-  shouldDeferCommit?: () => boolean;
+  shouldDeferCommit?: (savedContent: string) => boolean;
 }
 
 export type WriteNoteMetadataResult =
@@ -187,7 +187,7 @@ export class NoteWriter {
     if (finalContent === rawContent) {
       return { status: "unchanged", content: finalContent };
     }
-    if (options.shouldDeferCommit?.()) {
+    if (options.shouldDeferCommit?.(rawContent)) {
       return { status: "deferred", content: rawContent };
     }
     try {

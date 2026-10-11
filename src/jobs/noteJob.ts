@@ -96,7 +96,7 @@ export interface NoteJobDeps {
   /** See `NoteReplacementSeam`. */
   replacement: NoteReplacementSeam;
   /** Returns true only for automatic/bulk writes that should wait while the note is actively edited. */
-  deferWrite?: (persisted: PersistedJobV1, identity: NoteIdentityV1) => boolean;
+  deferWrite?: (persisted: PersistedJobV1, identity: NoteIdentityV1, savedContent?: string) => boolean;
 }
 
 interface NoteJobMemory {
@@ -480,7 +480,7 @@ export class NoteJobRunner implements JobPhaseRunner {
         writeMindmapSection: false,
         removeMindmapSection: !isAppleAnnotation,
         shouldDeferCommit: mayDefer && this.deps.deferWrite
-          ? () => this.deps.deferWrite!(persisted, resolved)
+          ? (savedContent) => this.deps.deferWrite!(persisted, resolved, savedContent)
           : undefined,
       });
     } catch (error) {

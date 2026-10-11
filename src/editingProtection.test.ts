@@ -58,3 +58,18 @@ void test("focus-only protection wakes after blur even without a recent edit", (
   protection.refresh();
   assert.equal(wakes, 1);
 });
+
+void test("final saved-source comparison protects an unfocused buffer until its save commits", () => {
+  const clock = new FakeClock();
+  const snapshots: EditorSnapshot[] = [{ path: "Other.md", focused: false, unsaved: false, content: "new buffer" }];
+  const protection = new EditingProtection(() => snapshots, clock);
+  let wakes = 0;
+  protection.subscribeSafeTransition(() => { wakes += 1; });
+  assert.equal(protection.isProtected("Other.md", "old disk source"), true);
+  protection.refresh();
+  assert.equal(wakes, 0);
+  protection.recordSaved("Other.md", "new buffer");
+  assert.equal(wakes, 1);
+  assert.equal(protection.isProtected("Other.md", "new buffer"), false);
+  protection.dispose();
+});

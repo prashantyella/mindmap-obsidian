@@ -63,7 +63,7 @@ import {
 } from "./scheduler";
 import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./settings";
 import { cloneSettings, SettingsApplyError, SettingsEffectQueue } from "./settingsEffects";
-import { replaceEngineSafely, type EngineReplacementResult } from "./engineReplacement";
+import { prepareReplaceableEngine, replaceEngineSafely, type EngineReplacementResult } from "./engineReplacement";
 import { testLocalAiDraft as probeLocalAiDraft } from "./localAiDraftTest";
 import { MindmapSettingTab } from "./settingsTab";
 import { MindmapWorkspaceView, MINDMAP_VIEW_TYPE } from "./workspaceView";
@@ -175,6 +175,9 @@ export default class MindmapPlugin extends Plugin {
   settings: MindmapSettings = DEFAULT_SETTINGS;
   private lastAppliedSettings: MindmapSettings | null = null;
   private settingsEffectQueue: SettingsEffectQueue | null = null;
+  private retiringEngine: ProductionEngine | null = null;
+  private startingEngine: ProductionEngine | null = null;
+  private unloaded = false;
   private schedulerAppliedSettings: MindmapSettings | null = null;
 
   private schedulerTimer: unknown = null;
@@ -199,6 +202,8 @@ export default class MindmapPlugin extends Plugin {
   statusBarEl: HTMLElement | null = null;
   private engineActivity: EngineActivitySnapshot | null = null;
   private unsubscribeActivity: (() => void) | null = null;
+  private readonly indexChangeListeners = new Set<(change: { revision: number; paths?: readonly string[] }) => void>();
+  private unsubscribeIndexChanges: (() => void) | null = null;
   private statusRenderTimer: number | null = null;
   private activeNoteEligibility: ActiveNoteEligibility = NO_ACTIVE_NOTE;
   private pendingScanService: ProductionPendingScanService | null = null;
@@ -301,6 +306,12 @@ export default class MindmapPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.unloaded = true;
+    void this.startingEngine?.dispose();
+    void this.retiringEngine?.dispose();
+    this.unsubscribeIndexChanges?.();
+    this.unsubscribeIndexChanges = null;
+    this.indexChangeListeners.clear();
     void this.productionEngine?.dispose();
     this.productionEngine = null;
     this.pendingScanService?.dispose();
@@ -335,7 +346,10 @@ export default class MindmapPlugin extends Plugin {
     const next = cloneSettings(this.settings);
     const queue = this.settingsEffectQueue ??= new SettingsEffectQueue(this.lastAppliedSettings ?? next);
     await queue.enqueue(next, {
-      persist: async (snapshot) => { await this.saveData(snapshot); },
+      persist: async (snapshot) => {
+        if (this.unloaded) throw new Error("Mindmap was unloaded before settings could be applied.");
+        await this.saveData(snapshot);
+      },
       reconfigureEngine: async (snapshot) => { await this.startProductionEngine(true, snapshot); },
       syncScheduler: async (snapshot) => { await this.syncScheduler(snapshot); },
       refreshPending: () => { this.pendingScanService?.requestRefresh("settings updated"); },
@@ -384,14 +398,14 @@ export default class MindmapPlugin extends Plugin {
   }
 
   /** Checkpoint 11: the TypeScript `ProductionEngine` is the ONLY backend for live/lookup related queries -- there is no Python semantic worker fallback anymore. An unavailable engine fails closed with a thrown error, which the sidebar UI already renders as an error state. */
-  async queryLiveRelated(path: string): Promise<LiveRelatedResponse> {
+  async queryLiveRelated(path: string, ensureIndex = this.settings.liveSemanticEnsureActiveNoteIndexed): Promise<LiveRelatedResponse> {
     if (!this.settings.liveSemanticLookupEnabled) {
       throw new Error("Live semantic lookup is disabled.");
     }
     if (!this.productionEngine) {
       throw new Error("The Mindmap TypeScript engine is not available for this vault.");
     }
-    const result = await this.productionEngine.queryLiveRelated(path, this.settings.liveSemanticEnsureActiveNoteIndexed);
+    const result = await this.productionEngine.queryLiveRelated(path, ensureIndex);
     return {
       path: result.path,
       hash: result.sourceHash,
@@ -400,6 +414,25 @@ export default class MindmapPlugin extends Plugin {
       index_result: null,
       related: MindmapPlugin.toLiveRelatedResults(result.related),
     };
+  }
+
+  subscribeIndexChanges(listener: (change: { revision: number; paths?: readonly string[] }) => void): () => void {
+    this.indexChangeListeners.add(listener);
+    return () => this.indexChangeListeners.delete(listener);
+  }
+
+  private bindIndexChanges(engine: ProductionEngine | null): void {
+    this.unsubscribeIndexChanges?.();
+    this.unsubscribeIndexChanges = null;
+    if (!engine) return;
+    this.unsubscribeIndexChanges = engine.subscribeIndexChanges((change) => {
+      if (this.productionEngine !== engine) return;
+      for (const listener of this.indexChangeListeners) {
+        try { listener(change); } catch {
+          // A closed or failing view cannot prevent other subscribers from refreshing.
+        }
+      }
+    });
   }
 
   async queryLookupRelated(query: string, limit?: number): Promise<LookupRelatedResponse> {
@@ -2032,13 +2065,23 @@ export default class MindmapPlugin extends Plugin {
    * as "quietly running Python again."
    */
   private async startProductionEngine(throwOnFailure = false, settings: MindmapSettings = this.settings): Promise<void> {
-    const previousEngine = this.productionEngine;
+    if (this.unloaded) return;
+    const previousEngine = this.productionEngine ?? this.retiringEngine;
     const rollbackSettings = this.lastAppliedSettings ? cloneSettings(this.lastAppliedSettings) : null;
     this.productionEngineFailed = false;
     const options = this.buildProductionEngineOptions(settings);
     if (!options) return;
+    this.retiringEngine = previousEngine;
+    this.startingEngine = null;
+    const createEngine = (engineOptions: ProductionEngineOptions): ProductionEngine => {
+      if (this.unloaded) throw new Error("Mindmap was unloaded before the replacement could start.");
+      const engine = new ProductionEngine(engineOptions);
+      this.startingEngine = engine;
+      return engine;
+    };
     this.unsubscribeActivity?.();
     this.unsubscribeActivity = null;
+    this.bindIndexChanges(null);
     this.productionEngine = null;
     this.engineActivity = null;
     const rollbackOptions = previousEngine && rollbackSettings ? this.buildProductionEngineOptions(rollbackSettings) : null;
@@ -2046,11 +2089,15 @@ export default class MindmapPlugin extends Plugin {
     try {
       replacement = await replaceEngineSafely({
         current: previousEngine,
-        createNext: () => new ProductionEngine(options),
-        createRollback: rollbackOptions ? () => new ProductionEngine(rollbackOptions) : undefined,
+        createNext: () => createEngine(options),
+        createRollback: rollbackOptions ? () => createEngine(rollbackOptions) : undefined,
         prepareCurrent: (engine) => this.prepareEngineReplacement(engine),
       });
     } catch (error) {
+      // A timeout does not mean the retired writer finished. Retain its barrier for every retry.
+      this.retiringEngine = this.startingEngine ?? previousEngine;
+      this.startingEngine = null;
+      if (this.unloaded) return;
       this.productionEngineFailed = true;
       this.appendLog(`[production-engine] replacement quiescence failed: ${error instanceof Error ? error.message : "unknown error"}`);
       new Notice("Mindmap could not safely stop the active job phase, so the new configuration was not started. Wait for current work to settle, then apply again.", 12000);
@@ -2059,8 +2106,15 @@ export default class MindmapPlugin extends Plugin {
       return;
     }
     const candidate = replacement.engine;
+    this.retiringEngine = null;
+    this.startingEngine = null;
+    if (this.unloaded) {
+      await candidate?.dispose();
+      return;
+    }
     const activatedSettings = replacement.recovered && rollbackSettings ? rollbackSettings : settings;
     this.productionEngine = candidate;
+    this.bindIndexChanges(candidate);
     if (candidate) {
       this.unsubscribeActivity = candidate.subscribeActivity((snapshot) => {
         if (this.productionEngine !== candidate) return;
@@ -2088,50 +2142,13 @@ export default class MindmapPlugin extends Plugin {
     }
     await this.refreshCachedMigrationStatus();
     await this.syncScheduler(activatedSettings);
+    this.invalidateLiveMindmapViews();
     this.updateStatusBar();
     if (replacement.activationError && throwOnFailure) throw replacement.activationError;
   }
 
   private async prepareEngineReplacement(engine: ProductionEngine): Promise<void> {
-    await engine.stop();
-    const whenJobsSettled = (engine as ProductionEngine & { whenJobsSettled?: () => Promise<void> }).whenJobsSettled;
-    if (whenJobsSettled) {
-      let timeout: number | null = null;
-      try {
-        await Promise.race([
-          whenJobsSettled.call(engine),
-          new Promise<never>((_resolve, reject) => {
-            timeout = window.setTimeout(() => reject(new Error("Timed out waiting for active Mindmap jobs to settle. No replacement engine was started.")), 30_000);
-          }),
-        ]);
-        await engine.dispose();
-        return;
-      } catch (error) {
-        await engine.dispose();
-        throw error;
-      } finally {
-        if (timeout !== null) window.clearTimeout(timeout);
-      }
-    }
-    let disposed = false;
-    let activeCount = Number.POSITIVE_INFINITY;
-    let finish!: () => void;
-    const settled = new Promise<void>((resolve) => { finish = resolve; });
-    const unsubscribe = engine.subscribeActivity((snapshot) => {
-      activeCount = snapshot.activeCount;
-      if (disposed && activeCount === 0) finish();
-    });
-    const timeout = window.setTimeout(finish, 15_000);
-    try {
-      await engine.dispose();
-      disposed = true;
-      if (activeCount === 0) finish();
-      await settled;
-      if (activeCount !== 0) throw new Error("Timed out waiting for the active Mindmap job phase to settle. No replacement engine was started.");
-    } finally {
-      window.clearTimeout(timeout);
-      unsubscribe();
-    }
+    await prepareReplaceableEngine(engine);
   }
 
   /** Item 3: current migration status -- `null` when the production engine itself is unavailable (e.g. non-desktop filesystem adapter). Never throws. */
