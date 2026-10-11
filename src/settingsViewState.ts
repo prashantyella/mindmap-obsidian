@@ -21,6 +21,12 @@ export interface ScopeEditorState {
   dirty: boolean;
 }
 
+export class CommittedValue<T> {
+  constructor(private value: T) {}
+  set(value: T): void { this.value = value; }
+  get(): T { return this.value; }
+}
+
 function localAiDraft(settings: MindmapSettings): LocalAiDraft {
   return {
     embedBaseUrl: settings.embedBaseUrl,

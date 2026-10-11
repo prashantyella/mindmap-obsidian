@@ -102,7 +102,7 @@ The **Apple Books and web research** section has one Web Research selector:
 
 Before either research mode is enabled, Mindmap shows consent. Annotation or note excerpts stay on your machine for local query derivation and synthesis, using the same Ollama metadata model configured under Local AI. Exa receives only one or two derived queries; it returns up to five bounded source excerpts and metadata. Unrelated vault content is never sent to Exa.
 
-Automatic for Reading is capped at five attempts per sync and ten per local calendar day. The status menu and Settings show current usage, pauses, errors, and retry controls. A daily cap resumes after local midnight; scheduled maintenance does not use Web Research.
+Automatic for Apple Books is capped at five attempts per sync and ten per local calendar day. The status menu and Settings show current usage, pauses, errors, and retry controls. A daily cap resumes after local midnight; scheduled maintenance does not use Web Research.
 
 ### Exa Keychain setup
 
@@ -117,11 +117,11 @@ Mindmap stores its own runtime data (index, job queue, schedules) under `.obsidi
 - Note and annotation content sent for embeddings or metadata extraction goes only to the Ollama server you configure (default `http://localhost:11434`); Mindmap never sends vault content to any other network destination on its own.
 - Optional Exa Web Research sends only the one or two short derived queries described above, never raw note or annotation text, and never unrelated vault content.
 - The Exa API key lives only in macOS Keychain; it is never written to plugin settings, note frontmatter, logs, or diagnostics output.
-- Diagnostics you copy from Troubleshooting are bounded and redact anything key/token/secret/password/authorization-shaped before they are ever assembled.
+- Diagnostics you copy from **Advanced and troubleshooting** are bounded and redact anything key/token/secret/password/authorization-shaped before they are ever assembled.
 
 ## Troubleshooting
 
-- Overview shows the engine is unavailable: open the Troubleshooting section, run **Run preflight**, and use **Copy diagnostics** for a bounded, redacted report of provider/scheduler/engine state.
+- The readiness row shows the engine is unavailable: open **Advanced and troubleshooting**, choose **Check setup**, and use **Copy diagnostics** for a bounded, redacted report of provider, scheduler, and engine state.
 - Missing models:
 
 ```bash
@@ -129,8 +129,8 @@ ollama pull mxbai-embed-large
 ollama pull llama3.1:8b
 ```
 
-- Plugin shows `scope setup required`:
-  - complete Scope setup in plugin settings and save.
+- Plugin shows that included folders need attention:
+  - open **Included folders**, select folders, then choose **Save folders**.
 - A first-run migration failed partway: reopen the status menu and use **Retry migration** — it resumes rather than starting over, and never touches the vault's existing note content.
 
 ## Notes

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { DEFAULT_SETTINGS } from "./settings";
 import { cloneSettings } from "./settingsEffects";
-import { applyProviderDraft, SettingsViewState, updateProviderApplyUi } from "./settingsViewState";
+import { applyProviderDraft, CommittedValue, SettingsViewState, updateProviderApplyUi } from "./settingsViewState";
 
 void test("required sections expand and disclosure state survives saved-setting sync", () => {
   const settings = cloneSettings(DEFAULT_SETTINGS);
@@ -77,4 +77,10 @@ void test("edits arriving during Apply are not discarded by the older completion
   assert.equal(state.providerDirty, true);
   assert.equal(state.providerDraft.embedModel, "second");
   assert.match(state.providerMessage, /newer draft/);
+});
+
+void test("field rollback uses the latest successful commit after a later save fails", () => {
+  const committed = new CommittedValue("rendered");
+  committed.set("first save");
+  assert.equal(committed.get(), "first save");
 });

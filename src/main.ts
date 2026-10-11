@@ -62,7 +62,7 @@ import {
   type SchedulerConfig,
 } from "./scheduler";
 import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./settings";
-import { cloneSettings, SettingsApplyError, SettingsEffectQueue } from "./settingsEffects";
+import { cloneSettings, restoreEngineSettingsInPlace, SettingsApplyError, SettingsEffectQueue, withEngineSettings } from "./settingsEffects";
 import { prepareReplaceableEngine, replaceEngineSafely, type EngineReplacementResult } from "./engineReplacement";
 import { testLocalAiDraft as probeLocalAiDraft } from "./localAiDraftTest";
 import { MindmapSettingTab } from "./settingsTab";
@@ -337,7 +337,7 @@ export default class MindmapPlugin extends Plugin {
     this.settingsEffectQueue = new SettingsEffectQueue(this.settings);
   }
 
-  async saveSettings(): Promise<void> {
+  async saveSettings(options: { explicitEngineActivation?: boolean } = {}): Promise<void> {
     this.settings.schedulerIntervalMinutes = normalizeSchedulerInterval(this.settings.schedulerIntervalMinutes);
     this.settings.launchAgentDailyHour = normalizeHour(this.settings.launchAgentDailyHour);
     this.settings.launchAgentDailyMinute = normalizeMinute(this.settings.launchAgentDailyMinute);
@@ -345,16 +345,30 @@ export default class MindmapPlugin extends Plugin {
     this.settings.launchAgentWeeklyMinute = normalizeMinute(this.settings.launchAgentWeeklyMinute);
     const next = cloneSettings(this.settings);
     const queue = this.settingsEffectQueue ??= new SettingsEffectQueue(this.lastAppliedSettings ?? next);
-    await queue.enqueue(next, {
-      persist: async (snapshot) => {
-        if (this.unloaded) throw new Error("Mindmap was unloaded before settings could be applied.");
-        await this.saveData(snapshot);
-      },
-      reconfigureEngine: async (snapshot) => { await this.startProductionEngine(true, snapshot); },
-      syncScheduler: async (snapshot) => { await this.syncScheduler(snapshot); },
-      refreshPending: () => { this.pendingScanService?.requestRefresh("settings updated"); },
-    });
-    this.lastAppliedSettings = cloneSettings(next);
+    try {
+      await queue.enqueue(next, {
+        persist: async (snapshot) => {
+          if (this.unloaded) throw new Error("Mindmap was unloaded before settings could be applied.");
+          await this.saveData(snapshot);
+        },
+        adoptPersisted: (persisted, requested) => { restoreEngineSettingsInPlace(this.settings, requested, persisted); },
+        reconfigureEngine: async (snapshot) => { await this.startProductionEngine(true, snapshot); },
+        syncScheduler: async (snapshot) => { await this.syncScheduler(snapshot); },
+        refreshPending: () => { this.pendingScanService?.requestRefresh("settings updated"); },
+        recoverActivation: async (previous, attempted) => {
+          const restored = withEngineSettings(attempted, previous);
+          await this.saveData(restored);
+          restoreEngineSettingsInPlace(this.settings, attempted, restored);
+          await this.syncScheduler(restored);
+          return restored;
+        },
+      }, {
+        ...options,
+        forceEngineActivation: () => options.explicitEngineActivation === true && this.productionEngine === null,
+      });
+    } finally {
+      this.lastAppliedSettings = queue.getAppliedSnapshot();
+    }
   }
 
   /** One-time-by-absence retirement of content-owned 0.2.x Python LaunchAgents; foreign or ambiguous files are never touched. */
@@ -1058,7 +1072,7 @@ export default class MindmapPlugin extends Plugin {
     const previous = { currentPaths: [...this.settings.scopeCurrentPaths], allPaths: [...this.settings.scopeAllPaths] };
     writeScopeSetup(this.settings, selection);
     try {
-      await this.saveSettings();
+      await this.saveSettings({ explicitEngineActivation: true });
     } catch (error) {
       if (error instanceof SettingsApplyError && error.phase === "persistence") {
         this.settings.scopeCurrentPaths = previous.currentPaths;
@@ -1076,7 +1090,7 @@ export default class MindmapPlugin extends Plugin {
 
   async saveLlmProviderConfig(patch: Partial<Pick<LlmProviderConfigStatus, "baseUrl" | "model" | "maxTokens">>): Promise<void> {
     writeLlmProviderConfig(this.settings, patch);
-    await this.saveSettings();
+    await this.saveSettings({ explicitEngineActivation: true });
     this.appendLog("[setup] Updated Ollama metadata provider config in plugin settings");
   }
 
@@ -1087,7 +1101,7 @@ export default class MindmapPlugin extends Plugin {
     };
     writeLocalAiConfig(this.settings, config);
     try {
-      await this.saveSettings();
+      await this.saveSettings({ explicitEngineActivation: true });
     } catch (error) {
       if (error instanceof SettingsApplyError && error.phase === "persistence") writeLocalAiConfig(this.settings, previous);
       throw error;
@@ -1900,7 +1914,7 @@ export default class MindmapPlugin extends Plugin {
       this.appendLog(`[migration] Legacy config.json migration skipped: ${error instanceof Error ? error.message : "unknown error"}`);
     } finally {
       this.settings.legacyConfigMigrated = true;
-      await this.saveSettings();
+      await this.saveSettings({ explicitEngineActivation: true });
     }
   }
 
@@ -2100,7 +2114,7 @@ export default class MindmapPlugin extends Plugin {
       if (this.unloaded) return;
       this.productionEngineFailed = true;
       this.appendLog(`[production-engine] replacement quiescence failed: ${error instanceof Error ? error.message : "unknown error"}`);
-      new Notice("Mindmap could not safely stop the active job phase, so the new configuration was not started. Wait for current work to settle, then apply again.", 12000);
+      new Notice("Mindmap is unavailable because the active job phase did not settle safely. The disposed engine was not restored. Wait for current work to settle, then apply the configuration again.", 12000);
       this.updateStatusBar();
       if (throwOnFailure) throw error;
       return;

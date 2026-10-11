@@ -6,7 +6,7 @@ import { buildScheduleVisibility, formatTimeOfDay, isSchedulerRecoveryActionable
 import type MindmapPlugin from "./main";
 import { ScopeManager } from "./scopeManager";
 import { DEFAULT_SETTINGS } from "./settings";
-import { applyProviderDraft, SettingsViewState, updateProviderApplyUi, type SettingsSection } from "./settingsViewState";
+import { applyProviderDraft, CommittedValue, SettingsViewState, updateProviderApplyUi, type SettingsSection } from "./settingsViewState";
 
 // The declarative settings-search API requires Obsidian 1.13.0; this plugin
 // retains its 1.7.2 minimum and uses the supported native Setting API.
@@ -199,6 +199,7 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   private renderTime(container: HTMLElement, name: string, hour: number, minute: number, update: (hour: number, minute: number) => void): void {
+    const committed = new CommittedValue({ hour, minute });
     const row = new Setting(container).setName(name).setDesc("Use 24-hour time (HH:MM).");
     row.addText((text) => {
       text.setPlaceholder("02:30").setValue(formatTimeOfDay(hour, minute));
@@ -215,10 +216,12 @@ export class MindmapSettingTab extends PluginSettingTab {
         update(parsed.hour, parsed.minute);
         try {
           await this.plugin.saveSettings();
+          committed.set(parsed);
           text.setValue(formatTimeOfDay(parsed.hour, parsed.minute));
           return true;
         } catch (saveError) {
-          update(hour, minute);
+          const previous = committed.get();
+          update(previous.hour, previous.minute);
           new Notice(saveError instanceof Error ? saveError.message : "The schedule time could not be saved.", 8000);
           return false;
         }
@@ -271,12 +274,17 @@ export class MindmapSettingTab extends PluginSettingTab {
     }));
   }
   private savedText(container: HTMLElement, name: string, description: string, value: string, update: (value: string) => void): void {
+    const committed = new CommittedValue(value);
     new Setting(container).setName(name).setDesc(description).addText((text: TextComponent) => {
       text.setValue(value);
       bindCommitOnBlurOrEnter(text.inputEl, text.getValue(), async (next) => {
         update(next.trim());
-        try { await this.plugin.saveSettings(); return true; } catch (error) {
-          update(value);
+        try {
+          await this.plugin.saveSettings({ explicitEngineActivation: true });
+          committed.set(next.trim());
+          return true;
+        } catch (error) {
+          update(committed.get());
           new Notice(error instanceof Error ? error.message : `${name} could not be saved.`, 8000);
           return false;
         }

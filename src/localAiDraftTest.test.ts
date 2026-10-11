@@ -46,3 +46,21 @@ void test("null and non-object model entries fail with fixed actionable guidance
     );
   }
 });
+
+void test("blank embedding model fails before any network call", async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => testLocalAiDraft({ ...config, embedModel: "   " }, async () => { calls += 1; return new Response(); }),
+    /Embedding model is required/,
+  );
+  assert.equal(calls, 0);
+});
+
+void test("blank summaries and tags model fails before any network call", async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => testLocalAiDraft({ ...config, llmModel: "\t" }, async () => { calls += 1; return new Response(); }),
+    /Summaries and tags model is required/,
+  );
+  assert.equal(calls, 0);
+});

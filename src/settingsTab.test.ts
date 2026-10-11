@@ -53,3 +53,17 @@ void test("provider Apply refreshes readiness in place and engine replacement re
   assert.match(SOURCE, /Configuration saved, but Local AI is not ready/);
   assert.match(MAIN_SOURCE, /this\.diagnosticsState\.result = MindmapPlugin\.toPreflightResult\(report\)/);
 });
+
+void test("time and saved text failures restore the latest committed value, not the render-time value", () => {
+  const timeBody = SOURCE.slice(SOURCE.indexOf("private renderTime("), SOURCE.indexOf("private renderIntegrations("));
+  assert.match(timeBody, /committed\.set\(parsed\)/);
+  assert.match(timeBody, /const previous = committed\.get\(\)/);
+  const savedTextBody = SOURCE.slice(SOURCE.indexOf("private savedText("));
+  assert.match(savedTextBody, /committed\.set\(next\.trim\(\)\)/);
+  assert.match(savedTextBody, /update\(committed\.get\(\)\)/);
+});
+
+void test("replacement preparation failure explicitly leaves Mindmap unavailable", () => {
+  assert.match(MAIN_SOURCE, /Mindmap is unavailable because the active job phase did not settle safely/);
+  assert.match(MAIN_SOURCE, /The disposed engine was not restored/);
+});

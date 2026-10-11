@@ -9,6 +9,12 @@ function comparableModelName(model: string): string {
 }
 
 export async function testLocalAiDraft(config: LocalAiConfig, fetchImpl: typeof fetch): Promise<string> {
+  if (!config.embedModel.trim()) {
+    throw new Error("Embedding model is required. Enter the model installed in Ollama.");
+  }
+  if (!config.llmModel.trim()) {
+    throw new Error("Summaries and tags model is required. Enter the model installed in Ollama.");
+  }
   const targets = new Map<string, string[]>();
   for (const [rawUrl, model] of [[config.embedBaseUrl, config.embedModel], [config.llmBaseUrl, config.llmModel]] as const) {
     const baseUrl = validateOllamaEndpoint(rawUrl.trim());
