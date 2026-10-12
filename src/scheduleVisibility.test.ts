@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildScheduleVisibility, isSchedulerRecoveryActionable } from "./scheduleVisibility";
+import { buildScheduleVisibility, formatTimeOfDay, isSchedulerRecoveryActionable, parseTimeOfDay } from "./scheduleVisibility";
 
 void test("manual mode shows nothing beyond the mode selector", () => {
   const visibility = buildScheduleVisibility("manual", false);
@@ -29,4 +29,14 @@ void test("scheduler recovery is actionable only for LaunchAgent mode with overd
   assert.equal(isSchedulerRecoveryActionable("launchAgent", null), false);
   assert.equal(isSchedulerRecoveryActionable("interval", "overdue"), false);
   assert.equal(isSchedulerRecoveryActionable("manual", "overdue"), false);
+});
+
+void test("HH:MM parsing is strict and bounded", () => {
+  assert.deepEqual(parseTimeOfDay("02:30"), { hour: 2, minute: 30 });
+  assert.deepEqual(parseTimeOfDay(" 23:59 "), { hour: 23, minute: 59 });
+  assert.equal(parseTimeOfDay("2:30"), null);
+  assert.equal(parseTimeOfDay("24:00"), null);
+  assert.equal(parseTimeOfDay("12:60"), null);
+  assert.equal(parseTimeOfDay("noon"), null);
+  assert.equal(formatTimeOfDay(2, 5), "02:05");
 });

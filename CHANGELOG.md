@@ -9,6 +9,22 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.8
+
+### Changed
+- Simplify settings with validated saves, focused troubleshooting, and clearer automatic startup readiness checks.
+- Improve large-index responsiveness with bounded shard decoding, cooperative ranking, and cached validated query generations.
+- Prioritize saved active notes after editing settles without starving background processing or bypassing pause controls.
+
+### Fixed
+- Keep sidebar connections and graph nodes stable during typing and background indexing; refresh stale notes automatically without manual update prompts.
+- Release saved, focused notes after the editing idle interval while continuing to protect unsaved or divergent buffers.
+- Prevent background refresh submission failures from hiding valid connections.
+- Restore compact sidebar typography, full-width connection graphs, and a non-overlapping loading animation.
+- Preserve safe engine replacement, note-write protection, and existing configuration when settings change.
+
+`minAppVersion` remains `1.7.2`; desktop only. Note-property visibility remains an Obsidian vault preference; metadata is preserved.
+
 ## 0.3.6
 
 ### Added

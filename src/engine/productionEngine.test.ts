@@ -70,6 +70,25 @@ function fakeAppleBooksOptions(): ProductionEngineOptions["appleBooks"] {
   };
 }
 
+void test("replacement drains scheduler/migration producers before job dispatch and durable queue writes", async () => {
+  const engine = new ProductionEngine(baseOptions());
+  const order: string[] = [];
+  let settleScheduler!: () => void;
+  const pendingScheduler = new Promise<void>((resolve) => { settleScheduler = resolve; });
+  engine.coreScheduler.whenSettled = async () => { order.push("scheduler"); await pendingScheduler; };
+  engine.migrationDriver.whenSettled = async () => { order.push("driver"); };
+  engine.migrationRunner.whenSettled = async () => { order.push("migration"); };
+  engine.jobEngine.whenSettled = async () => { order.push("dispatch"); };
+  engine.jobStore.whenSettled = async () => { order.push("queue"); };
+  const settling = engine.whenJobsSettled();
+  await Promise.resolve();
+  assert.deepEqual(order, ["scheduler"]);
+  settleScheduler();
+  await settling;
+  assert.deepEqual(order, ["scheduler", "driver", "migration", "dispatch", "queue"]);
+  await engine.dispose();
+});
+
 function baseOptions(overrides: Partial<ProductionEngineOptions> = {}): ProductionEngineOptions {
   return {
     dataRoot: "/data",
@@ -712,7 +731,7 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) submits the exact pro
   const { vault } = sidebarFixture();
   const fs = new FakeIndexFs();
   const dataRoot = "/data";
-  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, minimumWords: 1, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
   await engine.start();
   const result = await engine.queryLiveRelated("Notes/active.md", true);
   assert.equal(result.indexed, false);
@@ -720,10 +739,70 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) submits the exact pro
   assert.deepEqual(result.related, []);
   const jobs = await engine.jobStore.list();
   assert.ok(jobs.some((persisted) => persisted.job.kind === "process-note" && persisted.job.target.kind === "note" && persisted.job.target.identity.canonicalPath === "Notes/active.md"));
+  assert.equal(jobs[0].job.trigger, "scheduled", "automatic sidebar work must not bypass editing protection as a manual job");
   await engine.dispose();
 });
 
-void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed IndexStore view against a FRESH embed of the active note's current text once the note is already indexed, excluding itself", async () => {
+void test("automatic sidebar refresh coalesces repeated requests and respects an operator pause", async () => {
+  const { vault } = sidebarFixture();
+  const engine = new ProductionEngine(baseOptions({ fs: new FakeIndexFs(), vault, vaultFileClasses: undefined, minimumWords: 1, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  await engine.pauseProcessing();
+  await Promise.all(Array.from({ length: 5 }, () => engine.queryLiveRelated("Notes/active.md", true)));
+  const jobs = await engine.jobStore.list();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].job.trigger, "scheduled");
+  assert.equal(jobs[0].status, "queued");
+  assert.equal((await engine.jobStore.getOperatorPause()).active, true);
+  await engine.dispose();
+});
+
+void test("active-note priority coalesces saved versions and does not bypass scope or cancellation", async () => {
+  const files = { "Notes/active.md": "A saved eligible note body.", "Archive/private.md": "An out of scope note body." };
+  const engine = new ProductionEngine(baseOptions({ fs: new FakeIndexFs(), vault: richFakeVault(files), vaultFileClasses: undefined, minimumWords: 1, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  await engine.pauseProcessing();
+  const cancelled = new AbortController(); cancelled.abort();
+  await engine.prioritizeActiveNote("Notes/active.md", cancelled.signal);
+  await engine.prioritizeActiveNote("Archive/private.md", new AbortController().signal);
+  assert.equal((await engine.jobStore.list()).length, 0);
+  await engine.prioritizeActiveNote("Notes/active.md", new AbortController().signal);
+  await engine.prioritizeActiveNote("Notes/active.md", new AbortController().signal);
+  const jobs = await engine.jobStore.list();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].job.trigger, "scheduled");
+  assert.equal(jobs[0].status, "queued");
+  assert.equal((await engine.jobStore.getOperatorPause()).active, true);
+  await engine.dispose();
+});
+
+void test("startup returns the latest readiness report when a model degrades during pump activation", async () => {
+  const fs = new FakeIndexFs();
+  const dataRoot = "/data";
+  await buildGeneration(fs, dataRoot, { generationId: 1, embeddingModel: "nomic-embed-text", dimension: 768, notes: [] }, {});
+  await switchCurrentGeneration(fs, dataRoot, 1);
+  await new MigrationStore(fs, dataRoot).setPhase("complete", "ALREADY_UP_TO_DATE", { discoveredCount: 0, processedCount: 0, failedCount: 0 }, new Date(0).toISOString(), { runId: "seed-run", desiredEmbeddingModel: "nomic-embed-text", desiredDimension: 768, desiredPipelineVersion: 1 });
+  const providers = readyProviders();
+  let calls = 0;
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, ...providers, embeddingDimension: 768, probes: { ...providers.probes, localMetadataProvider: async () => ({ status: ++calls === 1 ? "ok" : "unavailable", message: "Model readiness changed." }) } }));
+  const result = await engine.start();
+  assert.equal(result.checks.find((check) => check.code === "LOCAL_METADATA_PROVIDER")?.status, "unavailable");
+  assert.equal(result, engine.getLastPreflightReport());
+  await engine.dispose();
+});
+
+void test("automatic sidebar refresh never processes out-of-scope or too-short notes", async () => {
+  const files = { "Archive/long.md": "enough eligible words ".repeat(20), "Notes/short.md": "Short." };
+  const engine = new ProductionEngine(baseOptions({ fs: new FakeIndexFs(), vault: richFakeVault(files), vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  for (const notePath of Object.keys(files)) {
+    assert.equal((await engine.queryLiveRelated(notePath, true)).stale, true);
+  }
+  assert.deepEqual(await engine.jobStore.list(), []);
+  await engine.dispose();
+});
+
+void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed IndexStore view against a FRESH embed of the active note's current text once the note is already indexed, excluding itself", async (t) => {
   const { vault, files } = sidebarFixture();
   const fs = new FakeIndexFs();
   const dataRoot = "/data";
@@ -743,7 +822,15 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed I
   }, {});
   await switchCurrentGeneration(fs, dataRoot, 1);
 
-  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  let providerCalls = 0;
+  const fixedProvider = fixedVectorEmbeddingProvider(4);
+  const countingProvider: import("./embeddingProvider").EmbeddingProvider = {
+    async embedBatch(request, options) {
+      providerCalls += 1;
+      return fixedProvider.embedBatch(request, options);
+    },
+  };
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, minimumWords: 1, ...readyProviders(), embeddingProvider: countingProvider as never }) as ProductionEngineOptions);
   await engine.start();
   const result = await engine.queryLiveRelated("Notes/active.md", false);
   assert.equal(result.indexed, true);
@@ -751,6 +838,27 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed I
   assert.equal(result.related.length, 1);
   assert.equal(result.related[0].path, "Notes/other.md");
   assert.equal(result.related[0].kind, "core");
+  const repeated = await engine.queryLiveRelated("Notes/active.md", false);
+  assert.deepEqual(repeated, result);
+  assert.equal(providerCalls, 1, "identical validated live queries reuse one provider result");
+  files["Notes/active.md"] += " New source text.";
+  const refreshing = await engine.queryLiveRelated("Notes/active.md", true);
+  assert.equal(refreshing.stale, true);
+  assert.equal(refreshing.indexed, true);
+  assert.equal(refreshing.related[0].path, "Notes/other.md", "connections stay available while persistence updates in the background");
+  const jobs = await engine.jobStore.list();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].job.trigger, "scheduled");
+  t.mock.method(engine.jobEngine, "submit", async () => { throw new Error("Queue persistence unavailable"); });
+  const failedRefresh = await engine.queryLiveRelated("Notes/active.md", true);
+  assert.equal(failedRefresh.indexed, true);
+  assert.equal(failedRefresh.stale, true);
+  assert.deepEqual(failedRefresh.related, refreshing.related, "background submission failure must not hide valid connections");
+  files["Notes/new.md"] = "A new eligible note body.";
+  const notIndexed = await engine.queryLiveRelated("Notes/new.md", true);
+  assert.equal(notIndexed.indexed, false);
+  assert.equal(notIndexed.stale, true);
+  assert.deepEqual(notIndexed.related, []);
   await engine.dispose();
 });
 

@@ -25,6 +25,69 @@
   line-height: 1.4;
 }
 
+.mindmap-settings {
+  container-type: inline-size;
+}
+
+.mindmap-readiness {
+  margin-bottom: 8px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mindmap-settings-section {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mindmap-settings-section > summary {
+  display: flex;
+  min-height: 52px;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.mindmap-settings-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.mindmap-settings-section > summary:focus-visible {
+  border-radius: var(--radius-s);
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.mindmap-settings-section-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.mindmap-settings-section-copy > span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mindmap-settings-edit {
+  color: var(--text-accent);
+  font-size: var(--font-ui-small);
+}
+
+.mindmap-settings-section-body {
+  padding: 0 0 16px 16px;
+}
+
+.mindmap-field-error {
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+}
+
 .callout[data-callout="mindmap"] {
   margin: 0.8rem 0 0;
   border-radius: 10px;
@@ -194,6 +257,23 @@
   font-family: Geist, var(--font-interface);
 }
 
+.mindmap-sidebar-content {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.mindmap-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .mindmap-sidebar-folder {
   color: var(--text-muted);
   font-family: "Geist Mono", var(--font-monospace);
@@ -275,53 +355,40 @@
 .mindmap-heatmap {
   position: relative;
   flex: 0 0 auto;
-  padding: 25px 25px 18px;
+  padding: 8px 12px 12px;
+}
+
+.mindmap-heatmap-disclosure {
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.mindmap-inline-loading {
-  position: absolute;
-  top: 18px;
-  right: 20px;
-  z-index: 3;
-  display: flex;
-  width: 28px;
-  height: 28px;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
+.mindmap-heatmap-disclosure > summary {
+  padding: 9px 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
 }
 
-.mindmap-loading-spinner {
+.mindmap-lookup-search-icon {
   display: inline-flex;
-  width: 18px;
-  height: 18px;
   align-items: center;
   justify-content: center;
+}
+
+.mindmap-lookup-loading {
   color: var(--text-accent);
 }
 
-.mindmap-loading-spinner-icon {
-  display: block;
-  width: 16px;
-  height: 16px;
-  border: 2px solid currentcolor;
-  border-right-color: transparent;
-  border-bottom-color: color-mix(in srgb, currentcolor 35%, transparent);
-  border-radius: 999px;
-  animation: mindmap-loading-spin 0.75s linear infinite;
-}
-
-@keyframes mindmap-loading-spin {
-  to {
-    transform: rotate(360deg);
-  }
+.mindmap-lookup-loading[hidden],
+.mindmap-lookup-search-icon[hidden] {
+  display: none;
 }
 
 .mindmap-heatmap-chart {
   display: block;
   width: 100%;
-  height: 300px;
+  height: 180px;
   overflow: visible;
 }
 
@@ -471,16 +538,13 @@
 
 .mindmap-sidebar-card {
   position: relative;
-  padding: 25px;
+  padding: 12px;
   border-bottom: 1px solid var(--background-modifier-border);
   background: transparent;
   color: var(--text-normal);
   cursor: default;
   outline: none;
-  will-change: opacity, transform, background-color;
-  transition:
-    background-color 140ms ease-out,
-    opacity 140ms ease-out;
+  transition: background-color 140ms cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 .mindmap-sidebar-card:hover,
@@ -490,8 +554,8 @@
 
 .mindmap-sidebar-card.is-expanded {
   background: color-mix(in srgb, var(--interactive-accent) 13%, var(--background-secondary));
-  gap: 15px;
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--interactive-accent) 78%, var(--text-normal));
+  outline: 1px solid color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
+  outline-offset: -1px;
 }
 
 .mindmap-sidebar-card.is-expanded .mindmap-sidebar-title {
@@ -502,17 +566,13 @@
   min-width: 0;
 }
 
-.mindmap-sidebar-card.is-pin-revealed .mindmap-sidebar-card-body {
-  transform: translateX(32px);
-}
-
 .mindmap-sidebar-card-top {
   display: flex;
   min-width: 0;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 10px;
+  margin-bottom: 4px;
 }
 
 .mindmap-sidebar-title-wrap {
@@ -543,24 +603,25 @@
 
 .mindmap-sidebar-pin {
   position: absolute;
-  top: 24px;
-  left: 18px;
+  top: 9px;
+  right: 48px;
   width: 26px;
   height: 26px;
   flex-basis: 26px;
   opacity: 0;
   pointer-events: none;
-  transform: translateX(-4px);
   transition:
     background-color 140ms ease-out,
     border-color 140ms ease-out,
     color 140ms ease-out;
 }
 
-.mindmap-sidebar-card.is-pin-revealed .mindmap-sidebar-pin {
+.mindmap-sidebar-card:hover .mindmap-sidebar-pin,
+.mindmap-sidebar-card:focus-within .mindmap-sidebar-pin,
+.mindmap-sidebar-card.is-pin-revealed .mindmap-sidebar-pin,
+.mindmap-sidebar-pin.is-pinned {
   opacity: 1;
   pointer-events: auto;
-  transform: translateX(0);
 }
 
 .mindmap-sidebar-pin.is-pinned {
@@ -580,23 +641,40 @@
   display: block;
   color: var(--text-normal);
   font-family: "Geist Pixel", "Geist Mono", var(--font-monospace);
-  font-size: 19px;
-  font-weight: 400;
-  line-height: 28px;
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+  line-height: 1.35;
   overflow-wrap: anywhere;
   text-decoration: none;
 }
 
 .mindmap-sidebar-detail {
-  margin-top: 15px;
+  margin-top: 8px;
 }
 
 .mindmap-sidebar-summary {
   color: var(--text-normal);
   font-family: "Geist Mono", var(--font-monospace);
-  font-size: 14px;
-  font-weight: 400;
-  line-height: 20px;
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+}
+
+.mindmap-sidebar-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.mindmap-sidebar-status.is-error { color: var(--text-error); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mindmap-sidebar-card,
+  .mindmap-sidebar-pin { transition: none; }
 }
 
 .mindmap-sidebar-empty {
@@ -618,7 +696,7 @@
 }
 
 .mindmap-scope-manager {
-  margin-top: 12px;
+  margin-top: 4px;
 }
 
 .mindmap-scope-summary-grid {
@@ -628,10 +706,35 @@
 }
 
 .mindmap-scope-summary {
-  padding: 10px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  background: var(--background-secondary);
+  display: grid;
+  gap: 6px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+}
+
+.mindmap-scope-summary-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.3fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.mindmap-scope-summary-row > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mindmap-scope-separate {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.mindmap-scope-separate .mindmap-muted {
+  grid-column: 2;
 }
 
 .mindmap-scope-chip-row {
@@ -691,6 +794,34 @@
   margin: 12px 0 8px;
 }
 
+.mindmap-folder-actions {
+  position: relative;
+}
+
+.mindmap-folder-actions > summary {
+  min-height: var(--input-height);
+  padding: 4px 10px;
+  border-radius: var(--button-radius);
+  background: var(--interactive-normal);
+  box-shadow: var(--input-shadow);
+  cursor: pointer;
+  list-style: none;
+}
+
+.mindmap-folder-actions-menu {
+  position: absolute;
+  z-index: var(--layer-menu);
+  display: grid;
+  min-width: 150px;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+}
+
 .mindmap-scope-search {
   min-width: 220px;
   flex: 1 1 260px;
@@ -705,9 +836,14 @@
 .mindmap-folder-tree-header,
 .mindmap-folder-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 86px 86px;
+  grid-template-columns: minmax(0, 1fr) 86px;
   gap: 8px;
   align-items: center;
+}
+
+.mindmap-folder-tree-header.is-separated,
+.mindmap-folder-row.is-separated {
+  grid-template-columns: minmax(0, 1fr) 86px 86px;
 }
 
 .mindmap-folder-tree-header {
@@ -871,10 +1007,6 @@
   .mindmap-status-swirling::after {
     animation: none;
   }
-
-  .mindmap-loading-spinner-icon {
-    animation: none;
-  }
 }
 
 @media (max-width: 760px) {
@@ -892,6 +1024,11 @@
 
   .mindmap-folder-tree-header,
   .mindmap-folder-row {
+    grid-template-columns: minmax(0, 1fr) 64px;
+  }
+
+  .mindmap-folder-tree-header.is-separated,
+  .mindmap-folder-row.is-separated {
     grid-template-columns: minmax(0, 1fr) 64px 64px;
   }
 }

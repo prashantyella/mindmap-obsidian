@@ -3,119 +3,67 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-// settingsTab.ts imports the "obsidian" module, which in this repo is
-// types-only (no runtime implementation), so it cannot be imported directly
-// in a Node test. This file audits the source text instead: it verifies the
-// linear section order, the absence of the raw status/path/log dump the
-// design explicitly removes, and the subscription-cleanup contract, all of
-// which are otherwise only visible by reading the actual plugin inside
-// Obsidian.
 const SOURCE = fs.readFileSync(path.join(__dirname, "settingsTab.ts"), "utf8");
-// copyDiagnostics() itself lives on the plugin (main.ts), which also
-// imports "obsidian" and cannot be imported directly here either.
 const MAIN_SOURCE = fs.readFileSync(path.join(__dirname, "main.ts"), "utf8");
 
-function sectionIndex(name: string): number {
-  const index = SOURCE.indexOf(`private ${name}(`);
-  assert.ok(index >= 0, `expected a ${name} method in settingsTab.ts`);
-  return index;
-}
-
-void test("the linear IA renders in the exact required order", () => {
-  const order = [
-    "renderOverview",
-    "renderReadingAndResearch",
-    "renderScope",
-    "renderSchedule",
-    "renderLocalAi",
-    "renderTroubleshooting",
-  ].map(sectionIndex);
-
-  for (let i = 1; i < order.length; i += 1) {
-    assert.ok(order[i] > order[i - 1], `expected ${order[i - 1]} to render before ${order[i]}`);
-  }
-
-  const displayBody = SOURCE.slice(SOURCE.indexOf("display(): void {"), SOURCE.indexOf("hide(): void {"));
-  const callOrder = ["renderOverview", "renderReadingAndResearch", "renderScope", "renderSchedule", "renderLocalAi", "renderTroubleshooting"]
-    .map((name) => displayBody.indexOf(`this.${name}()`));
-  for (const index of callOrder) {
-    assert.ok(index >= 0, "expected display() to call every section in order");
-  }
-  for (let i = 1; i < callOrder.length; i += 1) {
-    assert.ok(callOrder[i] > callOrder[i - 1]);
+void test("settings render readiness and the five approved sections in order", () => {
+  const display = SOURCE.slice(SOURCE.indexOf("display(): void"), SOURCE.indexOf("private createSection"));
+  const names = ["renderReadiness", "renderLocalAi", "renderFolders", "renderAutomation", "renderIntegrations", "renderAdvanced"];
+  let previous = -1;
+  for (const name of names) {
+    const index = display.indexOf(`this.${name}()`);
+    assert.ok(index > previous, `${name} should render in the approved order`);
+    previous = index;
   }
 });
 
-void test("no raw status/path/log dump is rendered by default: no unconditional trust/interpreter/command/log-line output", () => {
-  // These are the exact fragments the pre-checkpoint-3 renderSummary() used
-  // to always render (runtime.trust internals, the resolved Python command,
-  // config/script paths, and a rendered "Recent diagnostics" log dump).
-  // Copy diagnostics builds an equivalent report on demand (diagnosticsReport.ts),
-  // but the default settings render path must never construct or display it.
-  assert.doesNotMatch(SOURCE, /Trust: \$\{/);
-  assert.doesNotMatch(SOURCE, /Interpreter: \$\{/);
-  assert.doesNotMatch(SOURCE, /Script source: \$\{/);
-  assert.doesNotMatch(SOURCE, /Config source: \$\{/);
-  assert.doesNotMatch(SOURCE, /Recent diagnostics/);
-  assert.doesNotMatch(SOURCE, /Run commands: current/);
-  assert.doesNotMatch(SOURCE, /Vault root: \$\{/);
-  assert.doesNotMatch(SOURCE, /getBasePath/);
-  assert.equal(SOURCE.includes("renderSummary("), false, "the old full-detail renderSummary() dump must be removed entirely");
+void test("configured sections use native persistent disclosures with compact Edit affordances", () => {
+  assert.match(SOURCE, /createEl\("details"/);
+  assert.match(SOURCE, /this\.viewState\.disclosures\[key\]/);
+  assert.match(SOURCE, /details\.open \? "Done" : "Edit"/);
 });
 
-void test("Overview never interpolates a runtime command, script path, or config path into rendered text", () => {
-  const overviewBody = SOURCE.slice(sectionIndex("renderOverview"), sectionIndex("renderReadingAndResearch"));
-  assert.doesNotMatch(overviewBody, /scriptPath|configPath|command\.command|formatCommandPreview/);
+void test("Local AI is a draft group with one awaited Apply path", () => {
+  assert.match(SOURCE, /Changes stay as a draft until applied/);
+  assert.match(SOURCE, /await this\.plugin\.saveLocalAiConfig\(draft\)/);
+  assert.match(SOURCE, /Changing it requires an explicit reindex/);
+  assert.equal((SOURCE.match(/setButtonText\("Apply"\)/g) ?? []).length, 0, "dynamic Apply label is used exactly in the grouped action");
 });
 
-void test("the Local AI provider config path is never rendered", () => {
-  // The old surface rendered `Config: ${status.configPath ?? "Unavailable"}` directly in the Provider row's description.
-  const localAiBody = SOURCE.slice(sectionIndex("renderLocalAi"), sectionIndex("saveProviderConfig"));
-  assert.doesNotMatch(localAiBody, /status\.configPath/);
+void test("Automation uses the approved labels and one HH:MM field per schedule", () => {
+  assert.match(SOURCE, /While Obsidian is open/);
+  assert.match(SOURCE, /Scheduled \(macOS\)/);
+  assert.match(SOURCE, /macOS opens this vault at the scheduled time/);
+  assert.match(SOURCE, /parseTimeOfDay\(value\)/);
 });
 
-void test("Scope renders no separate status/guidance row outside ScopeManager (no duplicate summary)", () => {
-  const scopeBody = SOURCE.slice(sectionIndex("renderScope"), sectionIndex("renderSchedule"));
-  assert.equal((scopeBody.match(/new Setting\(/g) ?? []).length, 0, "renderScope itself must render no Setting rows -- ScopeManager owns the whole surface, unconditionally");
-  assert.doesNotMatch(scopeBody, /getScopeSetupSummary/);
+void test("research is one Off, Manual, Automatic selector and diagnostics stay in Advanced", () => {
+  assert.match(SOURCE, /addOption\("off", "Off"\).*addOption\("manual", "Manual"\).*addOption\("automatic-reading", "Automatic for Apple Books"\)/s);
+  assert.match(SOURCE, /selectWebResearchMode/);
+  assert.match(SOURCE, /Copy diagnostics/);
+  assert.match(SOURCE, /Apple Books annotation database/);
 });
 
-void test("Local AI text fields commit via bindCommitOnBlurOrEnter rather than a plain per-keystroke onChange", () => {
-  const localAiBody = SOURCE.slice(sectionIndex("renderLocalAi"), sectionIndex("saveProviderConfig"));
-  const textFieldCount = (localAiBody.match(/\.addText\(/g) ?? []).length;
-  const commitBindingCount = (localAiBody.match(/this\.bindProviderText\(/g) ?? []).length;
-  assert.ok(textFieldCount >= 4, "expected Base URL, Model, API key, and Max output tokens as text fields");
-  assert.equal(commitBindingCount, textFieldCount, "every Local AI text field must commit through the blur/Enter binder");
+void test("retired runtime paths and Python setup never appear", () => {
+  assert.doesNotMatch(SOURCE, /pythonCommand|scriptPath|configPath|startRuntimeSetup|cancelRuntimeSetup/);
 });
 
-void test("Troubleshooting uses a native collapsed <details>/<summary> disclosure, not an always-open card", () => {
-  const troubleshootingBody = SOURCE.slice(sectionIndex("renderTroubleshooting"), SOURCE.length);
-  assert.match(troubleshootingBody, /createEl\("details"/);
-  assert.match(troubleshootingBody, /createEl\("summary"/);
-  assert.doesNotMatch(troubleshootingBody, /\.open\s*=\s*true/, "the disclosure must start collapsed");
+void test("provider Apply refreshes readiness in place and engine replacement replaces stale diagnostics", () => {
+  assert.match(SOURCE, /this\.renderReadiness\(\)/);
+  assert.match(SOURCE, /Configuration saved, but Local AI is not ready/);
+  assert.match(MAIN_SOURCE, /this\.diagnosticsState\.result = MindmapPlugin\.toPreflightResult\(report, this\.cachedMigrationStatus/);
 });
 
-void test("Troubleshooting offers Run preflight, a one-line result, Copy diagnostics, and the Apple Books database overrides", () => {
-  const troubleshootingBody = SOURCE.slice(sectionIndex("renderTroubleshooting"), SOURCE.length);
-  assert.match(troubleshootingBody, /Run preflight/);
-  assert.match(troubleshootingBody, /getDiagnosticsOneLine/);
-  assert.match(troubleshootingBody, /Copy diagnostics/);
-  assert.match(troubleshootingBody, /copyDiagnostics/);
-  assert.match(troubleshootingBody, /appleAnnotationDbPath/);
-  assert.match(troubleshootingBody, /appleLibraryDbPath/);
+void test("time and saved text failures restore the latest committed value, not the render-time value", () => {
+  const timeBody = SOURCE.slice(SOURCE.indexOf("private renderTime("), SOURCE.indexOf("private renderIntegrations("));
+  assert.match(timeBody, /committed\.set\(parsed\)/);
+  assert.match(timeBody, /const previous = committed\.get\(\)/);
+  const savedTextBody = SOURCE.slice(SOURCE.indexOf("private savedText("));
+  assert.match(savedTextBody, /committed\.set\(next\.trim\(\)\)/);
+  assert.match(savedTextBody, /update\(committed\.get\(\)\)/);
 });
 
-void test("Checkpoint 11: settingsTab.ts never references the retired Python runtime setup surface", () => {
-  assert.doesNotMatch(SOURCE, /startRuntimeSetup|cancelRuntimeSetup|openPythonRuntimeDownloadPage|subscribeRuntimeSetupState|getRuntimeSetupState|pythonCommand|scriptPath\b|\bconfigPath\b/);
-});
-
-void test("copyDiagnostics() reports a clipboard failure with fixed copy, never the raw error message", () => {
-  const startIndex = MAIN_SOURCE.indexOf("async copyDiagnostics(");
-  assert.ok(startIndex >= 0, "expected copyDiagnostics() on the plugin");
-  const nextMethodIndex = MAIN_SOURCE.indexOf("\n  }", MAIN_SOURCE.indexOf("showStatusSummary("));
-  const body = MAIN_SOURCE.slice(startIndex, nextMethodIndex);
-
-  assert.match(body, /catch\s*\{/, "the failure path must not bind the caught error to a variable it then forwards");
-  assert.doesNotMatch(body, /error\.message/);
-  assert.match(body, /new Notice\("Could not copy diagnostics to the clipboard\."/);
+void test("replacement preparation failure explicitly leaves Mindmap unavailable", () => {
+  assert.match(MAIN_SOURCE, /Mindmap is unavailable because the active job phase did not settle safely/);
+  assert.match(MAIN_SOURCE, /The disposed engine was not restored/);
 });

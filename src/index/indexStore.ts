@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { CanonicalPath, IndexRecordV1, NoteIdentityV1 } from "../engine/contracts";
 import { EngineError } from "../engine/errors";
-import { compareScored, CosineIndexError, dotProduct, MAX_RANKING_LIMIT, normalizeVector } from "./cosineIndex";
+import { CosineIndexError, dotProduct, MAX_RANKING_LIMIT, normalizeVector } from "./cosineIndex";
 import { identityKey, type NoteRowMetadataV1 } from "./generationMetadata";
 import {
   buildGeneration,
@@ -44,6 +44,10 @@ import {
 import { MAX_MANIFEST_CHUNK_COUNT, MAX_MANIFEST_NOTE_COUNT } from "./indexManifest";
 import type { VectorMatrix } from "./vectorCodec";
 import type { ChunkShardNoteOffset, ScoredNote } from "./vectorTypes";
+import { selectTopK } from "./topK";
+import { QueryGenerationCache } from "./queryGenerationCache";
+import { rankCompositeCooperatively } from "./cooperativeRanking";
+import { runCooperativeBlocks, throwIfAborted } from "./cooperativeWork";
 
 /**
  * Top-level orchestrator: the merged, searchable "committed view" (base
@@ -99,6 +103,9 @@ export interface QueryRelatedOptions {
   queryChunkVectors: Float32Array[];
   excludePath?: CanonicalPath;
   limit: number;
+  signal?: AbortSignal;
+  onLoadStage?: import("./generationStore").GenerationLoadOptions["onStage"];
+  onQueryStage?: (measurement: { stage: "refinement"; wallMs: number; maxSynchronousSliceMs: number; yieldCount: number }) => void;
 }
 
 interface ShadowInfo {
@@ -125,50 +132,55 @@ function buildShadowInfo(overlays: readonly OverlayPrefixRecord[]): ShadowInfo {
  * however many overlay note vectors are currently pending (bounded by
  * `MAX_PENDING_OVERLAY_COUNT`), never a base-sized duplicate.
  */
-function rankComposite(
+async function rankCompositeAsync(
   generation: LoadedGeneration | null,
   overlays: readonly OverlayPrefixRecord[],
   queryVector: Float32Array,
   excludePath: CanonicalPath | undefined,
   limit: number,
-): ScoredNote[] {
-  if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_RANKING_LIMIT) {
-    throw new IndexStoreError(`limit must be an integer in (0, ${MAX_RANKING_LIMIT}].`);
-  }
+  signal?: AbortSignal,
+): Promise<ScoredNote[]> {
+  if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_RANKING_LIMIT) throw new IndexStoreError(`limit must be an integer in (0, ${MAX_RANKING_LIMIT}].`);
   const shadow = buildShadowInfo(overlays);
-  const scored: ScoredNote[] = [];
-
+  const baseCount = generation?.noteMetadata.length ?? 0;
   if (generation) {
-    const { noteMatrix, noteMetadata } = generation;
-    if (noteMatrix.data.length !== noteMatrix.count * noteMatrix.dimension) {
-      throw new IndexStoreError("base note matrix shape is invalid (data length does not match count * dimension).");
-    }
-    if (queryVector.length !== noteMatrix.dimension) {
-      throw new IndexStoreError(`queryVector dimension (${queryVector.length}) does not match the base generation's dimension (${noteMatrix.dimension}).`);
-    }
-    noteMetadata.forEach((row, rowIndex) => {
-      const key = identityKey(row.identity);
-      if (shadow.byKey.has(key)) return; // shadowed by an upsert (scored below) or removed by a tombstone
-      const path = row.identity.canonicalPath;
-      if (excludePath !== undefined && path === excludePath) return;
-      const score = dotProduct(queryVector, noteMatrix.data, 0, rowIndex * noteMatrix.dimension, noteMatrix.dimension);
-      if (Number.isFinite(score)) scored.push({ path, score });
-    });
+    if (generation.noteMatrix.data.length !== generation.noteMatrix.count * generation.noteMatrix.dimension) throw new IndexStoreError("base note matrix shape is invalid (data length does not match count * dimension).");
+    if (queryVector.length !== generation.noteMatrix.dimension) throw new IndexStoreError(`queryVector dimension (${queryVector.length}) does not match the base generation's dimension (${generation.noteMatrix.dimension}).`);
   }
-
-  for (const overlay of overlays) {
-    if (overlay.operation !== "upsert" || !overlay.noteVector) continue;
-    if (queryVector.length !== overlay.noteVector.length) {
-      throw new IndexStoreError(`queryVector dimension (${queryVector.length}) does not match overlay note vector dimension (${overlay.noteVector.length}).`);
+  return rankCompositeCooperatively(baseCount + overlays.length, (index) => {
+    if (index < baseCount && generation) {
+      const row = generation.noteMetadata[index];
+      if (shadow.byKey.has(identityKey(row.identity)) || (excludePath !== undefined && row.identity.canonicalPath === excludePath)) return null;
+      const score = dotProduct(queryVector, generation.noteMatrix.data, 0, index * generation.noteMatrix.dimension, generation.noteMatrix.dimension);
+      return Number.isFinite(score) ? { path: row.identity.canonicalPath, score } : null;
     }
-    const path = overlay.identity.canonicalPath;
-    if (excludePath !== undefined && path === excludePath) continue;
+    const overlay = overlays[index - baseCount];
+    if (overlay.operation !== "upsert" || !overlay.noteVector) return null;
+    if (queryVector.length !== overlay.noteVector.length) throw new IndexStoreError(`queryVector dimension (${queryVector.length}) does not match overlay note vector dimension (${overlay.noteVector.length}).`);
+    if (excludePath !== undefined && overlay.identity.canonicalPath === excludePath) return null;
     const score = dotProduct(queryVector, overlay.noteVector, 0, 0, overlay.noteVector.length);
-    if (Number.isFinite(score)) scored.push({ path, score });
-  }
+    return Number.isFinite(score) ? { path: overlay.identity.canonicalPath, score } : null;
+  }, limit, { signal });
+}
 
-  scored.sort(compareScored);
-  return scored.slice(0, limit);
+async function maxChunkScoreCooperatively(
+  queryChunkVectors: readonly Float32Array[],
+  matrix: VectorMatrix,
+  rowStart: number,
+  rowCount: number,
+  signal?: AbortSignal,
+): Promise<{ score: number; maxSynchronousSliceMs: number; yieldCount: number }> {
+  let bestScore = Number.NEGATIVE_INFINITY;
+  const pairCount = rowCount * queryChunkVectors.length;
+  const metrics = await runCooperativeBlocks(pairCount, 64, (start, end) => {
+    for (let pair = start; pair < end; pair += 1) {
+      const row = rowStart + Math.floor(pair / queryChunkVectors.length);
+      const query = queryChunkVectors[pair % queryChunkVectors.length];
+      const score = dotProduct(query, matrix.data, 0, row * matrix.dimension, matrix.dimension);
+      if (Number.isFinite(score) && score > bestScore) bestScore = score;
+    }
+  }, { signal });
+  return { score: bestScore, maxSynchronousSliceMs: metrics.maxSliceMs, yieldCount: metrics.yieldCount };
 }
 
 /**
@@ -179,12 +191,18 @@ function rankComposite(
  * `IndexStoreError` (fail closed) if any OWNED overlay file is corrupt.
  */
 export async function queryRelated(fs: IndexFs, root: string, options: QueryRelatedOptions): Promise<ScoredNote[]> {
+  throwIfAborted(options.signal);
   const generationId = await loadCurrentGenerationId(fs, root);
-  const generation = generationId === null ? null : await loadGeneration(fs, root, generationId);
+  throwIfAborted(options.signal);
+  const generation = generationId === null ? null : await loadGeneration(fs, root, generationId, { signal: options.signal, onStage: options.onLoadStage });
+  return queryRelatedWithGeneration(fs, root, generation, options);
+}
+
+async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation: LoadedGeneration | null, options: QueryRelatedOptions): Promise<ScoredNote[]> {
   const overlays = await loadOverlayPrefixesOrThrow(fs, root);
 
   const queryVector = normalizeVector(options.queryVector);
-  const candidates = rankComposite(generation, overlays, queryVector, options.excludePath, options.limit);
+  const candidates = await rankCompositeAsync(generation, overlays, queryVector, options.excludePath, options.limit, options.signal);
   if (candidates.length === 0) return [];
 
   const queryChunkVectors = options.queryChunkVectors.map((v) => normalizeVector(v));
@@ -215,14 +233,10 @@ export async function queryRelated(fs: IndexFs, root: string, options: QueryRela
       throw wrapOverlayError(error, `cannot refine candidate "${path}": its overlay failed validation`);
     });
     if (!full || !full.chunkMatrix || full.chunkMatrix.count === 0) continue;
-    let bestScore = Number.NEGATIVE_INFINITY;
-    for (let row = 0; row < full.chunkMatrix.count; row += 1) {
-      for (const qv of queryChunkVectors) {
-        const score = dotProduct(qv, full.chunkMatrix.data, 0, row * full.chunkMatrix.dimension, full.chunkMatrix.dimension);
-        if (Number.isFinite(score) && score > bestScore) bestScore = score;
-      }
-    }
-    if (Number.isFinite(bestScore)) refined.push({ path, score: bestScore });
+    const refinementStarted = performance.now();
+    const result = await maxChunkScoreCooperatively(queryChunkVectors, full.chunkMatrix, 0, full.chunkMatrix.count, options.signal);
+    options.onQueryStage?.({ stage: "refinement", wallMs: performance.now() - refinementStarted, maxSynchronousSliceMs: result.maxSynchronousSliceMs, yieldCount: result.yieldCount });
+    if (Number.isFinite(result.score)) refined.push({ path, score: result.score });
   }
 
   // Base-sourced candidates: grouped by shard, exactly one shard's matrix resident at a time.
@@ -234,7 +248,7 @@ export async function queryRelated(fs: IndexFs, root: string, options: QueryRela
   }
   for (const [shardId, paths] of byShardId) {
     if (!generation) continue;
-    const shard = await generation.loadShard(shardId);
+    const shard = await generation.loadShard(shardId, { signal: options.signal, onStage: options.onLoadStage });
     const pathSet = new Set(paths);
     const offsetsByKey = new Map(shard.offsets.map((o) => [identityKey(o.identity), o]));
     for (const path of pathSet) {
@@ -242,20 +256,14 @@ export async function queryRelated(fs: IndexFs, root: string, options: QueryRela
       if (!row) continue;
       const offset = offsetsByKey.get(identityKey(row.identity));
       if (!offset) continue;
-      let bestScore = Number.NEGATIVE_INFINITY;
-      for (let i = 0; i < offset.length; i += 1) {
-        const chunkRow = offset.start + i;
-        for (const qv of queryChunkVectors) {
-          const score = dotProduct(qv, shard.matrix.data, 0, chunkRow * shard.matrix.dimension, shard.matrix.dimension);
-          if (Number.isFinite(score) && score > bestScore) bestScore = score;
-        }
-      }
-      if (Number.isFinite(bestScore)) refined.push({ path, score: bestScore });
+      const refinementStarted = performance.now();
+      const result = await maxChunkScoreCooperatively(queryChunkVectors, shard.matrix, offset.start, offset.length, options.signal);
+      options.onQueryStage?.({ stage: "refinement", wallMs: performance.now() - refinementStarted, maxSynchronousSliceMs: result.maxSynchronousSliceMs, yieldCount: result.yieldCount });
+      if (Number.isFinite(result.score)) refined.push({ path, score: result.score });
     }
   }
 
-  refined.sort(compareScored);
-  return refined.slice(0, options.limit);
+  return selectTopK(refined, options.limit);
 }
 
 /**
@@ -283,6 +291,19 @@ export async function getIndexedRecord(fs: IndexFs, root: string, identity: Note
   return row ?? null;
 }
 
+async function getIndexedRecordWithGeneration(fs: IndexFs, root: string, identity: NoteIdentityV1, generation: LoadedGeneration | null): Promise<IndexRecordV1 | null> {
+  const overlays = await loadOverlayPrefixesOrThrow(fs, root);
+  const key = identityKey(identity);
+  const overlay = overlays.find((o) => identityKey(o.identity) === key);
+  if (overlay) {
+    if (overlay.operation !== "upsert" || overlay.sourceHash === undefined || overlay.embeddingModel === undefined || overlay.chunkCount === undefined) return null;
+    return { schemaVersion: 1, identity: overlay.identity, sourceHash: overlay.sourceHash, embeddingModel: overlay.embeddingModel, chunkCount: overlay.chunkCount, ...(overlay.relatedVersion !== undefined ? { relatedVersion: overlay.relatedVersion } : {}) };
+  }
+  if (generation === null) return null;
+  const row = generation.noteMetadata.find((r) => identityKey(r.identity) === key);
+  return row ?? null;
+}
+
 export interface IndexedCatalogRecord {
   identity: NoteIdentityV1;
   sourceHash: string;
@@ -304,14 +325,16 @@ export interface IndexedCatalogRecord {
  * `null`) when there is genuinely no current generation yet (a fresh,
  * not-yet-built index is a legitimate "nothing indexed", not a failure).
  */
-export async function snapshotIndexedCatalog(fs: IndexFs, root: string): Promise<IndexedCatalogRecord[] | null> {
+export async function snapshotIndexedCatalog(fs: IndexFs, root: string, signal?: AbortSignal): Promise<IndexedCatalogRecord[] | null> {
+  throwIfAborted(signal);
   const generationId = await loadCurrentGenerationId(fs, root);
   let baseRecords: readonly NoteRowMetadataV1[] = [];
   if (generationId !== null) {
     try {
-      const { noteMetadata } = await verifyGenerationFully(fs, root, generationId);
+      const { noteMetadata } = await verifyGenerationFully(fs, root, generationId, { signal });
       baseRecords = noteMetadata;
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       return null;
     }
   }
@@ -705,8 +728,8 @@ export async function planCompaction(fs: IndexFs, root: string): Promise<Compact
  * `buildGeneration` succeeded leaves the new generation on disk but
  * unreferenced -- never partially activated.
  */
-export async function finalizeCompaction(fs: IndexFs, root: string, newGenerationId: number, plan: CompactionPlan): Promise<void> {
-  await switchCurrentGeneration(fs, root, newGenerationId);
+export async function finalizeCompaction(fs: IndexFs, root: string, newGenerationId: number, plan: CompactionPlan, signal?: AbortSignal): Promise<void> {
+  await switchCurrentGeneration(fs, root, newGenerationId, { signal });
   for (const overlay of plan.overlaysSnapshot) {
     await deleteOverlayIfSnapshotMatches(fs, root, overlayFileName(overlay.identity), overlay.version, overlay.fingerprint);
   }
@@ -833,8 +856,8 @@ export function compactionSnapshotMatchesGeneration(descriptor: CompactionSnapsh
  * version+fingerprint-checked (`deleteOverlayIfSnapshotMatches`) against
  * the snapshot -- never a replacement written after planning.
  */
-export async function finalizeCompactionFromSnapshot(fs: IndexFs, root: string, newGenerationId: number, overlays: readonly CompactionSnapshotOverlayEntry[]): Promise<void> {
-  await switchCurrentGeneration(fs, root, newGenerationId);
+export async function finalizeCompactionFromSnapshot(fs: IndexFs, root: string, newGenerationId: number, overlays: readonly CompactionSnapshotOverlayEntry[], signal?: AbortSignal): Promise<void> {
+  await switchCurrentGeneration(fs, root, newGenerationId, { signal });
   for (const overlay of overlays) {
     await deleteOverlayIfSnapshotMatches(fs, root, overlay.fileName, overlay.version, overlay.fingerprint);
   }
@@ -914,26 +937,37 @@ export function runWithIndexMutationLock<T>(fs: IndexFs, root: string, fn: () =>
 
 export class IndexStore {
   private readonly queue: IndexMutationQueue;
+  private readonly queryGenerationCache: QueryGenerationCache;
 
   constructor(
     private readonly fs: IndexFs,
     private readonly root: string,
   ) {
     this.queue = sharedMutationQueueFor(fs, root);
+    this.queryGenerationCache = new QueryGenerationCache(fs, root);
   }
 
-  queryRelated(options: QueryRelatedOptions): Promise<ScoredNote[]> {
-    return queryRelated(this.fs, this.root, options);
+  async queryRelated(options: QueryRelatedOptions): Promise<ScoredNote[]> {
+    return this.queryGenerationCache.run((generation) => queryRelatedWithGeneration(this.fs, this.root, generation, options), { signal: options.signal, onStage: options.onLoadStage });
   }
 
   /** Read-only single-identity lookup -- see `getIndexedRecord`'s own doc comment. */
-  getRecord(identity: NoteIdentityV1): Promise<IndexRecordV1 | null> {
-    return getIndexedRecord(this.fs, this.root, identity);
+  async getRecord(identity: NoteIdentityV1, signal?: AbortSignal): Promise<IndexRecordV1 | null> {
+    return this.queryGenerationCache.run((generation) => getIndexedRecordWithGeneration(this.fs, this.root, identity, generation), { signal });
+  }
+
+  /** Conservative combined index/overlay/query-cache budget check; false until a verified base is resident. */
+  canRetainLiveEmbeddingBytes(bytes: number): boolean {
+    return this.queryGenerationCache.canRetainAdditionalBytes(bytes);
+  }
+
+  clearQueryCaches(): void {
+    this.queryGenerationCache.clear();
   }
 
   /** Read-only, fully-verified catalog snapshot -- see `snapshotIndexedCatalog`'s own doc comment. */
-  snapshotCatalog(): Promise<IndexedCatalogRecord[] | null> {
-    return snapshotIndexedCatalog(this.fs, this.root);
+  snapshotCatalog(signal?: AbortSignal): Promise<IndexedCatalogRecord[] | null> {
+    return snapshotIndexedCatalog(this.fs, this.root, signal);
   }
 
   getRevision(): number { return this.queue.getRevision(); }
@@ -973,13 +1007,14 @@ export class IndexStore {
    * trust a failed verification. Read-only: never writes/activates
    * anything, unlike `compact()`'s own use of the same underlying check.
    */
-  async verifyCurrentGenerationFully(): Promise<{ noteCount: number } | null> {
+  async verifyCurrentGenerationFully(signal?: AbortSignal): Promise<{ noteCount: number } | null> {
     const generationId = await loadCurrentGenerationId(this.fs, this.root);
     if (generationId === null) return null;
     try {
-      const { manifest } = await verifyGenerationFully(this.fs, this.root, generationId);
+      const { manifest } = await verifyGenerationFully(this.fs, this.root, generationId, { signal });
       return { noteCount: manifest.noteCount };
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       return null;
     }
   }
@@ -1047,6 +1082,7 @@ export class IndexStore {
    */
   compact(newGenerationId: number, options: { signal?: AbortSignal } = {}): Promise<void> {
     return this.queue.run(async () => {
+      this.queryGenerationCache.clear();
       const plan = await planCompaction(this.fs, this.root);
       const buildInput: BuildGenerationInput = { generationId: newGenerationId, embeddingModel: plan.embeddingModel, dimension: plan.dimension, notes: plan.notes };
       await buildGeneration(this.fs, this.root, buildInput, { signal: options.signal });
@@ -1060,7 +1096,8 @@ export class IndexStore {
         throw new GenerationBuildCancelledError();
       }
 
-      await finalizeCompaction(this.fs, this.root, newGenerationId, plan);
+      await finalizeCompaction(this.fs, this.root, newGenerationId, plan, options.signal);
+      this.queryGenerationCache.clear();
     });
   }
 

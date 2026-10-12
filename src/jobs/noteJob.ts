@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { CanonicalPath, MetadataOutputV1, NoteIdentityV1, RelatedCandidateV1, SourceProjectionV1 } from "../engine/contracts";
+import type { CanonicalPath, JobTrigger, MetadataOutputV1, NoteIdentityV1, RelatedCandidateV1, SourceProjectionV1 } from "../engine/contracts";
 import { EngineError, isEngineError } from "../engine/errors";
 import { MAX_EMBEDDING_DIMENSION } from "../engine/embeddingLimits";
 import type { NoteWriter } from "../engine/noteWriter";
@@ -81,7 +81,7 @@ export interface UpsertNoteOverlaySeam {
  * detected at more than one phase) safe.
  */
 export interface NoteReplacementSeam {
-  enqueueReplacement(input: { identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number; batchId?: string; batchItemId?: string }): Promise<void>;
+  enqueueReplacement(input: { identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number; batchId?: string; batchItemId?: string; trigger?: JobTrigger }): Promise<void>;
 }
 
 export interface NoteJobDeps {
@@ -96,10 +96,11 @@ export interface NoteJobDeps {
   /** See `NoteReplacementSeam`. */
   replacement: NoteReplacementSeam;
   /** Returns true only for automatic/bulk writes that should wait while the note is actively edited. */
-  deferWrite?: (persisted: PersistedJobV1, identity: NoteIdentityV1) => boolean;
+  deferWrite?: (persisted: PersistedJobV1, identity: NoteIdentityV1, savedContent?: string) => boolean;
 }
 
 interface NoteJobMemory {
+  trigger?: JobTrigger;
   projection?: SourceProjectionV1;
   embedded?: EmbeddedNote;
   metadata?: MetadataOutputV1;
@@ -218,6 +219,7 @@ export class NoteJobRunner implements JobPhaseRunner {
     }
     const jobId = persisted.job.jobId;
     const memory = this.memoryFor(jobId);
+    memory.trigger = persisted.job.trigger;
     memory.batchId = persisted.job.batchId;
     memory.batchItemId = persisted.job.batchItemId;
     const pipelineVersion = persisted.job.pipelineVersion;
@@ -280,7 +282,7 @@ export class NoteJobRunner implements JobPhaseRunner {
     if (mem.replacementEnqueued) return undefined;
     try {
       const memory = this.memoryFor(jobId);
-      await this.deps.replacement.enqueueReplacement({ identity, sourceHash, embeddingModel, pipelineVersion, batchId: memory.batchId, batchItemId: memory.batchItemId });
+      await this.deps.replacement.enqueueReplacement({ identity, sourceHash, embeddingModel, pipelineVersion, batchId: memory.batchId, batchItemId: memory.batchItemId, trigger: memory.trigger });
     } catch (error) {
       return { type: "retry", failureCode: toFailureCode(error) };
     }
@@ -439,7 +441,6 @@ export class NoteJobRunner implements JobPhaseRunner {
 
   private async stepWriteNote(persisted: PersistedJobV1, identity: NoteIdentityV1, expectedSourceHash: string, embeddingModel: string, pipelineVersion: number, signal: AbortSignal): Promise<PhaseStepOutcome> {
     const jobId = persisted.job.jobId;
-    if (persisted.job.batchId !== undefined && this.deps.deferWrite?.(persisted, identity)) return { type: "deferred" };
     // After a deferral, the source may have changed while the job was parked. Re-check freshness
     // so an edited note enqueues a replacement (via tryEnqueueReplacement) instead of discovering
     // the stale hash only at NoteWriter.writeMetadata time, where the obsolete outcome would lose
@@ -453,7 +454,9 @@ export class NoteJobRunner implements JobPhaseRunner {
     const metadataResult = await this.ensureMetadata(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
     if (!metadataResult.ok) return metadataResult.outcome;
     let metadata = metadataResult.value;
-    const resolved = this.resolvedIdentityFor(jobId, identity);
+    let resolved = this.resolvedIdentityFor(jobId, identity);
+    const mayDefer = persisted.job.batchId !== undefined || persisted.job.trigger !== "manual";
+    if (mayDefer && this.deps.deferWrite?.(persisted, resolved)) return { type: "deferred" };
     const isAppleAnnotation = resolved.kind === "apple-annotation";
     if (!isAppleAnnotation && this.deps.selectRelated) {
       const embeddedResult = await this.ensureEmbedded(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
@@ -463,7 +466,9 @@ export class NoteJobRunner implements JobPhaseRunner {
       this.memoryFor(jobId).metadata = metadata;
       const postSelectFresh = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);
       if (!postSelectFresh.ok) return postSelectFresh.outcome;
+      resolved = this.resolvedIdentityFor(jobId, identity);
     }
+    if (mayDefer && this.deps.deferWrite?.(persisted, resolved)) return { type: "deferred" };
     let result;
     try {
       result = await this.deps.noteWriter.writeMetadata({
@@ -476,6 +481,9 @@ export class NoteJobRunner implements JobPhaseRunner {
         mindmapHeading: this.deps.mindmapHeading,
         writeMindmapSection: false,
         removeMindmapSection: !isAppleAnnotation,
+        shouldDeferCommit: mayDefer && this.deps.deferWrite
+          ? (savedContent) => this.deps.deferWrite!(persisted, resolved, savedContent)
+          : undefined,
       });
     } catch (error) {
       if (isEngineError(error) && error.code === "SOURCE_STALE") {
@@ -483,6 +491,7 @@ export class NoteJobRunner implements JobPhaseRunner {
       }
       return this.providerFailureOutcome(error);
     }
+    if (result.status === "deferred") return { type: "deferred" };
     const receipt: JobReceiptV1 = { kind: "note", noteCommitted: true, noteContentHash: sha256Hex(result.content), overlayCommitted: false };
     return { type: "advance", nextPhase: "write-overlay", receipt };
   }

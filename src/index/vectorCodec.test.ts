@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 
 import {
   checksumHex,
+  checksumHexCooperatively,
   decodeVectorMatrix,
+  decodeVectorMatrixCooperatively,
   encodeVectorMatrix,
   HEADER_BYTES,
   MAX_DIMENSION,
@@ -278,4 +280,117 @@ void test("decodeVectorMatrix rejects a decoded row whose norm has drifted to ze
     skewed[HEADER_BYTES + 8 + i] = parseInt(skewedChecksum.slice(i * 2, i * 2 + 2), 16);
   }
   assert.throws(() => decodeVectorMatrix(skewed), (error: unknown) => error instanceof VectorCodecError && /norm/.test(error.message));
+});
+
+void test("cooperative decoder exactly matches sync output while sync/default async outputs remain copy-independent", async () => {
+  const original = matrix("chunk", 3, [unitRow([1, 2, 3]), unitRow([-1, 0, 1])]);
+  const encoded = encodeVectorMatrix(original);
+  const sync = decodeVectorMatrix(encoded, { expectedKind: "chunk" });
+  const asyncCopied = await decodeVectorMatrixCooperatively(encoded, { expectedKind: "chunk" });
+  assert.deepEqual(asyncCopied, sync);
+  encoded[HEADER_BYTES] ^= 0xff;
+  assert.deepEqual([...sync.data], [...original.data]);
+  assert.deepEqual([...asyncCopied.data], [...original.data]);
+});
+
+void test("owned exact aligned buffers may alias only after validation; subarrays fall back to a defensive copy", async () => {
+  const encoded = encodeVectorMatrix(matrix("note", 2, [unitRow([1, 2])]));
+  const stages: Array<{ usedOwnedView?: boolean }> = [];
+  const owned = await decodeVectorMatrixCooperatively(encoded, { ownedBufferView: true, onStage: (stage) => stages.push(stage) });
+  new DataView(encoded.buffer).setFloat32(HEADER_BYTES, 0.25, true);
+  assert.equal(owned.data[0], 0.25, "explicit privately-owned view aliases its exact backing allocation");
+  assert.equal(stages[stages.length - 1]?.usedOwnedView, true);
+
+  const fresh = encodeVectorMatrix(matrix("note", 2, [unitRow([1, 2])]));
+  const padded = new Uint8Array(fresh.length + 8);
+  padded.set(fresh, 4);
+  const borrowed = padded.subarray(4, 4 + fresh.length);
+  const copied = await decodeVectorMatrixCooperatively(borrowed, { ownedBufferView: true });
+  new DataView(padded.buffer).setFloat32(4 + HEADER_BYTES, 0.5, true);
+  assert.notEqual(copied.data[0], 0.5);
+
+  const shared = new Uint8Array(new SharedArrayBuffer(fresh.length));
+  shared.set(fresh);
+  const sharedDecoded = await decodeVectorMatrixCooperatively(shared, { ownedBufferView: true });
+  new DataView(shared.buffer).setFloat32(HEADER_BYTES, 0.75, true);
+  assert.notEqual(sharedDecoded.data[0], 0.75, "SharedArrayBuffer is never accepted by the owned-view path");
+});
+
+void test("cooperative decoder preserves checksum, kind, finite, norm, and hostile-header rejection", async () => {
+  const encoded = encodeVectorMatrix(matrix("note", 2, [unitRow([1, 0])]));
+  const checksumCorrupt = encoded.slice();
+  checksumCorrupt[HEADER_BYTES] ^= 1;
+  await assert.rejects(() => decodeVectorMatrixCooperatively(checksumCorrupt), /checksum/);
+  await assert.rejects(() => decodeVectorMatrixCooperatively(encoded, { expectedKind: "chunk" }), /expected a "chunk"/);
+
+  for (const value of [Number.NaN, Number.POSITIVE_INFINITY, 0.5]) {
+    const corrupt = encoded.slice();
+    new DataView(corrupt.buffer).setFloat32(HEADER_BYTES, value, true);
+    const digest = await checksumHexCooperatively(corrupt.subarray(0, HEADER_BYTES + 8));
+    corrupt.set(Buffer.from(digest, "hex"), HEADER_BYTES + 8);
+    await assert.rejects(() => decodeVectorMatrixCooperatively(corrupt), value === 0.5 ? /norm/ : /finite/);
+  }
+
+  const hostile = new Uint8Array(HEADER_BYTES + 32);
+  hostile.set(Uint8Array.from(VECTOR_MATRIX_MAGIC, (ch) => ch.charCodeAt(0)));
+  const view = new DataView(hostile.buffer);
+  view.setUint16(6, 1, true);
+  view.setUint32(8, MAX_DIMENSION, true);
+  view.setUint32(12, MAX_VECTOR_COUNT, true);
+  await assert.rejects(() => decodeVectorMatrixCooperatively(hostile), /ceiling/);
+});
+
+void test("cooperative decoder yields in bounded slices and aborts without returning partial output", async () => {
+  const encoded = encodeVectorMatrix({ kind: "chunk", dimension: 4, count: 3_000, data: Float32Array.from({ length: 12_000 }, (_value, index) => index % 4 === 0 ? 1 : 0) });
+  let clock = 0;
+  let yields = 0;
+  const stages: Array<{ maxSynchronousSliceMs: number }> = [];
+  await decodeVectorMatrixCooperatively(encoded, {
+    sliceMs: 0.5,
+    now: () => { clock += 0.25; return clock; },
+    yieldControl: async () => { yields += 1; },
+    onStage: (stage) => stages.push(stage),
+  });
+  assert.ok(yields > 0);
+  assert.ok(stages.every((stage) => stage.maxSynchronousSliceMs <= 0.5));
+
+  const controller = new AbortController();
+  let abortYields = 0;
+  const pending = decodeVectorMatrixCooperatively(encoded, {
+    signal: controller.signal,
+    sliceMs: 0.001,
+    yieldControl: async () => { abortYields += 1; controller.abort(); },
+  });
+  await assert.rejects(() => pending, (error: unknown) => error instanceof Error && error.name === "AbortError");
+  assert.ok(abortYields > 0);
+});
+
+void test("borrowed-buffer mutation during cooperative snapshot never exposes mixed unchecked output", async () => {
+  const original = encodeVectorMatrix({ kind: "chunk", dimension: 4, count: 20_000, data: Float32Array.from({ length: 80_000 }, (_value, index) => index % 4 === 0 ? 1 : 0) });
+  const borrowed = original.slice();
+  let mutated = false;
+  try {
+    const decoded = await decodeVectorMatrixCooperatively(borrowed, {
+      sliceMs: 0.001,
+      yieldControl: async () => {
+        if (!mutated) {
+          mutated = true;
+          borrowed[HEADER_BYTES + 70_000] ^= 0xff;
+        }
+      },
+    });
+    assert.deepEqual([...decoded.data], [...decodeVectorMatrix(original).data], "a successful result must be one coherent validated snapshot");
+  } catch (error) {
+    assert.ok(error instanceof VectorCodecError && /checksum|finite|norm/.test(error.message));
+  }
+  assert.equal(mutated, true);
+});
+
+void test("expected whole-artifact checksum is verified against the same private snapshot as embedded integrity", async () => {
+  const a = encodeVectorMatrix(matrix("note", 2, [unitRow([1, 0])]));
+  const b = encodeVectorMatrix(matrix("note", 2, [unitRow([0, 1])]));
+  await assert.rejects(
+    () => decodeVectorMatrixCooperatively(b, { expectedArtifactChecksum: checksumHex(a) }),
+    (error: unknown) => error instanceof VectorCodecError && /manifest checksum/.test(error.message),
+  );
 });

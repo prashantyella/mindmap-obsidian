@@ -37,14 +37,16 @@ void test("source audit: runMindmapViaProductionEngine maps refreshAll/metadataA
 
 void test("source audit: preflight is ProductionEngine.recheckReadiness() whenever the engine is available, never the Python --preflight subprocess", () => {
   const mainSource = readSource("src/main.ts");
-  const match = mainSource.match(/async runPreflight\(trigger: "manual" \| "startup"\): Promise<PreflightResult> \{\s*\n\s*if \(this\.productionEngine\) \{\s*\n\s*return await this\.runProductionPreflight/);
-  assert.ok(match, "runPreflight must check `this.productionEngine` and delegate to runProductionPreflight BEFORE the Python `--preflight` spawn path");
+  const method = mainSource.match(/async runPreflight\(trigger: "manual" \| "startup"\): Promise<PreflightResult> \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.match(method, /if \(this\.productionEngine\) \{/);
+  assert.match(method, /const promise = this\.runProductionPreflight\(trigger, engine\)/);
+  assert.ok(method.indexOf("this.runProductionPreflight") < method.indexOf("const summary"), "the shared engine check must precede the unavailable-engine fallback");
   assert.match(mainSource, /await engine\.recheckReadiness\(\)/);
 });
 
 void test("source audit: sidebar live/lookup related queries require the TypeScript ProductionEngine -- there is no Python semantic worker fallback left to prefer over", () => {
   const mainSource = readSource("src/main.ts");
-  assert.match(mainSource, /async queryLiveRelated\(path: string\): Promise<LiveRelatedResponse> \{[\s\S]{0,300}if \(!this\.productionEngine\) \{/);
+  assert.match(mainSource, /async queryLiveRelated\(path: string(?:, [^)]*)?\): Promise<LiveRelatedResponse> \{[\s\S]{0,300}if \(!this\.productionEngine\) \{/);
   assert.match(mainSource, /async queryLookupRelated\(query: string, limit\?: number\): Promise<LookupRelatedResponse> \{[\s\S]{0,300}if \(!this\.productionEngine\) \{/);
   assert.doesNotMatch(mainSource, /semanticEnvironment\.queryRelated|semanticEnvironment\.queryText/);
 });
@@ -83,10 +85,13 @@ void test("source audit: the LaunchAgent path installs only the accepted TS Back
 
 void test("source audit: startProductionEngine sets productionEngineFailed and shows a Notice on a construction/start failure, and wraps construction itself (not just start())", () => {
   const mainSource = readSource("src/main.ts");
-  const method = mainSource.match(/private async startProductionEngine\(\): Promise<void> \{[\s\S]*?\n {2}\}/);
-  assert.ok(method, "startProductionEngine method not found");
+  assert.match(mainSource, /await this\.activateProductionEngine\(throwOnFailure, settings\)/);
+  const method = mainSource.match(/private async activateProductionEngine\([^)]*\): Promise<void> \{[\s\S]*?\n {2}\}/);
+  assert.ok(method, "activation method not found");
   const body = method![0];
-  assert.match(body, /try \{\s*\n\s*const engine = new ProductionEngine\(options\);/, "construction itself must be inside the try block, not just start()");
+  assert.match(body, /const engine = new ProductionEngine\(engineOptions\);/);
+  assert.match(body, /try \{[\s\S]*?replacement = await replaceEngineSafely\(/);
+  assert.match(readSource("src/engineReplacement.ts"), /try \{\s*next = options\.createNext\(\);\s*const startResult = await next\.start\(\);/, "replacement must catch factory construction failures as well as startup failures");
   assert.match(body, /this\.productionEngineFailed = true;/);
   assert.match(body, /new Notice\(/);
 });
@@ -103,7 +108,7 @@ void test("source audit: runMindmap/runPreflight/queryLiveRelated/queryLookupRel
   for (const guardedMethod of [
     /async runMindmap\(trigger: RunTrigger, scope: RunScope = "current", notePath\?: string\): Promise<boolean> \{\s*\n\s*if \(this\.productionEngine\) \{/,
     /async runPreflight\(trigger: "manual" \| "startup"\): Promise<PreflightResult> \{\s*\n\s*if \(this\.productionEngine\) \{/,
-    /async queryLiveRelated\(path: string\): Promise<LiveRelatedResponse> \{[\s\S]{0,300}if \(!this\.productionEngine\) \{/,
+    /async queryLiveRelated\(path: string(?:, [^)]*)?\): Promise<LiveRelatedResponse> \{[\s\S]{0,300}if \(!this\.productionEngine\) \{/,
     /async queryLookupRelated\(query: string, limit\?: number\): Promise<LookupRelatedResponse> \{[\s\S]{0,300}if \(!this\.productionEngine\) \{/,
   ]) {
     assert.match(mainSource, guardedMethod);
@@ -127,7 +132,8 @@ void test("source audit: operator pause never aborts or kills active work", () =
 
 void test("source audit: replacing or failing a ProductionEngine clears activity subscription and cached activity", () => {
   const source = readSource("src/main.ts");
-  const method = source.match(/private async startProductionEngine\(\): Promise<void> \{[\s\S]*?\n\x20{2}\}/)?.[0] ?? "";
+  assert.match(source, /await this\.activateProductionEngine\(throwOnFailure, settings\)/);
+  const method = source.match(/private async activateProductionEngine\([^)]*\): Promise<void> \{[\s\S]*?\n\x20{2}\}/)?.[0] ?? "";
   assert.match(method, /this\.unsubscribeActivity\?\.\(\);/);
   assert.match(method, /this\.engineActivity = null;/);
   assert.match(method, /this\.updateStatusBar\(\);/);

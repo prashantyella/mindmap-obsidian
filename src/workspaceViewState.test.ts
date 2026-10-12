@@ -10,11 +10,29 @@ import {
   createLoadingLiveState,
   createReadyLiveState,
   getDisplayLiveRelated,
+  getIndexRefreshTargets,
   NO_MINDMAP_CONNECTIONS_MESSAGE,
+  normalizeMindmapViewState,
+  rememberExpandedPath,
   shouldApplyLiveResponse,
   shouldSkipLiveQuery,
   type SidebarLiveState,
 } from "./workspaceViewState";
+
+void test("any committed index revision refreshes both active-note and current lookup results", () => {
+  assert.deepEqual(getIndexRefreshTargets("Active.md", "semantic question"), { live: true, lookup: true });
+  assert.deepEqual(getIndexRefreshTargets("Active.md", "  "), { live: true, lookup: false });
+  assert.deepEqual(getIndexRefreshTargets(null, "semantic question"), { live: false, lookup: true });
+});
+
+void test("view state restores heatmap and bounds per-note expansion to 100 entries", () => {
+  let state = normalizeMindmapViewState({ heatmapOpen: true, expandedByNote: {} });
+  for (let index = 0; index < 105; index += 1) state = rememberExpandedPath(state, `Note-${index}.md`, `Related-${index}.md`);
+  assert.equal(state.heatmapOpen, true);
+  assert.equal(Object.keys(state.expandedByNote).length, 100);
+  assert.equal(state.expandedByNote["Note-0.md"], undefined);
+  assert.equal(state.expandedByNote["Note-104.md"], "Related-104.md");
+});
 
 function createLiveResponse(pathValue: string, relatedPath = "Related.md", indexed = true): LiveRelatedResponse {
   return {
@@ -159,12 +177,18 @@ void test("workspace view does not define a dedicated loading screen", () => {
   assert.equal(stylesSource.includes("mindmap-loading-state"), false);
 });
 
+void test("sidebar requests automatic indexing and does not introduce stale-note controls", () => {
+  const source = fs.readFileSync("src/workspaceView.ts", "utf8");
+  assert.match(source, /this\.plugin\.queryLiveRelated\(activeFile\.path\)/);
+  assert.doesNotMatch(source, /Update connections|connections are out of date|mindmap-update-connections/);
+});
+
 void test("heatmap SVG classes are added as individual DOM tokens", () => {
   const sourceRoot = process.cwd();
   const workspaceViewSource = fs.readFileSync(path.join(sourceRoot, "src", "workspaceView.ts"), "utf8");
 
   assert.match(workspaceViewSource, /cls: "mindmap-heatmap-hit"/);
-  assert.match(workspaceViewSource, /marker\.addClass\("is-selected"\)/);
+  assert.match(workspaceViewSource, /marker\.toggleClass\("is-selected"/);
   assert.match(workspaceViewSource, /cls: "mindmap-heatmap-line"/);
   assert.match(workspaceViewSource, /line\.addClass\(`is-\$\{metric\.key\}`\)/);
   assert.match(workspaceViewSource, /cls: "mindmap-heatmap-point"/);
@@ -200,14 +224,14 @@ void test("workspace view exposes lookup, pin, and score affordances", () => {
 
   assert.equal(workspaceViewSource.includes("mindmap-lookup-input"), true);
   assert.equal(workspaceViewSource.includes("queryLookupRelated"), true);
-  assert.equal(workspaceViewSource.includes("captureLookupInputState"), true);
+  assert.equal(workspaceViewSource.includes("compositionstart"), true);
   assert.equal(workspaceViewSource.includes("requestAnimationFrame"), true);
   assert.equal(workspaceViewSource.includes("togglePinnedConnection"), true);
   assert.equal(workspaceViewSource.includes("contextmenu"), true);
   assert.equal(workspaceViewSource.includes("ContextMenu"), true);
   assert.equal(workspaceViewSource.includes("event.shiftKey"), true);
   assert.equal(workspaceViewSource.includes("is-pin-revealed"), true);
-  assert.equal(workspaceViewSource.includes("animatePinReveal"), true);
+  assert.equal(workspaceViewSource.includes("animatePinReveal"), false);
   assert.equal(workspaceViewSource.includes("mindmap-sidebar-score"), true);
   assert.equal(mainSource.includes("pinnedConnections"), true);
   assert.equal(commandSource.includes("mindmap-open-lookup"), true);
@@ -226,13 +250,12 @@ void test("migration completion invalidates the live-query cache exactly once pe
   assert.match(workspaceViewSource, /shouldSkipLiveQuery\(this\.liveState, activeFile\.path\)/);
   assert.doesNotMatch(workspaceViewSource, /response\??\.indexed\s*===\s*false/);
 
-  // The one-shot invalidation entry point: resets to idle (keeping the
-  // prior response for display continuity) and renders once, mirroring
-  // the existing metadataCache "changed" handler.
+  // One-shot invalidation follows the typing-aware debounce, rather than
+  // mutating the visible sidebar immediately when migration completes.
   assert.match(workspaceViewSource, /invalidateLiveQuery\(\)\s*:\s*void\s*\{/);
-  const invalidateBody = workspaceViewSource.slice(workspaceViewSource.indexOf("invalidateLiveQuery(): void {"));
-  assert.match(invalidateBody, /createIdleLiveState\(this\.liveState\.path, this\.liveState\.response\)/);
-  assert.match(invalidateBody, /this\.render\(\);/);
+  const invalidateBody = workspaceViewSource.slice(workspaceViewSource.indexOf("invalidateLiveQuery(): void {"), workspaceViewSource.indexOf("async onClose(): Promise<void>"));
+  assert.match(invalidateBody, /this\.refreshController\.scheduleNoteRefresh\(\)/);
+  assert.doesNotMatch(invalidateBody, /this\.render\(/);
 
   // Wired from ProductionEngine's migration-complete signal, applied to
   // every open Mindmap leaf, not just the currently active one.

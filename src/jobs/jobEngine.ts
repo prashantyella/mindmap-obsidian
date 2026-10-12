@@ -194,6 +194,10 @@ export interface JobEngineFault {
 
 export class JobEngine {
   private running = false;
+  /** Explicit dispatch starts enabled for headless/tests, closes on stop/dispose, and reopens on a successful start. */
+  private explicitDispatchAccepted = true;
+  /** Invalidates explicit calls queued before the latest stop/dispose even if a later start reopens dispatch. */
+  private explicitDispatchGeneration = 0;
   private disposed = false;
   private pumping: Promise<void> | null = null;
   /** Count of explicit `runOnce()`/`drain()` calls currently in flight (incremented on entry, decremented in a `finally`, before/after routing through `runExclusive`) -- tracked SEPARATELY from `pumping` (Checkpoint 7 last-contract guard 4) so `resetFault()` refuses while EITHER dispatch path is active, not just the background pump. A counter, not a boolean: `drain()`/`runOnce()` can be called concurrently by more than one caller (they simply queue behind each other on `dispatchTail`), and each must keep the guard up until its OWN call resolves. */
@@ -211,6 +215,17 @@ export class JobEngine {
   private readonly deferredJobIds = new Set<string>();
   private wakeGeneration = 0;
   private storeOperatorPaused = false;
+  private preferredJobId: string | null = null;
+  private continuingJobId: string | null = null;
+  private continuingWasPreferred = false;
+  private lastFinishedWasPreferred = false;
+
+  /** Ephemeral active-note preference; never bypasses pause, backoff, or editing deferral. */
+  prioritizeJob(jobId: string | null): void {
+    if (this.disposed) return;
+    this.preferredJobId = jobId;
+    this.kick();
+  }
 
   constructor(
     private readonly store: JobStore,
@@ -239,7 +254,8 @@ export class JobEngine {
 
   private async emitActivity(): Promise<void> {
     const revision = ++this.activityRevision;
-    const snapshot = deriveEngineActivity(await this.store.list(), await this.store.getBulkBatches(), await this.store.getProviderPause(), await this.store.getOperatorPause(), this.running || this.explicitDispatchCount > 0, this.disposed, this.fault?.code);
+    const snapshot = deriveEngineActivity(await this.store.list(), await this.store.getBulkBatches(), await this.store.getProviderPause(), await this.store.getOperatorPause(), this.running || this.explicitDispatchCount > 0, this.disposed, this.fault?.code, this.continuingJobId);
+    snapshot.waitingForEditingCount = this.deferredJobIds.size;
     if (revision !== this.activityRevision) return;
     for (const listener of this.activityListeners) { try { listener(snapshot); } catch { /* isolated observer */ } }
   }
@@ -302,7 +318,7 @@ export class JobEngine {
    * first trigger observed is kept as provenance on the resulting job;
    * later-coalesced submits' triggers are discarded.
    */
-  async submit(input: SubmitJobInput): Promise<PersistedJobV1> {
+  async submit(input: SubmitJobInput, options: { prefer?: () => boolean } = {}): Promise<PersistedJobV1> {
     if (this.disposed) {
       throw new EngineError("JOB_SHAPE_INVALID", "Cannot submit a job: JobEngine has been disposed.", {});
     }
@@ -330,6 +346,7 @@ export class JobEngine {
     };
     const persisted: PersistedJobV1 = { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false };
     const { job: result } = await this.store.appendOrCoalesce(persisted);
+    if (input.kind === "process-note" && options.prefer?.()) this.preferredJobId = result.job.jobId;
     this.kick();
     void this.emitActivity();
     return result;
@@ -460,6 +477,7 @@ export class JobEngine {
    */
   start(): void {
     if (this.disposed || this.fault) return;
+    this.explicitDispatchAccepted = true;
     this.running = true;
     this.kick();
     void this.emitActivity();
@@ -468,11 +486,16 @@ export class JobEngine {
   /** Stops kicking new work; does not interrupt an in-flight phase-step. Idempotent. */
   stop(): void {
     this.running = false;
+    if (this.explicitDispatchAccepted) this.explicitDispatchGeneration += 1;
+    this.explicitDispatchAccepted = false;
     void this.emitActivity();
   }
 
   /** Wakes deferred/background work after an external state change, without altering pause semantics. */
-  wake(): void { this.deferredJobIds.clear(); this.wakeGeneration++; this.kick(); }
+  wake(): void { this.deferredJobIds.clear(); this.wakeGeneration++; this.kick(); void this.emitActivity(); }
+
+  /** Settles after every phase-step already queued on the serialized dispatch tail. */
+  whenSettled(): Promise<void> { return this.dispatchTail; }
 
   /**
    * Requests that the background pump run (or keep running). Setting
@@ -511,7 +534,7 @@ export class JobEngine {
       if (!this.running || this.disposed) return;
       let outcome: JobDispatchOutcome;
       try {
-        outcome = await this.runOnceInner();
+        outcome = await this.runOnceInner(() => this.running && !this.disposed);
       } catch (error) {
         const fault: JobEngineFault = { code: toFailureCode(error), atMs: this.clock.now() };
         this.fault = fault;
@@ -540,26 +563,50 @@ export class JobEngine {
    * observe/handle a thrown rejection).
    */
   async runOnce(): Promise<JobDispatchOutcome> {
-    if (this.disposed) return "idle";
+    if (this.disposed || !this.explicitDispatchAccepted) return "idle";
+    const acceptedGeneration = this.explicitDispatchGeneration;
     this.explicitDispatchCount += 1;
     try {
-      return await this.runExclusive(() => this.runOnceInner());
+      return await this.runExclusive(async () => {
+        if (!this.explicitDispatchAccepted || this.disposed || acceptedGeneration !== this.explicitDispatchGeneration) return "idle";
+        return this.runOnceInner(() => this.explicitDispatchAccepted && !this.disposed && acceptedGeneration === this.explicitDispatchGeneration);
+      });
     } finally {
       this.explicitDispatchCount -= 1;
     }
   }
 
-  private async runOnceInner(): Promise<JobDispatchOutcome> {
-    if (this.disposed) return "idle";
+  private async runOnceInner(acceptsNewPhase: () => boolean = () => !this.disposed): Promise<JobDispatchOutcome> {
+    if (!acceptsNewPhase()) return "idle";
     const jobs = await this.store.list();
     const pause = await this.store.getProviderPause();
     this.storeOperatorPaused = (await this.store.getOperatorPause()).active;
     const now = this.clock.now();
-    const eligible = jobs.find((entry) => this.isEligibleNow(entry, pause, now));
+    const runnable = jobs.filter((entry) => this.isEligibleNow(entry, pause, now));
+    const continuing = runnable.find((entry) => entry.job.jobId === this.continuingJobId);
+    const preferred = runnable.find((entry) => entry.job.jobId === this.preferredJobId);
+    const background = runnable.find((entry) => entry.job.jobId !== this.preferredJobId);
+    const eligible = continuing ?? (this.lastFinishedWasPreferred && background ? background : preferred ?? runnable[0]);
     if (!eligible) return "idle";
     this.storeOperatorPaused = (await this.store.getOperatorPause()).active;
     if (this.storeOperatorPaused) { await this.emitActivity(); return "idle"; }
+    // Discovery above awaits several store reads. Recheck the dispatch gate immediately before
+    // changing durable job state or starting a runner phase so stop()/dispose() wins that race.
+    if (!acceptsNewPhase()) return "idle";
+    const wasPreferred = continuing ? this.continuingWasPreferred : eligible.job.jobId === this.preferredJobId;
     await this.runPhaseStep(eligible);
+    const after = await this.store.getById(eligible.job.jobId);
+    if (after && this.isEligibleNow(after, pause, this.clock.now())) {
+      this.continuingJobId = eligible.job.jobId;
+      this.continuingWasPreferred = wasPreferred;
+    } else {
+      this.continuingJobId = null;
+      this.continuingWasPreferred = false;
+      if (after && isTerminalJobStatus(after.status)) {
+        this.lastFinishedWasPreferred = wasPreferred;
+        if (eligible.job.jobId === this.preferredJobId) this.preferredJobId = null;
+      }
+    }
     await this.emitActivity();
     return "processed";
   }
@@ -583,12 +630,13 @@ export class JobEngine {
    * nothing eligible and returns immediately once it gets its turn.
    */
   async drain(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || !this.explicitDispatchAccepted) return;
+    const acceptedGeneration = this.explicitDispatchGeneration;
     this.explicitDispatchCount += 1;
     try {
       await this.runExclusive(async () => {
-        while (!this.disposed) {
-          const outcome = await this.runOnceInner();
+        while (!this.disposed && this.explicitDispatchAccepted && acceptedGeneration === this.explicitDispatchGeneration) {
+          const outcome = await this.runOnceInner(() => this.explicitDispatchAccepted && !this.disposed && acceptedGeneration === this.explicitDispatchGeneration);
           if (outcome === "idle") break;
         }
       });
@@ -611,6 +659,8 @@ export class JobEngine {
     if (this.disposed) return;
     this.disposed = true;
     this.running = false;
+    this.explicitDispatchAccepted = false;
+    this.explicitDispatchGeneration += 1;
     this.abortController.abort();
     this.deferredJobIds.clear();
     void this.emitActivity();
@@ -844,6 +894,7 @@ export class JobEngine {
         if (this.wakeGeneration === gen) {
           this.deferredJobIds.add(entry.job.jobId);
         }
+        await this.emitActivity();
         return;
       }
     }

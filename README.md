@@ -37,9 +37,9 @@ ollama pull llama3.1:8b
 
 ## First Run
 
-1. Open `Mindmap` settings and confirm the **Overview** row reads Ready (or use **Run checks** and follow its guidance).
-2. Under **Local AI**, confirm the embedding and metadata base URLs/models match your Ollama setup.
-3. Under **Scope**, select folders for both the current-note scope and the all-notes scope, then save.
+1. Open `Mindmap` settings and confirm the readiness row says **Mindmap is ready** (or use **Check setup** and follow its guidance).
+2. Open **Local AI**, enter the Ollama address and both models, use **Test draft**, then choose **Apply**. Changing the embedding model does not rebuild the index automatically.
+3. Open **Included folders**, select the folders Mindmap may process, then choose **Save folders**. Turn on **Separate quick-run folders** only when quick runs need a narrower list.
 4. If this vault was previously running an earlier version of Mindmap, the status menu shows a first-run **migration** step that builds the TypeScript vector index; start it and let it finish (it can be retried if interrupted). A brand-new vault skips straight to indexing on its first run.
 5. Run one command:
    - `Run Mindmap (current scope)` or
@@ -63,11 +63,11 @@ ollama pull llama3.1:8b
 
 ## Scheduling
 
-Mindmap supports three scheduler modes:
+The **Automation** section supports three modes:
 
 - `Manual`: runs only from commands.
-- `Interval`: runs current scope while Obsidian is open.
-- `LaunchAgent`: the in-app `CoreScheduler` performs daily/weekly/Reading-sync work whenever Obsidian is open, exactly like Interval mode does for its own schedule; additionally, an optional macOS LaunchAgent wakes or opens the vault at the scheduled time (a fixed `/usr/bin/open <vault>` call, disclosed and confirmed before it is installed) so that work can actually run even if Obsidian was closed at the scheduled time. The LaunchAgent itself never touches your notes, the index, or any model — it only opens the app.
+- `While Obsidian is open`: checks the configured folders at the selected interval.
+- `Scheduled (macOS)`: macOS opens the vault at the daily or weekly time. Mindmap processes notes only after Obsidian is open. The LaunchAgent never touches notes, the index, or a model.
 
 Default schedules:
 
@@ -94,15 +94,15 @@ The native status menu shows Reading Mode, sync time, pending notes, and actiona
 
 ## Web Research
 
-Web Research has three modes in the status menu and Settings:
+The **Apple Books and web research** section has one Web Research selector:
 
 - `Off`: no research requests.
 - `Manual`: research selected text or an active Markdown note on demand.
-- `Automatic for Reading`: includes the Manual actions and may research eligible Apple Books annotations while Reading Mode is active.
+- `Automatic for Apple Books`: includes Manual actions and may research eligible Apple Books annotations while Apple Books import is active.
 
 Before either research mode is enabled, Mindmap shows consent. Annotation or note excerpts stay on your machine for local query derivation and synthesis, using the same Ollama metadata model configured under Local AI. Exa receives only one or two derived queries; it returns up to five bounded source excerpts and metadata. Unrelated vault content is never sent to Exa.
 
-Automatic for Reading is capped at five attempts per sync and ten per local calendar day. The status menu and Settings show current usage, pauses, errors, and retry controls. A daily cap resumes after local midnight; scheduled maintenance does not use Web Research.
+Automatic for Apple Books is capped at five attempts per sync and ten per local calendar day. The status menu and Settings show current usage, pauses, errors, and retry controls. A daily cap resumes after local midnight; scheduled maintenance does not use Web Research.
 
 ### Exa Keychain setup
 
@@ -117,11 +117,11 @@ Mindmap stores its own runtime data (index, job queue, schedules) under `.obsidi
 - Note and annotation content sent for embeddings or metadata extraction goes only to the Ollama server you configure (default `http://localhost:11434`); Mindmap never sends vault content to any other network destination on its own.
 - Optional Exa Web Research sends only the one or two short derived queries described above, never raw note or annotation text, and never unrelated vault content.
 - The Exa API key lives only in macOS Keychain; it is never written to plugin settings, note frontmatter, logs, or diagnostics output.
-- Diagnostics you copy from Troubleshooting are bounded and redact anything key/token/secret/password/authorization-shaped before they are ever assembled.
+- Diagnostics you copy from **Advanced and troubleshooting** are bounded and redact anything key/token/secret/password/authorization-shaped before they are ever assembled.
 
 ## Troubleshooting
 
-- Overview shows the engine is unavailable: open the Troubleshooting section, run **Run preflight**, and use **Copy diagnostics** for a bounded, redacted report of provider/scheduler/engine state.
+- The readiness row shows the engine is unavailable: open **Advanced and troubleshooting**, choose **Check setup**, and use **Copy diagnostics** for a bounded, redacted report of provider, scheduler, and engine state.
 - Missing models:
 
 ```bash
@@ -129,8 +129,8 @@ ollama pull mxbai-embed-large
 ollama pull llama3.1:8b
 ```
 
-- Plugin shows `scope setup required`:
-  - complete Scope setup in plugin settings and save.
+- Plugin shows that included folders need attention:
+  - open **Included folders**, select folders, then choose **Save folders**.
 - A first-run migration failed partway: reopen the status menu and use **Retry migration** — it resumes rather than starting over, and never touches the vault's existing note content.
 
 ## Notes

@@ -35,6 +35,25 @@ function seededRandom(seed: number): () => number {
   };
 }
 
+class BorrowedRestoreFs extends FakeIndexFs {
+  replacementPath: string | null = null;
+  replacementBytes: Uint8Array | null = null;
+  mutateNextRead = false;
+
+  override async readFileBytes(path: string): Promise<Uint8Array> {
+    if (this.mutateNextRead && path === this.replacementPath && this.replacementBytes) {
+      this.mutateNextRead = false;
+      const stored = this.binaryFiles.get(path);
+      if (!stored) throw new Error("missing borrowed test artifact");
+      const original = stored.slice();
+      stored.set(this.replacementBytes);
+      window.setTimeout(() => stored.set(original), 0);
+      return stored;
+    }
+    return super.readFileBytes(path);
+  }
+}
+
 function vector(random: () => number): Float32Array {
   const v = new Float32Array(DIM);
   for (let i = 0; i < DIM; i += 1) v[i] = random() * 2 - 1;
@@ -235,6 +254,104 @@ void test("loadGeneration.loadShard re-validates a shard's matrix checksum on ev
   const bytes = fs.binaryFiles.get(shardVectorPath) as Uint8Array;
   bytes[20] ^= 0xff;
   await assert.rejects(() => loaded.loadShard("shard-0"), GenerationStoreError);
+});
+
+void test("cooperative generation loading aborts between integrity stages and a later load recovers", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2026);
+  await buildGeneration(fs, "/root", buildInput([makeNote("A.md", 2, random)], 2026));
+  const controller = new AbortController();
+  await assert.rejects(
+    () => loadGeneration(fs, "/root", 2026, {
+      signal: controller.signal,
+      onStage: (measurement) => {
+        if (measurement.artifact === "notes.mvx" && measurement.stage === "embedded-hash") controller.abort();
+      },
+    }),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+  const recovered = await loadGeneration(fs, "/root", 2026);
+  assert.equal(recovered.noteMatrix.count, 1);
+});
+
+void test("borrowed mutable bytes cannot validate matrix B against manifest checksum A after restore", async () => {
+  const fs = new BorrowedRestoreFs();
+  Object.defineProperty(fs, "readFileBytesReturnsPrivateBuffer", { value: undefined });
+  const random = seededRandom(2025);
+  await buildGeneration(fs, "/root", buildInput([makeNote("A.md", 0, random)], 2025));
+  const notePath = mvxPath(fs, 2025, "notes");
+  fs.replacementPath = notePath;
+  fs.replacementBytes = encodeVectorMatrix({ kind: "note", dimension: DIM, count: 1, data: new Float32Array([1, 0, 0, 0]) });
+  fs.mutateNextRead = true;
+  await assert.rejects(() => loadGeneration(fs, "/root", 2025), /manifest checksum/);
+  assert.equal((await loadGeneration(fs, "/root", 2025)).noteMatrix.count, 1, "restored artifact remains loadable after the failed borrowed snapshot");
+});
+
+void test("cooperative shard loading aborts without retaining partial output and can be retried", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2027);
+  await buildGeneration(fs, "/root", buildInput([makeNote("A.md", 20, random)], 2027));
+  const generation = await loadGeneration(fs, "/root", 2027);
+  const controller = new AbortController();
+  await assert.rejects(
+    () => generation.loadShard("shard-0", {
+      signal: controller.signal,
+      onStage: (measurement) => {
+        if (measurement.artifact === "shard-0.mvx" && measurement.stage === "embedded-hash") controller.abort();
+      },
+    }),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+  assert.equal((await generation.loadShard("shard-0")).matrix.count, 20);
+});
+
+void test("full cooperative verification cancellation preserves the active pointer and can be retried", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2028);
+  await buildGeneration(fs, "/root", buildInput([makeNote("Old.md", 1, random)], 2028));
+  await switchCurrentGeneration(fs, "/root", 2028);
+  await buildGeneration(fs, "/root", buildInput([makeNote("New.md", 20, random)], 2029));
+  const controller = new AbortController();
+  await assert.rejects(
+    () => switchCurrentGeneration(fs, "/root", 2029, {
+      signal: controller.signal,
+      onStage: (measurement) => {
+        if (measurement.artifact === "shard-0.mvx" && measurement.stage === "embedded-hash") controller.abort();
+      },
+    }),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+  assert.equal(await loadCurrentGenerationId(fs, "/root"), 2028);
+  await switchCurrentGeneration(fs, "/root", 2029);
+  assert.equal(await loadCurrentGenerationId(fs, "/root"), 2029);
+});
+
+void test("abort during sample ranking preserves AbortError identity and never switches the pointer", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2030);
+  await buildGeneration(fs, "/root", buildInput([makeNote("Old.md", 1, random)], 2030));
+  await switchCurrentGeneration(fs, "/root", 2030);
+  await buildGeneration(fs, "/root", buildInput([makeNote("New.md", 1, random)], 2031));
+  const abortReason = new DOMException("sample ranking aborted", "AbortError");
+  let rankingAborted = false;
+  const rankingSignal = {
+    get aborted() {
+      if (new Error().stack?.includes("rankCompositeCooperatively")) rankingAborted = true;
+      return rankingAborted;
+    },
+    reason: abortReason,
+    onabort: null,
+    addEventListener() { /* ranking observes the aborted getter before registering a timer */ },
+    removeEventListener() { /* no listener is registered in this deterministic abort path */ },
+    dispatchEvent() { return true; },
+    throwIfAborted() { if (this.aborted) throw abortReason; },
+  } as AbortSignal;
+  await assert.rejects(
+    () => switchCurrentGeneration(fs, "/root", 2031, { signal: rankingSignal }),
+    (error: unknown) => error === abortReason,
+  );
+  assert.equal(await loadCurrentGenerationId(fs, "/root"), 2030);
+  assert.equal(await loadGeneration(fs, "/root", 2031).then((generation) => generation.manifest.generationId), 2031, "target generation remains complete but uncommitted");
 });
 
 void test("buildGeneration rejects a note with more chunks than fit in a single shard", async () => {

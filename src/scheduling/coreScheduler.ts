@@ -302,6 +302,11 @@ export class CoreScheduler {
     this.disposed = true;
   }
 
+  /** After stop(), waits for the current tick/configuration to finish its durable effects. */
+  whenSettled(): Promise<void> {
+    return this.opTail;
+  }
+
   /**
    * Queues `fn` behind whatever is already in `opTail` and returns the
    * resulting promise -- the ONE place `opTail` is ever read and

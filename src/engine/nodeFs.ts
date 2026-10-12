@@ -43,6 +43,7 @@ const MAX_BOUNDED_READ_BYTES = 64 * 1024 * 1024;
 const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 
 export class NodeOwnedFs implements IndexFs {
+  readonly readFileBytesReturnsPrivateBuffer = true as const;
   private readonly root: string;
   /**
    * Pinned once a successful `realpath` of the owned root has been
@@ -455,6 +456,20 @@ export class NodeOwnedFs implements IndexFs {
       throw new NodeFsContainmentError("statSize target reported an invalid size.");
     }
     return size;
+  }
+
+  async statFingerprint(targetPath: string): Promise<string> {
+    const resolved = this.assertContained(targetPath, "statFingerprint");
+    await this.assertRealPathContained(resolved, "statFingerprint");
+    const handle = await this.openContained(resolved, fs.constants.O_RDONLY, "statFingerprint");
+    try {
+      const stat = await handle.stat({ bigint: true });
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch (error) {
+      throw this.redact(error, "statFingerprint");
+    } finally {
+      await this.closeHandle(handle, "statFingerprint");
+    }
   }
 }
 

@@ -1,5 +1,4 @@
-import { ItemView, setIcon, TFile, WorkspaceLeaf } from "obsidian";
-import { animate } from "motion";
+import { ItemView, Keymap, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 
 import type MindmapPlugin from "./main";
 import type { LiveRelatedResult } from "./semanticTypes";
@@ -9,12 +8,21 @@ import {
   createLoadingLiveState,
   createReadyLiveState,
   getDisplayLiveRelated,
+  getLiveFeedback,
+  getIndexRefreshTargets,
   NO_MINDMAP_CONNECTIONS_MESSAGE,
   NO_MINDMAP_CONNECTIONS_TITLE,
   shouldApplyLiveResponse,
   shouldSkipLiveQuery,
   type SidebarLiveState,
+  normalizeMindmapViewState,
+  rememberExpandedPath,
+  type MindmapViewState,
 } from "./workspaceViewState";
+import { SidebarRefreshController } from "./sidebarRefreshController";
+import { SidebarLoadingController } from "./sidebarLoadingController";
+import { reconcileKeyedOrder } from "./keyedReconciler";
+import { RetainedSvgNodes } from "./retainedSvgNodes";
 
 export const MINDMAP_VIEW_TYPE = "mindmap-ai-view";
 
@@ -200,29 +208,40 @@ function formatScoreDetail(candidate: RelatedCandidate): string | null {
   return `${candidate.source === "live" ? "Live" : "Saved"} ${kind} match (${percent}%).`;
 }
 
-function renderLoadingSpinner(container: HTMLElement): void {
-  const spinner = container.createDiv({
-    cls: "mindmap-loading-spinner",
-    attr: {
-      role: "status",
-      "aria-label": "Loading",
-    },
-  });
-  spinner.createSpan({ cls: "mindmap-loading-spinner-icon" });
-}
-
 export class MindmapWorkspaceView extends ItemView {
   private activePath: string | null = null;
   private expandedPath: string | null | undefined = undefined;
-  private renderedExpandedPath: string | null | undefined = undefined;
-  private renderedPinRevealPath: string | null = null;
   private liveRequestId = 0;
   private lookupRequestId = 0;
-  private lookupTimer: number | null = null;
+  private lookupLoadingRequestId = 0;
+  private loadingController: SidebarLoadingController | null = null;
   private pinRevealPath: string | null = null;
-  private lookupShouldRefocus = false;
-  private lookupSelectionStart: number | null = null;
-  private lookupSelectionEnd: number | null = null;
+  private composingLookup = false;
+  private lookupForeground = false;
+  private pendingVisualRefresh = false;
+  private feedbackKey: string | null = null;
+  private heatmapDisclosureEl: HTMLDetailsElement | null = null;
+  private heatmapEl: HTMLElement | null = null;
+  private heatmapSvgEl: SVGSVGElement | null = null;
+  private heatmapTooltipEl: HTMLElement | null = null;
+  private readonly heatmapNodes = new RetainedSvgNodes<SVGElement>();
+  private readonly heatmapCandidates = new Map<string, RelatedCandidate>();
+  private shellEl: HTMLElement | null = null;
+  private resultsEl: HTMLElement | null = null;
+  private feedbackEl: HTMLElement | null = null;
+  private heatmapRegionEl: HTMLElement | null = null;
+  private lookupInputEl: HTMLInputElement | null = null;
+  private lookupErrorEl: HTMLElement | null = null;
+  private liveRegionEl: HTMLElement | null = null;
+  private retainedListEl: HTMLElement | null = null;
+  private readonly renderedCandidates = new Map<string, RelatedCandidate>();
+  private viewState: MindmapViewState = { heatmapOpen: false, expandedByNote: {} };
+  private readonly refreshController = new SidebarRefreshController({
+    runLookup: () => this.runLookupQuery(),
+    refreshNote: () => this.refreshActiveNoteQuery(),
+    refreshIndex: () => this.refreshIndexQueries(),
+    typingEnded: () => { if (this.pendingVisualRefresh) this.render(true); },
+  });
   private lookupState: LookupState = {
     query: "",
     status: "idle",
@@ -258,11 +277,26 @@ export class MindmapWorkspaceView extends ItemView {
   async onOpen(): Promise<void> {
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.render()));
     this.registerEvent(this.app.metadataCache.on("changed", (file) => {
-      if (file.path === this.activePath) {
-        this.liveState = createIdleLiveState(file.path, this.liveState.response);
-      }
-      this.render();
+      if (file.path !== this.activePath) return;
+      this.refreshController.scheduleNoteRefresh();
     }));
+    this.registerEvent(this.app.workspace.on("editor-change", (_editor, info) => {
+      if (info.file?.path !== this.activePath) return;
+      this.refreshController.recordTyping();
+      this.liveRequestId += 1;
+      this.refreshController.invalidateNoteRequest();
+      this.liveState = createIdleLiveState(this.activePath, this.liveState.response, this.liveState.displayResponse, this.liveState.error);
+    }));
+    this.register(this.plugin.subscribeIndexChanges(() => this.refreshController.scheduleIndexRefresh()));
+    this.render();
+  }
+
+  getState(): MindmapViewState {
+    return normalizeMindmapViewState(this.viewState);
+  }
+
+  async setState(state: unknown): Promise<void> {
+    this.viewState = normalizeMindmapViewState(state);
     this.render();
   }
 
@@ -283,63 +317,79 @@ export class MindmapWorkspaceView extends ItemView {
     if (this.liveState.path === "") {
       return;
     }
-    this.liveState = createIdleLiveState(this.liveState.path, this.liveState.response);
-    this.render();
+    this.refreshController.scheduleNoteRefresh();
   }
 
   async onClose(): Promise<void> {
-    if (this.lookupTimer !== null) {
-      window.clearTimeout(this.lookupTimer);
-      this.lookupTimer = null;
-    }
+    this.liveRequestId += 1;
+    this.lookupRequestId += 1;
+    this.refreshController.close();
+    this.loadingController?.close();
   }
 
-  render(): void {
-    const { containerEl } = this;
-    const previousCardPositions = this.captureCardPositions(containerEl);
-    const previousExpandedPath = this.renderedExpandedPath;
-    const previousPinRevealPath = this.renderedPinRevealPath;
-    containerEl.empty();
-    containerEl.addClass("mindmap-view");
-
+  render(background = false): void {
+    const content = this.ensureShell();
     const activeFile = this.app.workspace.getActiveFile();
-    const shell = containerEl.createDiv({ cls: "mindmap-sidebar" });
-    this.renderLookupSearch(shell);
+    const activeElement = content.ownerDocument.activeElement;
+    if (background && activeFile?.path === this.activePath && (
+      this.refreshController.isTyping()
+      || (activeElement !== null && content.contains(activeElement))
+      || this.heatmapRegionEl?.matches(":hover")
+    )) {
+      this.pendingVisualRefresh = true;
+      return;
+    }
+    this.pendingVisualRefresh = false;
+    const focusedElement = content.ownerDocument.activeElement instanceof HTMLElement && content.contains(content.ownerDocument.activeElement)
+      ? content.ownerDocument.activeElement
+      : null;
+    const focusedPath = focusedElement
+      ? focusedElement.closest<HTMLElement>("[data-path]")?.dataset.path ?? null
+      : null;
+    this.updateLookupShell();
+
+    const shell = this.feedbackEl ?? content;
 
     if (activeFile === null) {
+      if (this.heatmapRegionEl) this.heatmapRegionEl.hidden = true;
+      this.refreshController.resetTyping();
       this.activePath = null;
+      this.loadingController?.update(this.getLoadingRequest());
+      this.refreshController.invalidateNoteRequest();
       this.expandedPath = undefined;
-      this.renderedExpandedPath = undefined;
-      this.renderedPinRevealPath = null;
+      if (this.retainedListEl) this.retainedListEl.hidden = true;
       if (this.hasLookupQuery()) {
         const candidates = this.getLookupCandidates(null);
-        if (this.isLoadingVisible()) {
-          this.renderInlineLoadingIndicator(shell);
-        }
         if (candidates.length === 0) {
           this.renderLookupResults(shell, null);
+          this.restoreFocusedRow(focusedPath, focusedElement);
           return;
         }
-        const list = shell.createDiv({ cls: "mindmap-sidebar-list" });
-        for (const candidate of candidates) {
+        const list = this.ensureResultList(shell);
+        const ordered = this.stabilizeCandidates(candidates, list);
+        for (const candidate of ordered) {
           this.renderCandidate(list, candidate, false);
         }
+        this.removeUnusedRows(list, new Set(candidates.map((candidate) => candidate.path)));
+        this.reconcileRowOrder(list, ordered.map((candidate) => candidate.path));
       } else {
         this.renderEmpty(shell, "No active note", "Open a note to see its mindmap links.");
       }
+      this.restoreFocusedRow(focusedPath, focusedElement);
       return;
     }
 
     if (this.activePath !== activeFile.path) {
+      this.refreshController.resetTyping();
       this.activePath = activeFile.path;
-      this.expandedPath = undefined;
-      this.renderedExpandedPath = undefined;
+      this.refreshController.invalidateNoteRequest();
+      this.expandedPath = this.viewState.expandedByNote[activeFile.path];
       this.pinRevealPath = null;
-      this.renderedPinRevealPath = null;
       this.liveState = createIdleLiveState(activeFile.path);
     }
 
     this.ensureLiveQuery(activeFile);
+    this.loadingController?.update(this.getLoadingRequest());
 
     const persistedCandidates = this.getRelatedCandidates(activeFile);
     const candidates = this.hasLookupQuery()
@@ -350,49 +400,56 @@ export class MindmapWorkspaceView extends ItemView {
     }
 
     if (candidates.length === 0) {
-      if (this.isLoadingVisible()) {
-        this.renderInlineLoadingIndicator(shell);
-      }
-      this.renderedExpandedPath = this.expandedPath;
-      this.renderedPinRevealPath = null;
+      if (this.heatmapRegionEl) this.heatmapRegionEl.hidden = true;
+      if (this.retainedListEl) this.retainedListEl.hidden = true;
       if (this.hasLookupQuery()) {
         this.renderLookupResults(shell, activeFile);
-      } else {
+      } else if (getLiveFeedback(this.liveState, this.plugin.settings.liveSemanticLookupEnabled) === "error") {
+        this.renderEmpty(shell, "Connections unavailable", "Saved connections remain in the note. Check Local AI, then try again.");
+      } else if (getLiveFeedback(this.liveState, this.plugin.settings.liveSemanticLookupEnabled) === "empty") {
         this.renderEmpty(shell, NO_MINDMAP_CONNECTIONS_TITLE, NO_MINDMAP_CONNECTIONS_MESSAGE);
+      } else {
+        this.resetFeedback("none");
       }
+      this.restoreFocusedRow(focusedPath, focusedElement);
       return;
     }
 
-    if (this.isLoadingVisible()) {
-      this.renderInlineLoadingIndicator(shell);
-    }
-
+    if (!this.hasLookupQuery()) this.renderLiveStatus(shell, activeFile.path, persistedCandidates.length > 0);
+    else this.resetFeedback("none");
     if (!this.hasLookupQuery()) {
-      this.renderHeatmap(shell, candidates);
+      if (this.heatmapRegionEl) this.heatmapRegionEl.hidden = false;
+      this.renderHeatmapDisclosure(this.heatmapRegionEl ?? shell, candidates);
+    } else if (this.heatmapRegionEl) {
+      this.heatmapRegionEl.hidden = true;
     }
 
-    const list = shell.createDiv({ cls: "mindmap-sidebar-list" });
-    for (const candidate of candidates) {
+    const list = this.ensureResultList(shell);
+    const ordered = this.stabilizeCandidates(candidates, list);
+    for (const candidate of ordered) {
       this.renderCandidate(list, candidate, candidate.path === this.expandedPath);
     }
+    this.removeUnusedRows(list, new Set(candidates.map((candidate) => candidate.path)));
+    this.reconcileRowOrder(list, ordered.map((candidate) => candidate.path));
 
-    this.animateSidebar(shell, previousCardPositions, previousExpandedPath, this.expandedPath);
-    this.animatePinReveal(shell, previousPinRevealPath, this.pinRevealPath);
-    this.renderedExpandedPath = this.expandedPath;
-    this.renderedPinRevealPath = this.pinRevealPath;
+    this.restoreFocusedRow(focusedPath, focusedElement);
   }
 
-  private renderLookupSearch(container: HTMLElement): void {
-    const search = container.createDiv({ cls: "mindmap-lookup" });
+  private ensureShell(): HTMLElement {
+    if (this.resultsEl) return this.resultsEl;
+    this.containerEl.empty();
+    this.containerEl.addClass("mindmap-view");
+    this.shellEl = this.containerEl.createDiv({ cls: "mindmap-sidebar" });
+    const search = this.shellEl.createDiv({ cls: "mindmap-lookup" });
     const input = search.createEl("input", {
       cls: "mindmap-lookup-input",
       attr: {
         type: "search",
         placeholder: "Ask across notes",
         "aria-label": "Search connections",
-        value: this.lookupState.query,
       },
     });
+    input.value = this.lookupState.query;
     const searchButton = search.createEl("button", {
       cls: "mindmap-lookup-button",
       attr: {
@@ -400,7 +457,25 @@ export class MindmapWorkspaceView extends ItemView {
         "aria-label": "Search",
       },
     });
-    setIcon(searchButton, "search");
+    const searchIcon = searchButton.createSpan({ cls: "mindmap-lookup-search-icon", attr: { "aria-hidden": "true" } });
+    setIcon(searchIcon, "search");
+    const loadingIcon = searchButton.createSpan({ cls: "mindmap-status-swirling mindmap-lookup-loading", attr: { "aria-hidden": "true" } });
+    loadingIcon.hidden = true;
+    const ownerWindow = input.ownerDocument.defaultView ?? window;
+    this.loadingController = new SidebarLoadingController((visible) => {
+      loadingIcon.hidden = !visible;
+      searchIcon.hidden = visible;
+      searchButton.setAttribute("aria-busy", String(visible));
+      if (visible && this.liveRegionEl) {
+        this.liveRegionEl.textContent = this.hasLookupQuery() ? "Searching connections." : "Updating connections.";
+      } else if (!visible && this.liveRegionEl && ["Searching connections.", "Updating connections."].includes(this.liveRegionEl.textContent ?? "")) {
+        this.liveRegionEl.textContent = "";
+      }
+    }, {
+      setTimeout: (callback, delayMs) => ownerWindow.setTimeout(callback, delayMs),
+      clearTimeout: (handle) => ownerWindow.clearTimeout(handle as number),
+    });
+    this.register(() => this.loadingController?.close());
     const clearButton = search.createEl("button", {
       cls: "mindmap-lookup-button",
       attr: {
@@ -410,76 +485,84 @@ export class MindmapWorkspaceView extends ItemView {
     });
     setIcon(clearButton, "x");
 
+    this.lookupErrorEl = search.createDiv({ cls: "mindmap-lookup-error" });
+    this.lookupErrorEl.hidden = true;
+    this.liveRegionEl = this.shellEl.createDiv({ cls: "mindmap-sr-only", attr: { "aria-live": "polite", "aria-atomic": "true" } });
+    this.resultsEl = this.shellEl.createDiv({ cls: "mindmap-sidebar-content" });
+    this.feedbackEl = this.resultsEl.createDiv({ cls: "mindmap-sidebar-feedback" });
+    this.heatmapRegionEl = this.resultsEl.createDiv({ cls: "mindmap-sidebar-heatmap-region" });
+    this.retainedListEl = this.resultsEl.createDiv({ cls: "mindmap-sidebar-list" });
+    this.lookupInputEl = input;
+    let interactionTimer: number | null = null;
+    const endInteraction = (): void => {
+      if (interactionTimer !== null) ownerWindow.clearTimeout(interactionTimer);
+      interactionTimer = ownerWindow.setTimeout(() => {
+        interactionTimer = null;
+        if (this.pendingVisualRefresh) this.render(true);
+      }, 0);
+    };
+    this.registerDomEvent(this.resultsEl, "focusout", endInteraction);
+    this.registerDomEvent(this.heatmapRegionEl, "mouseleave", endInteraction);
+    this.register(() => { if (interactionTimer !== null) ownerWindow.clearTimeout(interactionTimer); });
+
     input.addEventListener("input", () => {
-      this.captureLookupInputState(input);
+      this.lookupRequestId += 1;
+      this.refreshController.invalidateLookup();
       const hasQuery = input.value.trim().length > 0;
       this.lookupState = {
         ...this.lookupState,
         query: input.value,
         status: hasQuery ? "loading" : "idle",
-        related: [],
+        related: hasQuery ? this.lookupState.related : [],
         error: null,
       };
-      this.lookupShouldRefocus = true;
       if (!hasQuery) {
-        this.lookupRequestId += 1;
-        this.cancelLookupTimer();
         this.render();
         return;
       }
       this.render();
-      this.scheduleLookupQuery();
+      if (!this.composingLookup) this.refreshController.scheduleLookup();
     });
+    input.addEventListener("compositionstart", () => { this.composingLookup = true; this.refreshController.invalidateLookup(); });
+    input.addEventListener("compositionend", () => { this.composingLookup = false; if (input.value.trim()) this.refreshController.scheduleLookup(); });
     input.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") {
         return;
       }
       event.preventDefault();
-      this.captureLookupInputState(input);
-      this.cancelLookupTimer();
+      if (this.composingLookup) return;
+      this.refreshController.invalidateLookup();
       this.runLookupQuery();
     });
     searchButton.addEventListener("click", () => {
-      this.cancelLookupTimer();
-      this.captureLookupInputState(input);
-      this.lookupShouldRefocus = true;
+      this.refreshController.invalidateLookup();
       this.runLookupQuery();
     });
     clearButton.addEventListener("click", () => {
       this.lookupRequestId += 1;
-      this.cancelLookupTimer();
+      this.refreshController.invalidateLookup();
       this.lookupState = {
         query: "",
         status: "idle",
         related: [],
         error: null,
       };
-      this.lookupShouldRefocus = true;
       this.render();
     });
-
-    if (this.lookupState.status === "error" && this.lookupState.error !== null) {
-      search.createDiv({ cls: "mindmap-lookup-error", text: this.lookupState.error });
-    }
-
-    if (this.lookupShouldRefocus || this.plugin.consumeLookupFocusRequest()) {
-      this.lookupShouldRefocus = false;
-      window.requestAnimationFrame(() => {
-        input.focus();
-        const start = this.lookupSelectionStart ?? input.value.length;
-        const end = this.lookupSelectionEnd ?? start;
-        input.setSelectionRange(Math.min(start, input.value.length), Math.min(end, input.value.length));
-      });
-    }
+    if (this.plugin.consumeLookupFocusRequest()) window.requestAnimationFrame(() => input.focus());
+    return this.resultsEl;
   }
 
-  private captureLookupInputState(input: HTMLInputElement): void {
-    this.lookupSelectionStart = input.selectionStart;
-    this.lookupSelectionEnd = input.selectionEnd;
+  private updateLookupShell(): void {
+    if (this.lookupInputEl && this.lookupInputEl.value !== this.lookupState.query) this.lookupInputEl.value = this.lookupState.query;
+    if (this.lookupErrorEl) {
+      this.lookupErrorEl.textContent = this.lookupState.error ?? "";
+      this.lookupErrorEl.hidden = this.lookupState.status !== "error";
+    }
   }
 
   private renderLookupResults(container: HTMLElement, activeFile: TFile | null): void {
-    if (this.lookupState.status === "loading") {
+    if (this.lookupState.status === "loading" && this.lookupForeground) {
       this.renderEmpty(container, "Searching notes", "Finding semantic matches.");
       return;
     }
@@ -498,44 +581,35 @@ export class MindmapWorkspaceView extends ItemView {
     return this.lookupState.query.trim().length > 0;
   }
 
-  private isLoadingVisible(): boolean {
-    return this.hasLookupQuery() ? this.lookupState.status === "loading" : this.liveState.status === "loading";
-  }
-
-  private scheduleLookupQuery(): void {
-    this.cancelLookupTimer();
-    this.lookupTimer = window.setTimeout(() => {
-      this.lookupTimer = null;
-      this.runLookupQuery();
-    }, 350);
-  }
-
-  private cancelLookupTimer(): void {
-    if (this.lookupTimer === null) {
-      return;
+  private getLoadingRequest(): string | null {
+    if (this.hasLookupQuery()) {
+      return this.lookupForeground && !this.composingLookup && this.lookupState.status === "loading" && this.lookupLoadingRequestId === this.lookupRequestId
+        ? `lookup:${this.lookupRequestId}`
+        : null;
     }
-    window.clearTimeout(this.lookupTimer);
-    this.lookupTimer = null;
+    return null;
   }
 
-  private runLookupQuery(): void {
+  private runLookupQuery(background = false): void {
     const query = this.lookupState.query.trim();
     if (!query) {
       return;
     }
     const requestId = ++this.lookupRequestId;
+    this.lookupForeground = !background;
+    this.lookupLoadingRequestId = requestId;
+    const generation = this.refreshController.invalidateLookup();
     this.lookupState = {
       query,
       status: "loading",
-      related: [],
+      related: this.lookupState.related,
       error: null,
     };
-    this.lookupShouldRefocus = true;
-    this.render();
+    this.render(background);
 
     void this.plugin.queryLookupRelated(query)
       .then((response) => {
-        if (requestId !== this.lookupRequestId || response.query !== this.lookupState.query.trim()) {
+        if (requestId !== this.lookupRequestId || !this.refreshController.isCurrentLookup(generation) || response.query !== this.lookupState.query.trim()) {
           return;
         }
         this.lookupState = {
@@ -544,25 +618,25 @@ export class MindmapWorkspaceView extends ItemView {
           related: response.related,
           error: null,
         };
-        this.lookupShouldRefocus = true;
-        this.render();
+        if (this.lookupForeground && this.liveRegionEl) this.liveRegionEl.textContent = `${response.related.length} connection${response.related.length === 1 ? "" : "s"} found.`;
+        this.render(background);
       })
       .catch((error) => {
-        if (requestId !== this.lookupRequestId) {
+        if (requestId !== this.lookupRequestId || !this.refreshController.isCurrentLookup(generation)) {
           return;
         }
         this.lookupState = {
           query,
           status: "error",
-          related: [],
+          related: this.lookupState.related,
           error: error instanceof Error ? error.message : String(error),
         };
-        this.lookupShouldRefocus = true;
-        this.render();
+        this.render(background);
       });
   }
 
   private ensureLiveQuery(activeFile: TFile): void {
+    if (this.refreshController.isTyping()) return;
     if (!this.plugin.settings.liveSemanticLookupEnabled) {
       return;
     }
@@ -571,37 +645,86 @@ export class MindmapWorkspaceView extends ItemView {
     }
 
     const requestId = ++this.liveRequestId;
+    const generation = this.refreshController.invalidateNoteRequest();
     this.liveState = createLoadingLiveState(activeFile.path, this.liveState);
 
     void this.plugin.queryLiveRelated(activeFile.path)
       .then((response) => {
-        if (!shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
+        if (!this.refreshController.isCurrentNote(generation) || !shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
           return;
         }
-        this.liveState = createReadyLiveState(activeFile.path, response);
-        this.render();
+        this.liveState = createReadyLiveState(activeFile.path, response, this.liveState);
+        this.render(true);
       })
       .catch((error) => {
-        if (!shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
+        if (!this.refreshController.isCurrentNote(generation) || !shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
           return;
         }
         this.liveState = createErrorLiveState(activeFile.path, this.liveState, error);
-        this.render();
+        this.render(true);
       });
   }
 
-  private renderInlineLoadingIndicator(container: HTMLElement): void {
-    const indicator = container.createDiv({ cls: "mindmap-inline-loading" });
-    renderLoadingSpinner(indicator);
+  private refreshActiveNoteQuery(): void {
+    if (!this.activePath) return;
+    this.liveRequestId += 1;
+    this.liveState = createIdleLiveState(this.activePath, this.liveState.response, this.liveState.displayResponse, this.liveState.error);
+    this.render(true);
+  }
+
+  private refreshIndexQueries(): void {
+    const targets = getIndexRefreshTargets(this.activePath, this.lookupState.query);
+    if ((targets.live && this.liveState.status === "loading") || (targets.lookup && this.lookupState.status === "loading")) {
+      this.refreshController.scheduleIndexRefresh();
+      return;
+    }
+    if (targets.live && this.activePath) {
+      this.liveRequestId += 1;
+      this.liveState = createIdleLiveState(this.activePath, this.liveState.response, this.liveState.displayResponse, this.liveState.error);
+    }
+    if (targets.lookup) {
+      this.lookupRequestId += 1;
+      this.runLookupQuery(true);
+      return;
+    }
+    this.render(true);
+  }
+
+  private renderLiveStatus(container: HTMLElement, activePath: string, hasPersisted: boolean): void {
+    if (this.liveState.path !== activePath) return;
+    if (this.liveState.error !== null) {
+      if (!this.resetFeedback(`error:${activePath}:${hasPersisted}`)) return;
+      const status = container.createDiv({ cls: "mindmap-sidebar-status is-error", attr: { role: "status" } });
+      status.createSpan({ text: hasPersisted ? "Live refresh failed. Showing saved connections." : "Live connections are unavailable." });
+      return;
+    }
+    this.resetFeedback("none");
+  }
+
+  private renderHeatmapDisclosure(container: HTMLElement, candidates: RelatedCandidate[]): void {
+    const disclosure = this.heatmapDisclosureEl ?? container.createEl("details", { cls: "mindmap-heatmap-disclosure" });
+    if (!this.heatmapDisclosureEl) {
+      this.heatmapDisclosureEl = disclosure;
+      disclosure.createEl("summary", { text: "Connection graph" });
+      disclosure.addEventListener("toggle", () => { this.viewState = { ...this.viewState, heatmapOpen: disclosure.open }; });
+    }
+    disclosure.open = this.viewState.heatmapOpen;
+    this.renderHeatmap(disclosure, candidates);
   }
 
   private renderHeatmap(container: HTMLElement, candidates: RelatedCandidate[]): void {
-    const heatmap = container.createDiv({ cls: "mindmap-heatmap" });
-    const svg = heatmap.createSvg("svg", {
+    const heatmap = this.heatmapEl ?? container.createDiv({ cls: "mindmap-heatmap" });
+    this.heatmapEl = heatmap;
+    const svg = this.heatmapSvgEl ?? heatmap.createSvg("svg", {
       cls: "mindmap-heatmap-chart",
-      attr: { viewBox: "0 0 320 300", role: "img", "aria-label": "Mindmap relevance signals for related notes" },
+      attr: { viewBox: "0 0 320 300", preserveAspectRatio: "none", role: "img", "aria-label": "Mindmap connection graph for related notes" },
     });
-    const tooltip = heatmap.createDiv({ cls: "mindmap-heatmap-tooltip" });
+    this.heatmapSvgEl = svg;
+    const tooltip = this.heatmapTooltipEl ?? heatmap.createDiv({ cls: "mindmap-heatmap-tooltip" });
+    this.heatmapTooltipEl = tooltip;
+    this.heatmapCandidates.clear();
+    for (const candidate of candidates) this.heatmapCandidates.set(candidate.path, candidate);
+    this.heatmapNodes.begin();
 
     const chart = {
       left: 10,
@@ -636,62 +759,65 @@ export class MindmapWorkspaceView extends ItemView {
       tooltip.style.top = `${y}px`;
       tooltip.addClass("is-visible");
     };
-    const bindTooltip = (element: SVGElement, candidate: RelatedCandidate): void => {
+    const bindTooltip = (element: SVGElement, candidatePath: string): void => {
+      const show = (x: number, y: number): void => {
+        const candidate = this.heatmapCandidates.get(candidatePath);
+        if (candidate) showTooltip(candidate, x, y);
+      };
       element.addEventListener("mouseenter", (event) => {
-        showTooltip(candidate, event.clientX, event.clientY);
+        show(event.clientX, event.clientY);
       });
       element.addEventListener("mousemove", (event) => {
-        showTooltip(candidate, event.clientX, event.clientY);
+        show(event.clientX, event.clientY);
       });
       element.addEventListener("mouseleave", hideTooltip);
       element.addEventListener("focus", () => {
         const bounds = element.getBoundingClientRect();
-        showTooltip(candidate, bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+        show(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
       });
       element.addEventListener("blur", hideTooltip);
     };
 
     for (let level = 0; level <= chart.maxLevel; level += 1) {
-      svg.createSvg("line", {
+      this.heatmapNodes.get(`grid:${level}`, () => svg.createSvg("line", {
         cls: "mindmap-heatmap-grid",
-        attr: {
-          x1: String(chart.left),
-          x2: String(chart.width - chart.right),
-          y1: String(yFor(level)),
-          y2: String(yFor(level)),
-        },
+      }), {
+        x1: String(chart.left),
+        x2: String(chart.width - chart.right),
+        y1: String(yFor(level)),
+        y2: String(yFor(level)),
       });
     }
 
     for (const [index, candidate] of candidates.entries()) {
       const x = xFor(index);
-      const marker = svg.createSvg("rect", {
+      const markerResult = this.heatmapNodes.get(`hit:${candidate.path}`, () => svg.createSvg("rect", {
         cls: "mindmap-heatmap-hit",
-        attr: {
-          x: String(x - plotWidth / Math.max(candidates.length - 1, 1) / 2),
-          y: String(chart.top),
-          width: String(plotWidth / Math.max(candidates.length - 1, 1)),
-          height: String(plotHeight),
-          tabindex: "0",
-          role: "button",
-          "aria-label": `Select ${candidate.title}`,
-        },
+      }), {
+        x: String(x - plotWidth / Math.max(candidates.length - 1, 1) / 2),
+        y: String(chart.top),
+        width: String(plotWidth / Math.max(candidates.length - 1, 1)),
+        height: String(plotHeight),
+        tabindex: "0",
+        role: "button",
+        "aria-label": `Select ${candidate.title}`,
       });
-      if (candidate.path === this.expandedPath) {
-        marker.addClass("is-selected");
-      }
-      marker.addEventListener("click", () => {
-        this.expandedPath = candidate.path;
-        this.render();
-      });
-      marker.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
+      const marker = markerResult.node;
+      marker.toggleClass("is-selected", candidate.path === this.expandedPath);
+      if (markerResult.created) {
+        marker.addEventListener("click", () => {
           this.expandedPath = candidate.path;
           this.render();
-        }
-      });
-      bindTooltip(marker, candidate);
+        });
+        marker.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            this.expandedPath = candidate.path;
+            this.render();
+          }
+        });
+        bindTooltip(marker, candidate.path);
+      }
     }
 
     const metrics = candidates[0]?.heatmap ?? [];
@@ -700,137 +826,169 @@ export class MindmapWorkspaceView extends ItemView {
         const cell = candidate.heatmap.find((candidateMetric) => candidateMetric.key === metric.key);
         return `${xFor(index)},${yFor(cell?.level ?? 0)}`;
       });
-      const line = svg.createSvg("polyline", {
+      const { node: line } = this.heatmapNodes.get(`line:${metric.key}`, () => svg.createSvg("polyline", {
         cls: "mindmap-heatmap-line",
-        attr: { points: points.join(" ") },
-      });
+      }), { points: points.join(" ") });
       line.addClass(`is-${metric.key}`);
     }
 
     for (const [index, candidate] of candidates.entries()) {
       const x = xFor(index);
       for (const metric of candidate.heatmap) {
-        const point = svg.createSvg("circle", {
+        const pointResult = this.heatmapNodes.get(`point:${candidate.path}:${metric.key}`, () => svg.createSvg("circle", {
           cls: "mindmap-heatmap-point",
-          attr: {
-            cx: String(x),
-            cy: String(yFor(metric.level)),
-            r: candidate.path === this.expandedPath ? "2.6" : "2",
-          },
+        }), {
+          cx: String(x),
+          cy: String(yFor(metric.level)),
+          r: candidate.path === this.expandedPath ? "2.6" : "2",
         });
+        const point = pointResult.node;
         point.addClass(`is-${metric.key}`);
-        if (candidate.path === this.expandedPath) {
-          point.addClass("is-selected");
+        point.toggleClass("is-selected", candidate.path === this.expandedPath);
+        if (pointResult.created) {
+          point.addEventListener("click", () => {
+            this.expandedPath = candidate.path;
+            this.render();
+          });
+          bindTooltip(point, candidate.path);
         }
-        point.addEventListener("click", () => {
-          this.expandedPath = candidate.path;
-          this.render();
-        });
-        bindTooltip(point, candidate);
       }
     }
+    this.heatmapNodes.finish({
+      first: () => svg.firstElementChild as SVGElement | null,
+      next: (node) => node.nextElementSibling as SVGElement | null,
+      find: () => null,
+      insertBefore: (node, before) => { svg.insertBefore(node, before); },
+    });
+  }
+
+  private ensureResultList(container: HTMLElement): HTMLElement {
+    const list = this.retainedListEl ?? container.createDiv({ cls: "mindmap-sidebar-list" });
+    list.hidden = false;
+    this.retainedListEl = list;
+    return list;
+  }
+
+  private stabilizeCandidates(candidates: RelatedCandidate[], list: HTMLElement): RelatedCandidate[] {
+    const active = list.ownerDocument.activeElement;
+    if (!(active instanceof HTMLElement) || !list.contains(active)) return candidates;
+    const order = new Map(Array.from(list.querySelectorAll<HTMLElement>(":scope > [data-path]")).map((row, index) => [row.dataset.path!, index]));
+    return [...candidates].sort((left, right) => {
+      const leftIndex = order.get(left.path);
+      const rightIndex = order.get(right.path);
+      if (leftIndex === undefined && rightIndex === undefined) return 0;
+      if (leftIndex === undefined) return 1;
+      if (rightIndex === undefined) return -1;
+      return leftIndex - rightIndex;
+    });
+  }
+
+  private removeUnusedRows(list: HTMLElement, paths: ReadonlySet<string>): void {
+    for (const row of Array.from(list.querySelectorAll<HTMLElement>(":scope > [data-path]"))) {
+      if (!row.dataset.path || !paths.has(row.dataset.path)) {
+        this.renderedCandidates.delete(row.dataset.path ?? "");
+        row.remove();
+      }
+    }
+  }
+
+  private reconcileRowOrder(list: HTMLElement, desiredPaths: readonly string[]): void {
+    reconcileKeyedOrder(desiredPaths, {
+      first: () => list.firstElementChild as HTMLElement | null,
+      next: (node) => node.nextElementSibling as HTMLElement | null,
+      find: (path) => {
+        const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(path) : path.replace(/["\\]/g, "\\$&");
+        return list.querySelector<HTMLElement>(`:scope > [data-path="${escaped}"]`);
+      },
+      insertBefore: (node, before) => { list.insertBefore(node, before); },
+    });
   }
 
   private renderCandidate(container: HTMLElement, candidate: RelatedCandidate, expanded: boolean): void {
-    const activeFile = this.app.workspace.getActiveFile();
-    const pinRevealed = activeFile !== null && this.pinRevealPath === candidate.path;
-    const row = container.createDiv({
-      cls: `mindmap-sidebar-card${expanded ? " is-expanded" : ""}${pinRevealed ? " is-pin-revealed" : ""}`,
-      attr: {
-        role: "button",
-        tabindex: "0",
-        "aria-expanded": String(expanded),
-        "data-path": candidate.path,
-      },
-    });
+    this.renderedCandidates.set(candidate.path, candidate);
+    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(candidate.path) : candidate.path.replace(/["\\]/g, "\\$&");
+    let row = container.querySelector<HTMLElement>(`:scope > [data-path="${escaped}"]`);
+    if (!row) {
+      row = container.createDiv({ cls: "mindmap-sidebar-card", attr: { role: "button", tabindex: "0", "data-path": candidate.path } });
+      const pin = row.createEl("button", { cls: "mindmap-sidebar-pin", attr: { type: "button", tabindex: "0" } });
+      setIcon(pin, "pin");
+      const body = row.createDiv({ cls: "mindmap-sidebar-card-body" });
+      const top = body.createDiv({ cls: "mindmap-sidebar-card-top" });
+      const titleWrap = top.createDiv({ cls: "mindmap-sidebar-title-wrap" });
+      titleWrap.createEl("a", { cls: "mindmap-sidebar-title internal-link" });
+      top.createDiv({ cls: "mindmap-sidebar-meta" });
 
-    row.addEventListener("click", () => {
-      this.expandedPath = expanded ? null : candidate.path;
-      this.pinRevealPath = null;
-      this.render();
-    });
-    row.addEventListener("contextmenu", (event) => {
-      if (activeFile === null) {
-        return;
-      }
-      event.preventDefault();
-      this.pinRevealPath = pinRevealed ? null : candidate.path;
-      this.render();
-    });
-    row.addEventListener("keydown", (event) => {
-      if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
-        if (activeFile === null) {
-          return;
-        }
-        event.preventDefault();
-        this.pinRevealPath = pinRevealed ? null : candidate.path;
-        this.render();
-        return;
-      }
-      if (event.key !== "Enter" && event.key !== " ") {
-        return;
-      }
-
-      event.preventDefault();
-      this.expandedPath = expanded ? null : candidate.path;
-      this.pinRevealPath = null;
-      this.render();
-    });
-
-    if (activeFile !== null) {
-      this.renderPinAction(row, activeFile, candidate, pinRevealed);
-    }
-
-    const body = row.createDiv({ cls: "mindmap-sidebar-card-body" });
-    const top = body.createDiv({ cls: "mindmap-sidebar-card-top" });
-    const titleWrap = top.createDiv({ cls: "mindmap-sidebar-title-wrap" });
-    this.renderCandidateLink(titleWrap, candidate, "mindmap-sidebar-title");
-    this.renderCandidateMeta(top, candidate);
-
-    if (!expanded) {
-      return;
-    }
-
-    const detail = body.createDiv({ cls: "mindmap-sidebar-detail" });
-    detail.createDiv({
-      cls: "mindmap-sidebar-summary",
-      text: candidate.summary ?? formatScoreDetail(candidate) ?? "No summary available yet.",
-    });
-  }
-
-  private renderPinAction(container: HTMLElement, activeFile: TFile, candidate: RelatedCandidate, revealed: boolean): void {
-    const button = container.createEl("button", {
-      cls: `mindmap-sidebar-pin${candidate.pinned ? " is-pinned" : ""}`,
-      attr: {
-        type: "button",
-        "aria-label": candidate.pinned ? `Unpin ${candidate.title}` : `Pin ${candidate.title}`,
-        tabindex: revealed ? "0" : "-1",
-      },
-    });
-    setIcon(button, "pin");
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.plugin.togglePinnedConnection(activeFile.path, candidate.path).then(() => {
+      const toggle = (): void => {
+        const path = row!.dataset.path!;
+        this.expandedPath = this.expandedPath === path ? null : path;
+        if (this.activePath) this.viewState = rememberExpandedPath(this.viewState, this.activePath, this.expandedPath);
         this.pinRevealPath = null;
         this.render();
+      };
+      row.addEventListener("click", (event) => { if (!(event.target instanceof HTMLButtonElement) && !(event.target instanceof HTMLAnchorElement)) toggle(); });
+      row.addEventListener("contextmenu", (event) => { event.preventDefault(); this.pinRevealPath = this.pinRevealPath === row!.dataset.path ? null : row!.dataset.path!; this.render(); });
+      row.addEventListener("keydown", (event) => {
+        if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+          event.preventDefault();
+          this.pinRevealPath = this.pinRevealPath === row!.dataset.path ? null : row!.dataset.path!;
+          this.render();
+        } else if ((event.key === "Enter" || event.key === " ") && event.target === row) {
+          event.preventDefault();
+          toggle();
+        }
       });
-    });
-  }
+      pin.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const current = this.renderedCandidates.get(row!.dataset.path!);
+        const active = this.app.workspace.getActiveFile();
+        if (!current || !active) return;
+        void this.plugin.togglePinnedConnection(active.path, current.path).then(() => this.render());
+      });
+      const link = titleWrap.querySelector<HTMLAnchorElement>("a")!;
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const current = this.renderedCandidates.get(row!.dataset.path!);
+        if (current?.file) void this.app.workspace.openLinkText(current.file.path, this.activePath ?? current.file.path, Keymap.isModEvent(event));
+      });
+      link.addEventListener("mouseover", (event) => {
+        const current = this.renderedCandidates.get(row!.dataset.path!);
+        if (!current?.file) return;
+        this.app.workspace.trigger("hover-link", { event, source: MINDMAP_VIEW_TYPE, hoverParent: this.leaf, targetEl: link, linktext: current.file.path, sourcePath: this.activePath ?? current.file.path });
+      });
+    }
 
-  private renderCandidateMeta(container: HTMLElement, candidate: RelatedCandidate): void {
-    const meta = container.createDiv({ cls: "mindmap-sidebar-meta" });
-    const score = this.formatScore(candidate);
-    if (score !== null) {
-      meta.createSpan({
-        cls: "mindmap-sidebar-score",
-        text: score,
-        attr: {
-          "aria-label": `${score} semantic score`,
-        },
-      });
-    } else if (candidate.pinned) {
-      meta.createSpan({ cls: "mindmap-sidebar-score", text: "Pinned" });
+    row.toggleClass("is-expanded", expanded);
+    row.toggleClass("is-pin-revealed", this.pinRevealPath === candidate.path);
+    row.setAttribute("aria-expanded", String(expanded));
+    const pin = row.querySelector<HTMLButtonElement>(".mindmap-sidebar-pin")!;
+    pin.toggleClass("is-pinned", Boolean(candidate.pinned));
+    pin.setAttribute("aria-label", candidate.pinned ? `Unpin ${candidate.title}` : `Pin ${candidate.title}`);
+    const link = row.querySelector<HTMLAnchorElement>(".mindmap-sidebar-title")!;
+    link.textContent = candidate.title;
+    link.toggleClass("is-disabled", candidate.file === null);
+    if (candidate.file) {
+      link.href = candidate.file.path;
+      link.dataset.href = candidate.file.path;
+      link.removeAttribute("aria-disabled");
+    } else {
+      link.removeAttribute("href");
+      delete link.dataset.href;
+      link.setAttribute("aria-disabled", "true");
+    }
+    const meta = row.querySelector<HTMLElement>(".mindmap-sidebar-meta")!;
+    const score = this.formatScore(candidate) ?? (candidate.pinned ? "Pinned" : "");
+    let scoreEl = meta.querySelector<HTMLElement>(".mindmap-sidebar-score");
+    if (score && !scoreEl) scoreEl = meta.createSpan({ cls: "mindmap-sidebar-score" });
+    if (scoreEl) { scoreEl.textContent = score; scoreEl.hidden = !score; if (score) scoreEl.setAttribute("aria-label", `${score} similarity`); }
+    const body = row.querySelector<HTMLElement>(".mindmap-sidebar-card-body")!;
+    let detail = body.querySelector<HTMLElement>(".mindmap-sidebar-detail");
+    if (expanded) {
+      if (!detail) { detail = body.createDiv({ cls: "mindmap-sidebar-detail" }); detail.createDiv({ cls: "mindmap-sidebar-summary" }); }
+      detail.querySelector<HTMLElement>(".mindmap-sidebar-summary")!.textContent = candidate.summary ?? formatScoreDetail(candidate) ?? "No summary available yet.";
+    } else {
+      detail?.remove();
     }
   }
 
@@ -839,129 +997,32 @@ export class MindmapWorkspaceView extends ItemView {
       return null;
     }
     const percent = Math.max(0, Math.min(100, Math.round(candidate.liveScore * 100)));
-    return `${percent}`;
+    return `${percent}%`;
+  }
+
+  private resetFeedback(key: string): boolean {
+    if (this.feedbackKey === key) return false;
+    this.feedbackKey = key;
+    this.feedbackEl?.empty();
+    return true;
   }
 
   private renderEmpty(container: HTMLElement, title: string, message: string): void {
+    if (container === this.feedbackEl && !this.resetFeedback(`empty:${title}:${message}`)) return;
     const empty = container.createDiv({ cls: "mindmap-sidebar-empty" });
     empty.createEl("h2", { text: title });
     empty.createEl("p", { text: message });
   }
 
-  private renderCandidateLink(container: HTMLElement, candidate: RelatedCandidate, className: string): void {
-    const file = candidate.file;
-    if (file === null) {
-      container.createSpan({ cls: className, text: candidate.title });
+  private restoreFocusedRow(path: string | null, previousElement?: HTMLElement | null): void {
+    if (previousElement?.isConnected) {
+      if (previousElement.ownerDocument.activeElement !== previousElement) previousElement.focus({ preventScroll: true });
       return;
     }
-
-    const link = container.createEl("a", {
-      cls: `${className} internal-link`,
-      text: candidate.title,
-      attr: {
-        href: file.path,
-        "data-href": file.path,
-      },
-    });
-    link.addEventListener("click", (event) => {
-      event.preventDefault();
-    });
-    link.addEventListener("mouseover", (event) => {
-      this.app.workspace.trigger("hover-link", {
-        event,
-        source: MINDMAP_VIEW_TYPE,
-        hoverParent: this.leaf,
-        targetEl: link,
-        linktext: file.path,
-        sourcePath: this.app.workspace.getActiveFile()?.path ?? file.path,
-      });
-    });
-  }
-
-  private animateSidebar(
-    container: HTMLElement,
-    previousCardPositions: Map<string, DOMRect>,
-    previousExpandedPath: string | null | undefined,
-    nextExpandedPath: string | null | undefined,
-  ): void {
-    const expansionChanged = previousExpandedPath !== nextExpandedPath;
-    const rows = Array.from(container.querySelectorAll(".mindmap-sidebar-card"));
-    if (rows.length > 0) {
-      rows.forEach((row, index) => {
-        if (!row.instanceOf(HTMLElement)) {
-          return;
-        }
-        const path = row.dataset.path;
-        const previous = path ? previousCardPositions.get(path) : undefined;
-        const current = row.getBoundingClientRect();
-        if (previous === undefined) {
-          animate(row, { opacity: [0.82, 1], y: [8, 0] }, { duration: 0.2, delay: index * 0.018, ease: "easeOut" });
-          return;
-        }
-        if (expansionChanged && path === nextExpandedPath) {
-          return;
-        }
-
-        const fromY = previous.top - current.top;
-        if (Math.abs(fromY) > 0.5) {
-          animate(row, { y: [fromY, 0] }, { duration: 0.24, ease: "easeOut" });
-        }
-      });
-    }
-
-    if (expansionChanged && nextExpandedPath !== null && nextExpandedPath !== undefined) {
-      const expandedRow = rows.find((row): row is HTMLElement => row.instanceOf(HTMLElement) && row.dataset.path === nextExpandedPath);
-      const detail = expandedRow?.querySelector(".mindmap-sidebar-detail");
-      if (detail instanceof HTMLElement) {
-        animate(detail, { opacity: [0, 1], y: [-4, 0] }, { duration: 0.16, ease: "easeOut" });
-      }
-    }
-  }
-
-  private animatePinReveal(container: HTMLElement, previousPath: string | null, nextPath: string | null): void {
-    if (previousPath === nextPath) {
-      return;
-    }
-
-    if (previousPath !== null) {
-      const row = this.findCandidateRow(container, previousPath);
-      const body = row?.querySelector(".mindmap-sidebar-card-body");
-      const pin = row?.querySelector(".mindmap-sidebar-pin");
-      if (body instanceof HTMLElement) {
-        animate(body, { x: [32, 0] }, { duration: 0.16, ease: [0.25, 1, 0.5, 1] });
-      }
-      if (pin instanceof HTMLElement) {
-        animate(pin, { opacity: [1, 0], x: [0, -4] }, { duration: 0.12, ease: [0.25, 1, 0.5, 1] });
-      }
-    }
-
-    if (nextPath !== null) {
-      const row = this.findCandidateRow(container, nextPath);
-      const body = row?.querySelector(".mindmap-sidebar-card-body");
-      const pin = row?.querySelector(".mindmap-sidebar-pin");
-      if (body instanceof HTMLElement) {
-        animate(body, { x: [0, 32] }, { duration: 0.16, ease: [0.25, 1, 0.5, 1] });
-      }
-      if (pin instanceof HTMLElement) {
-        animate(pin, { opacity: [0, 1], x: [-4, 0] }, { duration: 0.14, ease: [0.25, 1, 0.5, 1] });
-      }
-    }
-  }
-
-  private findCandidateRow(container: HTMLElement, path: string): HTMLElement | null {
-    return Array.from(container.querySelectorAll(".mindmap-sidebar-card"))
-      .find((row): row is HTMLElement => row.instanceOf(HTMLElement) && row.dataset.path === path) ?? null;
-  }
-
-  private captureCardPositions(container: HTMLElement): Map<string, DOMRect> {
-    const positions = new Map<string, DOMRect>();
-    for (const row of Array.from(container.querySelectorAll(".mindmap-sidebar-card"))) {
-      if (!row.instanceOf(HTMLElement) || !row.dataset.path) {
-        continue;
-      }
-      positions.set(row.dataset.path, row.getBoundingClientRect());
-    }
-    return positions;
+    if (!path || !this.resultsEl) return;
+    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(path) : path.replace(/["\\]/g, "\\$&");
+    const row = this.resultsEl.querySelector<HTMLElement>(`[data-path="${escaped}"]`);
+    row?.focus({ preventScroll: true });
   }
 
   private getDisplayCandidates(activeFile: TFile, persistedCandidates: RelatedCandidate[]): RelatedCandidate[] {

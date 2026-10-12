@@ -24,6 +24,7 @@ import { toFailureCode, type JobReceiptV1, type PersistedJobV1, type RebuildSnap
 export interface RebuildJobDeps {
   fs: IndexFs;
   root: string;
+  onActivated?: () => void;
 }
 
 type RebuildReceipt = Extract<JobReceiptV1, { kind: "rebuild" }>;
@@ -111,13 +112,17 @@ export class RebuildJobRunner implements JobPhaseRunner {
         case "build-generation":
           return await this.stepBuildGeneration(priorReceipt, signal);
         case "verify-generation":
-          return await this.stepVerifyGeneration(priorReceipt);
+          return await this.stepVerifyGeneration(priorReceipt, signal);
         case "activate-generation":
-          return await this.stepActivateGeneration(priorReceipt);
+          return await this.stepActivateGeneration(priorReceipt, signal);
         default:
           throw new EngineError("JOB_TRANSITION_INVALID", `RebuildJobRunner cannot execute phase "${persisted.job.phase}".`, {});
       }
     } catch (error) {
+      if (signal.aborted) {
+        if (persisted.job.phase === "activate-generation") return { type: "retry", failureCode: toFailureCode(error) };
+        return { type: "cancelled" };
+      }
       if (isEngineError(error)) throw error;
       return { type: "retry", failureCode: toFailureCode(error) };
     }
@@ -161,7 +166,7 @@ export class RebuildJobRunner implements JobPhaseRunner {
     }
 
     if (targetExists) {
-      const adoptedFingerprint = await this.tryAdoptExistingTarget(targetId, snapshot);
+      const adoptedFingerprint = await this.tryAdoptExistingTarget(targetId, snapshot, signal);
       if (adoptedFingerprint !== null) {
         const receipt: RebuildReceipt = { ...priorReceipt, built: true, snapshot, builtManifestFingerprint: adoptedFingerprint };
         return { type: "advance", nextPhase: "verify-generation", receipt };
@@ -194,7 +199,7 @@ export class RebuildJobRunner implements JobPhaseRunner {
     }
     // We just built this ourselves -- capture the ACTUAL manifest's byte-exact fingerprint
     // (never merely the semantic one) so later phases can confirm no corruption occurred since.
-    const { manifest } = await verifyGenerationFully(this.deps.fs, this.deps.root, targetId);
+    const { manifest } = await verifyGenerationFully(this.deps.fs, this.deps.root, targetId, { signal });
     const receipt: RebuildReceipt = { ...priorReceipt, built: true, snapshot, builtManifestFingerprint: manifestArtifactFingerprint(manifest) };
     return { type: "advance", nextPhase: "verify-generation", receipt };
   }
@@ -217,17 +222,18 @@ export class RebuildJobRunner implements JobPhaseRunner {
    * fingerprint mismatch -- both mean the same thing to the caller: "do
    * not adopt this."
    */
-  private async tryAdoptExistingTarget(targetId: number, snapshot: RebuildSnapshotV1): Promise<string | null> {
+  private async tryAdoptExistingTarget(targetId: number, snapshot: RebuildSnapshotV1, signal: AbortSignal): Promise<string | null> {
     try {
-      const { manifest, noteMetadata } = await verifyGenerationFully(this.deps.fs, this.deps.root, targetId);
+      const { manifest, noteMetadata } = await verifyGenerationFully(this.deps.fs, this.deps.root, targetId, { signal });
       if (!compactionSnapshotMatchesGeneration(toDescriptor(snapshot), manifest, noteMetadata)) return null;
       return manifestArtifactFingerprint(manifest);
-    } catch {
+    } catch (error) {
+      if (signal.aborted) throw signal.reason ?? error;
       return null;
     }
   }
 
-  private async stepVerifyGeneration(priorReceipt: RebuildReceipt | undefined): Promise<PhaseStepOutcome> {
+  private async stepVerifyGeneration(priorReceipt: RebuildReceipt | undefined, signal: AbortSignal): Promise<PhaseStepOutcome> {
     if (priorReceipt?.targetGenerationId === undefined || !priorReceipt.built) {
       throw new EngineError("JOB_SHAPE_INVALID", "verify-generation reached without a built generation in receipt.", {});
     }
@@ -241,8 +247,9 @@ export class RebuildJobRunner implements JobPhaseRunner {
     // without ever having to redo the expensive rebuild itself.
     let manifest, noteMetadata;
     try {
-      ({ manifest, noteMetadata } = await verifyGenerationFully(this.deps.fs, this.deps.root, priorReceipt.targetGenerationId));
+      ({ manifest, noteMetadata } = await verifyGenerationFully(this.deps.fs, this.deps.root, priorReceipt.targetGenerationId, { signal }));
     } catch (error) {
+      if (signal.aborted) return { type: "cancelled" };
       return { type: "retry", failureCode: toFailureCode(error) };
     }
     // Full artifact integrity alone is not enough -- also confirm this generation SEMANTICALLY
@@ -281,7 +288,7 @@ export class RebuildJobRunner implements JobPhaseRunner {
    * check/unlink race against an `upsertNote`/`compact` call running on a
    * different `IndexStore` instance over the same files.
    */
-  private stepActivateGeneration(priorReceipt: RebuildReceipt | undefined): Promise<PhaseStepOutcome> {
+  private stepActivateGeneration(priorReceipt: RebuildReceipt | undefined, signal: AbortSignal): Promise<PhaseStepOutcome> {
     if (priorReceipt?.targetGenerationId === undefined || !priorReceipt.verified) {
       throw new EngineError("JOB_SHAPE_INVALID", "activate-generation reached without a verified generation in receipt.", {});
     }
@@ -318,9 +325,10 @@ export class RebuildJobRunner implements JobPhaseRunner {
         // activate over as a genuinely different id would be.
         let baseMatches: boolean;
         try {
-          const { manifest: baseManifest } = await verifyGenerationFully(this.deps.fs, this.deps.root, currentId);
+          const { manifest: baseManifest } = await verifyGenerationFully(this.deps.fs, this.deps.root, currentId, { signal });
           baseMatches = manifestArtifactFingerprint(baseManifest) === snapshot.baseFingerprint;
-        } catch {
+        } catch (error) {
+          if (signal.aborted) throw signal.reason ?? error;
           baseMatches = false;
         }
         if (!baseMatches) {
@@ -332,8 +340,11 @@ export class RebuildJobRunner implements JobPhaseRunner {
       // pointer switch -- catches corruption introduced between verify-generation and now.
       let manifest, noteMetadata;
       try {
-        ({ manifest, noteMetadata } = await verifyGenerationFully(this.deps.fs, this.deps.root, targetId));
+        ({ manifest, noteMetadata } = await verifyGenerationFully(this.deps.fs, this.deps.root, targetId, { signal }));
       } catch (error) {
+        // Activation is the irreversible commit phase. Once finalization begins, an abort may
+        // race after current.json has switched; preserve retry/cleanup semantics, never terminally
+        // cancel a possibly committed activation.
         return { type: "retry", failureCode: toFailureCode(error) };
       }
       const mismatch = this.checkSnapshotAndArtifact(snapshot, builtManifestFingerprint, manifest, noteMetadata);
@@ -346,8 +357,11 @@ export class RebuildJobRunner implements JobPhaseRunner {
         // overlay-cleanup failure here is reported as a retry (safe: the pointer switch is a no-op
         // on retry, and re-deleting an already-deleted/already-mismatched overlay is a no-op) but
         // never rolls the switch back.
-        await finalizeCompactionFromSnapshot(this.deps.fs, this.deps.root, targetId, snapshot.overlays);
+        await finalizeCompactionFromSnapshot(this.deps.fs, this.deps.root, targetId, snapshot.overlays, signal);
+        this.deps.onActivated?.();
       } catch (error) {
+        // current.json may already have switched before a cleanup/persistence-adjacent failure.
+        // Keep this activation resumable; never report a terminal cancellation after commit.
         return { type: "retry", failureCode: toFailureCode(error) };
       }
       const receipt: RebuildReceipt = { ...priorReceipt, activated: true };

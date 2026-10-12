@@ -54,6 +54,18 @@ async function seedBaseGeneration(fs: FakeIndexFs, notes: GenerationInputNote[],
   await switchCurrentGeneration(fs, "/root", generationId);
 }
 
+class PointerSwitchingFs extends FakeIndexFs {
+  switchOnPath: string | null = null;
+  switched = false;
+  async statFingerprint(path: string): Promise<string> {
+    if (!this.switched && path === this.switchOnPath) {
+      this.switched = true;
+      await switchCurrentGeneration(this, "/root", 2);
+    }
+    return super.statFingerprint(path);
+  }
+}
+
 /** A synthetic `OverlayPrefixRecord` for exercising `computeProjectedOverlayResourceUsage` directly, without needing an actual overlay file on disk. */
 function fakeOverlayRecord(path: string, overrides: Partial<OverlayPrefixRecord> = {}): OverlayPrefixRecord {
   return {
@@ -87,6 +99,103 @@ void test("queryRelated ranks base notes exactly like a full note-level ranking 
   const results = await store.queryRelated({ queryVector: query, queryChunkVectors: [], excludePath: canonicalizePath("Note-0.md"), limit: 10 });
   assert.equal(results.length, 3);
   assert.ok(!results.some((r) => r.path === "Note-0.md"));
+});
+
+void test("warm query and getRecord reuse the fingerprint-verified base generation", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2026);
+  const notes = [makeNote("A.md", 0, random), makeNote("B.md", 0, random)];
+  await seedBaseGeneration(fs, notes, 1);
+  const store = new IndexStore(fs, "/root");
+  await store.queryRelated({ queryVector: notes[0].vector, queryChunkVectors: [], limit: 2 });
+  const baseReadsAfterCold = fs.readFileCalls.filter((path) => path.endsWith("/notes.mvx")).length;
+  await store.getRecord(notes[0].identity);
+  await store.queryRelated({ queryVector: notes[0].vector, queryChunkVectors: [], limit: 2 });
+  assert.equal(fs.readFileCalls.filter((path) => path.endsWith("/notes.mvx")).length, baseReadsAfterCold);
+});
+
+void test("base generation cache invalidates on same-size artifact replacement and fails closed", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2027);
+  const notes = [makeNote("A.md", 0, random), makeNote("B.md", 0, random)];
+  await seedBaseGeneration(fs, notes, 1);
+  const store = new IndexStore(fs, "/root");
+  await store.queryRelated({ queryVector: notes[0].vector, queryChunkVectors: [], limit: 2 });
+  const matrixPath = "/root/generations/gen-1/notes.mvx";
+  const bytes = fs.binaryFiles.get(matrixPath)!;
+  const changed = bytes.slice();
+  changed[changed.length - 1] ^= 1;
+  fs.binaryFiles.set(matrixPath, changed);
+  await assert.rejects(() => store.queryRelated({ queryVector: notes[0].vector, queryChunkVectors: [], limit: 2 }));
+});
+
+void test("base generation cache observes a newly switched pointer", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2028);
+  const oldNote = makeNote("Old.md", 0, random);
+  const newNote = makeNote("New.md", 0, random);
+  await seedBaseGeneration(fs, [oldNote], 1);
+  const store = new IndexStore(fs, "/root");
+  await store.queryRelated({ queryVector: oldNote.vector, queryChunkVectors: [], limit: 2 });
+  await buildGeneration(fs, "/root", { generationId: 2, embeddingModel: MODEL, dimension: DIM, notes: [newNote] });
+  await switchCurrentGeneration(fs, "/root", 2);
+  const result = await store.queryRelated({ queryVector: newNote.vector, queryChunkVectors: [], limit: 2 });
+  assert.deepEqual(result.map((item) => item.path), [canonicalizePath("New.md")]);
+});
+
+void test("generation cache retries a pointer swap during publication and never serves the stale generation", async () => {
+  const fs = new PointerSwitchingFs();
+  const random = seededRandom(2029);
+  const oldNote = makeNote("Old.md", 0, random);
+  const newNote = makeNote("New.md", 0, random);
+  await seedBaseGeneration(fs, [oldNote], 1);
+  await buildGeneration(fs, "/root", { generationId: 2, embeddingModel: MODEL, dimension: DIM, notes: [newNote] });
+  fs.switchOnPath = "/root/generations/gen-1/notes.mvx";
+  const result = await new IndexStore(fs, "/root").queryRelated({ queryVector: newNote.vector, queryChunkVectors: [], limit: 2 });
+  assert.equal(fs.switched, true);
+  assert.deepEqual(result.map((item) => item.path), [canonicalizePath("New.md")]);
+});
+
+void test("filesystems without statFingerprint retain the uncached behavior", async () => {
+  const fs = new FakeIndexFs();
+  Object.defineProperty(fs, "statFingerprint", { value: undefined });
+  const random = seededRandom(2030);
+  const fixture = [makeNote("A.md", 0, random), makeNote("B.md", 0, random)];
+  await seedBaseGeneration(fs, fixture, 1);
+  const store = new IndexStore(fs, "/root");
+  await store.queryRelated({ queryVector: fixture[0].vector, queryChunkVectors: [], limit: 2 });
+  const firstReads = fs.readFileCalls.filter((item) => item.endsWith("notes.mvx")).length;
+  await store.queryRelated({ queryVector: fixture[0].vector, queryChunkVectors: [], limit: 2 });
+  assert.ok(fs.readFileCalls.filter((item) => item.endsWith("notes.mvx")).length > firstReads);
+});
+
+void test("a cancelled cold cached query does not poison the next query", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2031);
+  const fixture = [makeNote("A.md", 0, random), makeNote("B.md", 0, random)];
+  await seedBaseGeneration(fs, fixture, 1);
+  const store = new IndexStore(fs, "/root");
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    () => store.queryRelated({ queryVector: fixture[0].vector, queryChunkVectors: [], limit: 2, signal: controller.signal }),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+  const recovered = await store.queryRelated({ queryVector: fixture[0].vector, queryChunkVectors: [], limit: 2 });
+  assert.equal(recovered.length, 2);
+});
+
+void test("aborting the signal that populated the generation cache never poisons a later shard query", async () => {
+  const fs = new FakeIndexFs();
+  const random = seededRandom(2032);
+  const fixture = [makeNote("A.md", 2, random), makeNote("B.md", 2, random)];
+  await seedBaseGeneration(fs, fixture, 1);
+  const store = new IndexStore(fs, "/root");
+  const firstSignal = new AbortController();
+  await store.queryRelated({ queryVector: fixture[0].vector, queryChunkVectors: [fixture[0].vector], limit: 2, signal: firstSignal.signal });
+  firstSignal.abort();
+  const later = await store.queryRelated({ queryVector: fixture[0].vector, queryChunkVectors: [fixture[0].vector], limit: 2 });
+  assert.equal(later.length, 2);
 });
 
 void test("an upsert overlay shadows the base row entirely (different vector wins the ranking), scored WITHOUT a second full note matrix", async () => {
@@ -864,13 +973,10 @@ void test("computeProjectedOverlayResourceUsage returns null when no dimension i
 });
 
 void test("upsertNote enforces PROJECTED ACTUAL steady-state memory at a legal higher-dimensional, near-budget base generation -- rejecting a SECOND resident overlay note vector once budget is exhausted, while still allowing a replacement of the ALREADY-PENDING one and a tombstone, even though the fixed pending-overlay COUNT budget alone would have allowed all of it", async () => {
-  // dimension=8192 (the legal MAX_DIMENSION) x noteCount=3838 lands the base generation's own
-  // steady-state EXACTLY one note-vector's worth (32768 bytes) below the 128MB budget --
-  // computeSteadyStateBytes({dimension:8192, noteCount:3838, largestShardCount:0}) ===
-  // BUDGET_STEADY_STATE_MEMORY_BYTES - 32768 -- legal on its own (parseVectorIndexManifestV1
-  // accepts it), with room for EXACTLY one resident overlay note vector and no more.
+  // dimension=8192 x noteCount=3837 leaves room for exactly one overlay after accounting for
+  // the retained MVX1 backing's 48-byte header/checksum framing; a second exceeds the ceiling.
   const highDim = 8192;
-  const nearBudgetNoteCount = 3838;
+  const nearBudgetNoteCount = 3837;
   const fs = new FakeIndexFs();
   const random = seededRandom(200);
   const notes = Array.from({ length: nearBudgetNoteCount }, (_, i) => {

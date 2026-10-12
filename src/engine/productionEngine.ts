@@ -34,14 +34,17 @@ import {
   type VaultFileClasses,
 } from "./productionVaultAdapter";
 import { createProductionNoteEmbeddingSeam, createProductionNoteMetadataSeam } from "./productionProviderSeams";
+import { createCachedLiveEmbeddingSeam, type CachedLiveEmbeddingSeam } from "./liveEmbeddingCache";
+import { assessActiveNote } from "../individualNote";
+import { LIVE_QUERY_EMBEDDING_CACHE_MAX_BYTES } from "../index/budgets";
 import { selectRelatedCandidates, type RelatedCandidateScore } from "./relatedSelector";
 import type { CanonicalPath, RelatedCandidateKind } from "./contracts";
-import type { NoteEmbeddingSeam } from "../jobs/noteJob";
 import { NoteWriter } from "./noteWriter";
 import { MigrationRunner, MIGRATION_SCOPE_ID } from "../migration/migrationRunner";
 import { MigrationStore } from "../migration/migrationStore";
 import type { MigrationStatusV1 } from "../migration/migrationContract";
 import { MigrationDriver } from "../migration/migrationDriver";
+import { createWorkspaceEditingProtection, type EditingProtection } from "../editingProtection";
 
 /**
  * Checkpoint 10B blocker resolution: the CLOSED set of scope ids a
@@ -272,9 +275,13 @@ export class ProductionEngine {
   /** Reused by `submitNoteForProcessing` -- the SAME `NoteSourceReader` `"process-note"` jobs themselves resolve identities through, never a second, parallel adapter. */
   private readonly noteSourceReader: NoteSourceReader;
   /** Checkpoint 10B SIDEBAR: the SAME strict embedding seam `NoteJobRunner`'s own `"embed"` phase uses -- `null` only when no embedding provider/model/chunkOptions is configured (mirrors `migrationEmbeddingSeam`'s own construction above). `queryLiveRelated`/`queryLookupRelated` throw a closed `JOB_SHAPE_INVALID` rather than silently falling back to a different embedding path when this is `null`. */
-  private readonly noteEmbeddingSeam: NoteEmbeddingSeam | null;
+  private readonly noteEmbeddingSeam: CachedLiveEmbeddingSeam | null;
   /** Checkpoint 10B PENDING: discovery is pure text/hash work (no embedding call), so this is constructed UNCONDITIONALLY -- unlike `noteEmbeddingSeam`, a pending-notes count must stay available even before any provider is configured. Reused by `getPendingCandidates` only; the `"scope-refresh"`/migration runners above keep their own separately-constructed seams unchanged. */
   private readonly pendingDiscoverySeam: import("../jobs/scopeJob").ScopeDiscoverySeam;
+  private readonly editingProtection: EditingProtection | null;
+  private disposeEditingProtection: (() => void) | null = null;
+  private readonly indexChangeListeners = new Set<(change: { revision: number; paths?: readonly string[] }) => void>();
+  private indexRevision = 0;
 
   constructor(options: ProductionEngineOptions) {
     this.options = options;
@@ -308,10 +315,21 @@ export class ProductionEngine {
     const noteVaultAdapter = createProductionNoteVaultAdapter(options.vault, options.vaultFileClasses);
     const noteWriter = new NoteWriter(noteVaultAdapter);
     const sourceReader = createProductionNoteSourceReader({ vault: options.vault, scopeFolders: options.scopeFolders, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses });
+    if (options.workspace && typeof options.workspace.getLeavesOfType === "function" && typeof options.workspace.on === "function") {
+      const editing = createWorkspaceEditingProtection(options.workspace, options.vault);
+      this.editingProtection = editing.protection;
+      this.disposeEditingProtection = () => editing.dispose();
+    } else {
+      this.editingProtection = null;
+    }
     this.noteSourceReader = sourceReader;
     this.noteEmbeddingSeam =
       options.embeddingProvider && options.embeddingModel && options.chunkOptions
-        ? createProductionNoteEmbeddingSeam(options.embeddingProvider, options.embeddingModel, options.chunkOptions)
+        ? createCachedLiveEmbeddingSeam(createProductionNoteEmbeddingSeam(options.embeddingProvider, options.embeddingModel, options.chunkOptions), {
+            maxEntries: 256,
+            maxBytes: LIVE_QUERY_EMBEDDING_CACHE_MAX_BYTES,
+            canRetain: (bytes) => this.indexStore.canRetainLiveEmbeddingBytes(bytes),
+          })
         : null;
     this.pendingDiscoverySeam = createProductionScopeDiscoverySeam({ vault: options.vault, minimumWords: options.minimumWords, configDir: options.configDir, vaultFileClasses: options.vaultFileClasses }, scopeRegistry, options.embeddingModel ?? "");
     // Item 6 (10A blocker pass): "reading-sync"/"scope-refresh" both ultimately ENQUEUE
@@ -331,13 +349,14 @@ export class ProductionEngine {
         noteWriter,
         indexStore: { upsertNote: (input) => this.indexStoreUpsert(input) },
         replacement: createProductionNoteReplacementSeam(lateJobSubmitter, "manual"),
-        deferWrite: (_persisted, identity) => options.workspace?.getActiveFile()?.path === identity.canonicalPath,
+        deferWrite: (_persisted, identity, savedContent) => this.editingProtection?.isProtected(identity.canonicalPath, savedContent) ?? false,
         selectRelated: relatedConfig ? async (embedded, selfPath) => {
           const candidates = await this.indexStore.queryRelated({
             queryVector: embedded.noteVector,
             queryChunkVectors: embedded.chunkVectors,
             excludePath: selfPath,
             limit: relatedConfig.candidateLimit,
+            signal: this.lifecycleAbort.signal,
           });
           return selectRelatedCandidates(
             candidates.map((c): RelatedCandidateScore => ({ path: c.path, score: c.score })),
@@ -355,7 +374,7 @@ export class ProductionEngine {
       const expectedRelatedVersion = relatedConfig ? PRODUCTION_RELATED_VERSION : undefined;
       const catalogSnapshot = {
         prepareLookup: async (): Promise<(identity: import("./contracts").NoteIdentityV1, sourceHash: string) => boolean> => {
-          const records = await this.indexStore.snapshotCatalog();
+          const records = await this.indexStore.snapshotCatalog(this.lifecycleAbort.signal);
           return buildCatalogPredicate(records, expectedRelatedVersion);
         },
       };
@@ -368,7 +387,7 @@ export class ProductionEngine {
       runners["scope-refresh"] = scopeRunner;
       runners["reading-sync"] = scopeRunner;
     }
-    runners["rebuild-index"] = new RebuildJobRunner({ fs: options.fs, root: options.dataRoot });
+    runners["rebuild-index"] = new RebuildJobRunner({ fs: options.fs, root: options.dataRoot, onActivated: () => this.emitIndexChange() });
     // Item 3: migration is now fully self-contained inside `MigrationRunner` (it builds/verifies/
     // activates its own generation directly -- see that module's own doc comment, "Depends on
     // NEITHER JobEngine NOR JobStore") -- there is no longer a "migrate-index" JOB KIND for this
@@ -381,6 +400,7 @@ export class ProductionEngine {
       safelyNotify(() => options.onFault?.({ source: "job-engine", code: fault.code, atMs: fault.atMs }));
     });
     jobEngineRef.current = this.jobEngine;
+    this.editingProtection?.subscribeSafeTransition(() => this.jobEngine.wake());
 
     this.scheduleStore = new ScheduleStore(options.fs, options.dataRoot);
     this.coreScheduler = new CoreScheduler({
@@ -451,13 +471,20 @@ export class ProductionEngine {
     // capability).
     this.unsubscribeMigration = this.migrationRunner.subscribe((status) => {
       if (status.phase !== "complete") return;
+      this.emitIndexChange();
       safelyNotify(() => options.onMigrationComplete?.());
       void this.tryStartOrdinaryWork();
     });
   }
 
-  private indexStoreUpsert(input: Parameters<IndexStore["upsertNote"]>[0]): Promise<void> {
-    return this.indexStore.upsertNote(input);
+  private async indexStoreUpsert(input: Parameters<IndexStore["upsertNote"]>[0]): Promise<void> {
+    await this.indexStore.upsertNote(input);
+    this.emitIndexChange([input.identity.canonicalPath]);
+  }
+
+  private emitIndexChange(paths?: readonly string[]): void {
+    const change = { revision: ++this.indexRevision, ...(paths ? { paths: [...paths] } : {}) };
+    for (const listener of this.indexChangeListeners) safelyNotify(() => listener(change));
   }
 
   getPhase(): ProductionEnginePhase {
@@ -728,7 +755,7 @@ export class ProductionEngine {
       // migration reaches "complete") or by a caller-driven `recheckReadiness()` (once a degraded
       // provider recovers).
       await this.tryStartOrdinaryWork();
-      return report;
+      return this.lastPreflightReport ?? report;
     });
   }
 
@@ -878,6 +905,21 @@ export class ProductionEngine {
     await this.jobEngine.submit({ trigger, kind: "process-note", identity: resolved.identity, sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion });
   }
 
+  clearActiveNotePriority(): void { this.jobEngine.prioritizeJob(null); }
+
+  async prioritizeActiveNote(canonicalPath: string, signal: AbortSignal): Promise<void> {
+    if (signal.aborted || this.disposeRequested || !this.registeredRunners["process-note"] || !this.options.embeddingModel) return;
+    const canonical = canonicalizePath(canonicalPath);
+    const resolved = await this.noteSourceReader.read(stableNoteIdentity(canonical), signal);
+    if (!resolved || signal.aborted || this.disposeRequested) return;
+    if (!assessActiveNote(canonical, resolved.rawContent, { allScopeFolders: [...this.options.scopeFolders], minimumWords: this.options.minimumWords, configDir: this.options.configDir, runtimeFolder: this.options.runtimeFolder }).eligible) return;
+    const projection = projectSource(resolved.identity, resolved.rawContent);
+    const record = await this.indexStore.getRecord(resolved.identity, signal);
+    if (signal.aborted || this.disposeRequested) return;
+    if (record?.sourceHash === projection.sourceHash && (record.relatedVersion ?? 0) >= (this.relatedVersion ?? 0)) return;
+    await this.jobEngine.submit({ trigger: "scheduled", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion }, { prefer: () => !signal.aborted && !this.disposeRequested });
+  }
+
   /**
    * Checkpoint 10B item 2 (scope-wide runs): submits a `"scope-refresh"`
    * job under the given scope id -- `"current"`/`"all"` are the ONLY ids
@@ -929,11 +971,12 @@ export class ProductionEngine {
    * `process-note` job `submitNoteForProcessing` would (never a daemon,
    * never a synchronous inline embed-then-index like the retired Python
    * worker) and returns immediately with the SAME "not yet indexed"
-   * loading/empty semantics the UI already renders for `indexed: false`/
-   * `stale: true` -- the caller is expected to re-query once the
-   * submitted job completes, exactly like polling any other job result.
-   * Related candidates are only ever computed against an ALREADY
-   * indexed, non-stale-at-submission-time record: `related` mirrors
+   * empty semantics for `indexed: false`. Existing indexed notes still
+   * return freshly ranked connections while the protected background job
+   * updates persisted metadata. Index-change events refresh the sidebar
+   * after the job commits; no per-render polling or manual action is needed.
+   * Related candidates are computed against an ALREADY
+   * indexed record: `related` mirrors
    * `query_related_for_note`'s selection (`selectRelatedCandidates`), and
    * the note's own vector for ranking is a FRESH embed through
    * `noteEmbeddingSeam` -- never a stored vector pulled back out of the
@@ -950,15 +993,22 @@ export class ProductionEngine {
       throw new EngineError("SOURCE_STALE", "queryLiveRelated: the given path does not currently resolve to a note.");
     }
     const projection = projectSource(resolved.identity, resolved.rawContent);
-    const record = await this.indexStore.getRecord(resolved.identity);
+    const record = await this.indexStore.getRecord(resolved.identity, this.lifecycleAbort.signal);
     const indexed = record !== null;
     const stale = !indexed || record.sourceHash !== projection.sourceHash;
 
-    if (ensureIndex && stale && this.registeredRunners["process-note"]) {
-      await this.jobEngine
-        .submit({ trigger: "manual", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion })
-        .catch(() => undefined);
-      return { path: canonical, sourceHash: projection.sourceHash, indexed, stale, related: [] };
+    const eligible = ensureIndex && stale && assessActiveNote(canonical, resolved.rawContent, {
+      allScopeFolders: [...this.options.scopeFolders],
+      minimumWords: this.options.minimumWords,
+      configDir: this.options.configDir,
+      runtimeFolder: this.options.runtimeFolder,
+    }).eligible;
+    if (eligible && this.registeredRunners["process-note"]) {
+      try {
+        await this.jobEngine.submit({ trigger: "scheduled", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion });
+      } catch {
+        // Best-effort background persistence must not hide valid ranked connections.
+      }
     }
 
     if (!indexed) {
@@ -972,6 +1022,7 @@ export class ProductionEngine {
       queryChunkVectors: embedded.chunkVectors,
       excludePath: canonical,
       limit: config.candidateLimit,
+      signal: this.lifecycleAbort.signal,
     });
     const related = selectRelatedCandidates(
       candidates.map((c): RelatedCandidateScore => ({ path: c.path, score: c.score })),
@@ -1001,7 +1052,7 @@ export class ProductionEngine {
     const embedded = await this.noteEmbeddingSeam.embed(projection, this.lifecycleAbort.signal);
     const boundedLimit = Math.max(1, limit);
     const candidateLimit = Math.max(boundedLimit, this.options.relatedSelectionConfig.candidateLimit);
-    const candidates = await this.indexStore.queryRelated({ queryVector: embedded.noteVector, queryChunkVectors: embedded.chunkVectors, limit: candidateLimit });
+    const candidates = await this.indexStore.queryRelated({ queryVector: embedded.noteVector, queryChunkVectors: embedded.chunkVectors, limit: candidateLimit, signal: this.lifecycleAbort.signal });
     return candidates.slice(0, boundedLimit).map((c) => ({ schemaVersion: 1, path: c.path, score: c.score, kind: "lookup" }));
   }
 
@@ -1061,10 +1112,17 @@ export class ProductionEngine {
     this.lifecycleAbort.abort();
     this.unsubscribeMigration?.();
     this.unsubscribeMigration = null;
+    this.indexChangeListeners.clear();
     return this.enqueue(async () => {
       if (this.phase === "disposed") return;
       this.coreScheduler.dispose();
+      this.noteEmbeddingSeam?.clear();
+      this.indexStore.clearQueryCaches();
+      const jobsSettled = this.jobEngine.whenSettled();
       this.jobEngine.dispose();
+      const disposeEditingProtection = this.disposeEditingProtection;
+      this.disposeEditingProtection = null;
+      void jobsSettled.finally(() => disposeEditingProtection?.());
       this.migrationDriver.dispose();
       this.migrationRunner.dispose();
       this.pumpStarted = false;
@@ -1083,6 +1141,19 @@ export class ProductionEngine {
 
   subscribeActivity(listener: (snapshot: EngineActivitySnapshot) => void): () => void {
     return this.jobEngine.subscribeActivity(listener);
+  }
+  async whenJobsSettled(): Promise<void> {
+    // A stopped scheduler/migration can still enqueue or commit its last awaited operation.
+    // Drain those producers before taking the final job dispatch and persistence barriers.
+    await this.coreScheduler.whenSettled();
+    await this.migrationDriver.whenSettled();
+    await this.migrationRunner.whenSettled();
+    await this.jobEngine.whenSettled();
+    await this.jobStore.whenSettled();
+  }
+  subscribeIndexChanges(listener: (change: { revision: number; paths?: readonly string[] }) => void): () => void {
+    this.indexChangeListeners.add(listener);
+    return () => this.indexChangeListeners.delete(listener);
   }
   pauseProcessing(): Promise<void> { return this.jobEngine.pauseProcessing(); }
   resumeProcessing(): Promise<void> { return this.jobEngine.resumeProcessing(); }

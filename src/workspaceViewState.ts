@@ -7,15 +7,44 @@ export interface SidebarLiveState {
   path: string;
   status: "idle" | "loading" | "ready" | "error";
   response: LiveRelatedResponse | null;
+  displayResponse?: LiveRelatedResponse | null;
   error: string | null;
 }
 
-export function createIdleLiveState(path: string, response: LiveRelatedResponse | null = null): SidebarLiveState {
+export interface MindmapViewState {
+  [key: string]: unknown;
+  heatmapOpen: boolean;
+  expandedByNote: Record<string, string | null>;
+}
+
+export function normalizeMindmapViewState(value: unknown): MindmapViewState {
+  if (typeof value !== "object" || value === null) return { heatmapOpen: false, expandedByNote: {} };
+  const record = value as Record<string, unknown>;
+  const entries = typeof record.expandedByNote === "object" && record.expandedByNote !== null
+    ? Object.entries(record.expandedByNote as Record<string, unknown>)
+      .filter((entry): entry is [string, string | null] => typeof entry[0] === "string" && (typeof entry[1] === "string" || entry[1] === null))
+      .slice(-100)
+    : [];
+  return { heatmapOpen: record.heatmapOpen === true, expandedByNote: Object.fromEntries(entries) };
+}
+
+export function rememberExpandedPath(state: MindmapViewState, notePath: string, expandedPath: string | null): MindmapViewState {
+  const entries = Object.entries(state.expandedByNote).filter(([path]) => path !== notePath);
+  entries.push([notePath, expandedPath]);
+  return { ...state, expandedByNote: Object.fromEntries(entries.slice(-100)) };
+}
+
+export function getIndexRefreshTargets(activePath: string | null, lookupQuery: string): { live: boolean; lookup: boolean } {
+  return { live: activePath !== null, lookup: lookupQuery.trim().length > 0 };
+}
+
+export function createIdleLiveState(path: string, response: LiveRelatedResponse | null = null, displayResponse: LiveRelatedResponse | null = response, error: string | null = null): SidebarLiveState {
   return {
     path,
     status: "idle",
     response,
-    error: null,
+    displayResponse,
+    error,
   };
 }
 
@@ -24,7 +53,8 @@ export function createLoadingLiveState(path: string, current: SidebarLiveState):
     path,
     status: "loading",
     response: current.path === path ? current.response : null,
-    error: null,
+    displayResponse: current.path === path ? current.displayResponse ?? current.response : null,
+    error: current.path === path ? current.error : null,
   };
 }
 
@@ -33,15 +63,19 @@ export function createErrorLiveState(path: string, current: SidebarLiveState, er
     path,
     status: "error",
     response: current.path === path ? current.response : null,
+    displayResponse: current.path === path ? current.displayResponse ?? current.response : null,
     error: error instanceof Error ? error.message : String(error),
   };
 }
 
-export function createReadyLiveState(path: string, response: LiveRelatedResponse): SidebarLiveState {
+export function createReadyLiveState(path: string, response: LiveRelatedResponse, current?: SidebarLiveState): SidebarLiveState {
   return {
     path,
     status: "ready",
     response,
+    displayResponse: response.indexed && (!response.stale || response.related.length > 0)
+      ? response
+      : current?.path === path ? current.displayResponse ?? current.response : null,
     error: null,
   };
 }
@@ -67,8 +101,16 @@ export function shouldSkipLiveQuery(liveState: SidebarLiveState, path: string): 
 
 export function getDisplayLiveRelated(activePath: string, liveState: SidebarLiveState): LiveRelatedResult[] {
   return liveState.path === activePath
-    ? liveState.response?.related ?? []
+    ? (liveState.displayResponse ?? liveState.response)?.related ?? []
     : [];
+}
+
+/** Pending indexing is not evidence of an empty result. Background refreshes keep accepted feedback. */
+export function getLiveFeedback(state: SidebarLiveState, liveEnabled: boolean): "none" | "empty" | "error" {
+  if (!liveEnabled) return "empty";
+  if (state.error !== null) return "error";
+  const response = state.displayResponse ?? state.response;
+  return response?.indexed && !response.stale && response.related.length === 0 ? "empty" : "none";
 }
 
 export function shouldApplyLiveResponse(

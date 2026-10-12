@@ -129,14 +129,13 @@ function formatTimestamp(value: number | null): string {
 /** One-line summary of the latest preflight result, safe to render inline in Troubleshooting by default. */
 export function buildDiagnosticsOneLine(preflight: DiagnosticsReportPreflight): string {
   if (preflight.inProgress) {
-    return "Preflight is running.";
+    return "Checking local models and plugin setup…";
   }
   if (!preflight.result) {
-    return "Preflight has not run yet.";
+    return "Setup checks will run automatically when Mindmap starts.";
   }
-  return preflight.result.ok
-    ? `Ready as of ${formatTimestamp(preflight.lastRunAt)}.`
-    : `Not ready: ${truncateField(preflight.result.summary, 200)}`;
+  const checked = preflight.lastRunAt === null ? "" : ` Last checked ${new Date(preflight.lastRunAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`;
+  return `${truncateField(preflight.result.summary, 300)}${checked}`;
 }
 
 /**

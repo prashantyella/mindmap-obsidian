@@ -16,6 +16,7 @@ import { CHECKSUM_BYTES, encodedMatrixByteLength, HEADER_BYTES } from "./vectorC
 export const BUDGET_STEADY_STATE_MEMORY_BYTES = 128 * 1024 * 1024;
 export const BUDGET_REBUILD_PEAK_MEMORY_BYTES = 512 * 1024 * 1024;
 export const BUDGET_DISK_BYTES = 600 * 1024 * 1024;
+export const LIVE_QUERY_EMBEDDING_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Conservative, explicit allowance for bookkeeping that rides along with
@@ -31,6 +32,11 @@ const BYTES_PER_FLOAT32 = 4;
 /** Raw, decoded (in-memory, resident) byte size of a `count x dimension` Float32 matrix -- header/checksum-free, unlike `encodedMatrixByteLength`. */
 export function decodedMatrixByteLength(dimension: number, count: number): number {
   return count * dimension * BYTES_PER_FLOAT32;
+}
+
+/** Production cooperative loads retain one encoded backing allocation and a zero-copy Float32 view over it. */
+export function retainedMatrixByteLength(dimension: number, count: number): number {
+  return encodedMatrixByteLength(dimension, count);
 }
 
 export interface MatrixByteAccountingShape {
@@ -50,8 +56,8 @@ export interface MatrixByteAccountingShape {
  */
 export function computeSteadyStateBytes({ dimension, noteCount, largestShardCount }: MatrixByteAccountingShape): number {
   return (
-    decodedMatrixByteLength(dimension, noteCount) +
-    decodedMatrixByteLength(dimension, largestShardCount) +
+    retainedMatrixByteLength(dimension, noteCount) +
+    (largestShardCount > 0 ? retainedMatrixByteLength(dimension, largestShardCount) : 0) +
     dimension * BYTES_PER_FLOAT32 +
     METADATA_ALLOWANCE_BYTES
   );
@@ -102,12 +108,15 @@ export interface CompactionByteAccountingShape {
  */
 export function computeCompactionRebuildPeakBytes({ dimension, oldNoteCount, newNoteCount, largestShardCount }: CompactionByteAccountingShape): number {
   return (
-    decodedMatrixByteLength(dimension, oldNoteCount) +
+    (oldNoteCount > 0 ? retainedMatrixByteLength(dimension, oldNoteCount) : 0) +
     decodedMatrixByteLength(dimension, newNoteCount) +
     encodedMatrixByteLength(dimension, newNoteCount) +
     decodedMatrixByteLength(dimension, largestShardCount) + // one old input shard/overlay payload
     decodedMatrixByteLength(dimension, largestShardCount) + // one new output shard, raw
     encodedMatrixByteLength(dimension, largestShardCount) + // one new output shard, encoded
+    (oldNoteCount > 0 ? retainedMatrixByteLength(dimension, oldNoteCount) : 0) + // one concurrent query reader's leased old encoded backing/view
+    (largestShardCount > 0 ? retainedMatrixByteLength(dimension, largestShardCount) : 0) + // that reader's one lazy encoded backing/view
+    LIVE_QUERY_EMBEDDING_CACHE_MAX_BYTES * 2 + // retained live embeddings plus one caller-owned clone
     METADATA_ALLOWANCE_BYTES
   );
 }

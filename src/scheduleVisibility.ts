@@ -8,6 +8,24 @@ export interface ScheduleVisibility {
   showWeeklyTime: boolean;
 }
 
+export interface TimeOfDay {
+  hour: number;
+  minute: number;
+}
+
+export function formatTimeOfDay(hour: number, minute: number): string {
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+export function parseTimeOfDay(value: string): TimeOfDay | null {
+  const match = /^(\d{2}):(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) return null;
+  return { hour, minute };
+}
+
 /** Mode selector is always shown; everything else is conditional on the selected mode alone. */
 export function buildScheduleVisibility(mode: SchedulerMode, weeklyEnabled: boolean): ScheduleVisibility {
   return {

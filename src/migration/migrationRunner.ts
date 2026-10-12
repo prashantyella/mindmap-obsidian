@@ -193,6 +193,11 @@ export class MigrationRunner {
     this.listeners.clear();
   }
 
+  /** Waits for already-queued migration mutations, including explicit start/cancel calls. */
+  whenSettled(): Promise<void> {
+    return migrationReconcileLocks.get(this.deps.dataRoot) ?? Promise.resolve();
+  }
+
   private notify(status: MigrationStatusV1): void {
     for (const listener of this.listeners) safelyNotify(listener, status);
   }
@@ -236,6 +241,10 @@ export class MigrationRunner {
         outer.removeEventListener("abort", onAbort);
       },
     };
+  }
+
+  private rethrowLifecycleAbort(error: unknown): void {
+    if (this.deps.signal?.aborted) throw this.deps.signal.reason ?? error;
   }
 
   private currentCounts(record: MigrationRecordV1): { discoveredCount: number; processedCount: number; failedCount: number } {
@@ -308,8 +317,9 @@ export class MigrationRunner {
     let manifest: VectorIndexManifestV1;
     let noteMetadata: NoteRowMetadataV1[];
     try {
-      ({ manifest, noteMetadata } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, currentId));
-    } catch {
+      ({ manifest, noteMetadata } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, currentId, { signal: this.deps.signal }));
+    } catch (error) {
+      this.rethrowLifecycleAbort(error);
       return false;
     }
     if (manifest.embeddingModel !== this.deps.embeddingModel) return false;
@@ -334,9 +344,10 @@ export class MigrationRunner {
     const currentId = await loadCurrentGenerationId(this.deps.fs, this.deps.dataRoot).catch(() => null);
     if (currentId === null) return { state: "none" };
     try {
-      const { manifest } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, currentId);
+      const { manifest } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, currentId, { signal: this.deps.signal });
       return { state: "verified", baseGenerationId: currentId, baseGenerationFingerprint: manifestArtifactFingerprint(manifest) };
-    } catch {
+    } catch (error) {
+      this.rethrowLifecycleAbort(error);
       // fall through to a raw, unverified snapshot below.
     }
     try {
@@ -356,9 +367,10 @@ export class MigrationRunner {
     if (currentId !== (snapshot.baseGenerationId ?? null)) return false;
     if (state === "verified") {
       try {
-        const { manifest } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, currentId!);
+        const { manifest } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, currentId!, { signal: this.deps.signal });
         return manifestArtifactFingerprint(manifest) === snapshot.baseGenerationFingerprint;
-      } catch {
+      } catch (error) {
+        this.rethrowLifecycleAbort(error);
         return false;
       }
     }
@@ -866,11 +878,12 @@ export class MigrationRunner {
     // exact run -- adopt it if it still verifies and matches, rather than building a second one.
     if (current.activationGenerationId !== undefined && current.builtGenerationFingerprint !== undefined) {
       try {
-        const { manifest } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, current.activationGenerationId);
+        const { manifest } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, current.activationGenerationId, { signal: this.deps.signal });
         if (manifestArtifactFingerprint(manifest) === current.builtGenerationFingerprint) {
           return toPublicMigrationStatus(await this.persist(current, "activate", "ACTIVATING_GENERATION", this.currentCounts(current), this.carry(current)));
         }
-      } catch {
+      } catch (error) {
+        this.rethrowLifecycleAbort(error);
         // fall through -- rebuild under a fresh id below.
       }
     }
@@ -906,6 +919,7 @@ export class MigrationRunner {
     try {
       targetId = await discoverUnusedGenerationId(this.deps.fs, this.deps.dataRoot);
     } catch (error) {
+      this.rethrowLifecycleAbort(error);
       return toPublicMigrationStatus(await this.persist(current, "failed", "FAILED_RETRYABLE", this.currentCounts(current), this.carry(current, { lastFailureCode: toFailureCode(error) })));
     }
     const notes = await buildGenerationInputNotes(this.deps.fs, this.deps.dataRoot, runId, validMetas);
@@ -913,6 +927,7 @@ export class MigrationRunner {
     try {
       await buildGeneration(this.deps.fs, this.deps.dataRoot, { generationId: targetId, embeddingModel: plan.desiredEmbeddingModel, dimension: plan.desiredDimension, notes }, { signal });
     } catch (error) {
+      this.rethrowLifecycleAbort(error);
       if (error instanceof GenerationBuildCancelledError) {
         return toPublicMigrationStatus(await this.persist(current, "cancelled", "CANCELLED", this.currentCounts(current), this.carry(current)));
       }
@@ -922,8 +937,9 @@ export class MigrationRunner {
     }
     let builtManifest: VectorIndexManifestV1;
     try {
-      ({ manifest: builtManifest } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, targetId));
+      ({ manifest: builtManifest } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, targetId, { signal: this.deps.signal }));
     } catch (error) {
+      this.rethrowLifecycleAbort(error);
       return toPublicMigrationStatus(await this.persist(current, "failed", "FAILED_RETRYABLE", this.currentCounts(current), this.carry(current, { lastFailureCode: toFailureCode(error) })));
     }
     const fingerprint = manifestArtifactFingerprint(builtManifest);
@@ -981,8 +997,9 @@ export class MigrationRunner {
           return { kind: "replan", items: freshItems };
         }
         try {
-          await switchCurrentGeneration(this.deps.fs, this.deps.dataRoot, targetId);
+          await switchCurrentGeneration(this.deps.fs, this.deps.dataRoot, targetId, { signal: this.deps.signal });
         } catch (error) {
+          this.rethrowLifecycleAbort(error);
           return { kind: "failed", code: toFailureCode(error) };
         }
       }
@@ -991,8 +1008,9 @@ export class MigrationRunner {
       // already-switched retry path -- never trust "same id" alone.
       let manifest: VectorIndexManifestV1;
       try {
-        ({ manifest } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, targetId));
-      } catch {
+        ({ manifest } = await verifyGenerationFully(this.deps.fs, this.deps.dataRoot, targetId, { signal: this.deps.signal }));
+      } catch (error) {
+        this.rethrowLifecycleAbort(error);
         return { kind: "switched-unverified" };
       }
       if (manifestArtifactFingerprint(manifest) !== builtFingerprint) {

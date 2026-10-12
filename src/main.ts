@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
-import { FileSystemAdapter, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { FileSystemAdapter, MarkdownView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { ActiveNotePriority } from "./activeNotePriority";
+import { presentPreflight } from "./preflightPresentation";
 
-import { formatPreflightNotice, type PreflightResult } from "./diagnostics";
+import type { PreflightResult } from "./diagnostics";
 import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } from "./onboarding";
 import { createProductionPendingScanService, ProductionPendingScanService } from "./engine/productionPendingScan";
 import type { PendingSnapshot } from "./pendingScan";
@@ -30,8 +32,10 @@ import {
   getLlmProviderConfigStatus as resolveLlmProviderConfigStatus,
   getScopeSetupStatus as resolveScopeSetupStatus,
   saveLlmProviderConfig as writeLlmProviderConfig,
+  saveLocalAiConfig as writeLocalAiConfig,
   saveScopeSetup as writeScopeSetup,
   type LlmProviderConfigStatus,
+  type LocalAiConfig,
   type ScopeSetupStatus,
 } from "./pluginConfig";
 import type { DiagnosticsSummaryState, SchedulerSummaryState } from "./pluginSummaries";
@@ -60,6 +64,9 @@ import {
   type SchedulerConfig,
 } from "./scheduler";
 import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./settings";
+import { cloneSettings, restoreEngineSettingsInPlace, SettingsApplyError, SettingsEffectQueue, withEngineSettings } from "./settingsEffects";
+import { prepareReplaceableEngine, replaceEngineSafely, type EngineReplacementResult } from "./engineReplacement";
+import { testLocalAiDraft as probeLocalAiDraft } from "./localAiDraftTest";
 import { MindmapSettingTab } from "./settingsTab";
 import { MindmapWorkspaceView, MINDMAP_VIEW_TYPE } from "./workspaceView";
 import {
@@ -168,6 +175,12 @@ interface DiagnosticsState extends DiagnosticsSummaryState {
 
 export default class MindmapPlugin extends Plugin {
   settings: MindmapSettings = DEFAULT_SETTINGS;
+  private lastAppliedSettings: MindmapSettings | null = null;
+  private settingsEffectQueue: SettingsEffectQueue | null = null;
+  private retiringEngine: ProductionEngine | null = null;
+  private startingEngine: ProductionEngine | null = null;
+  private unloaded = false;
+  private schedulerAppliedSettings: MindmapSettings | null = null;
 
   private schedulerTimer: unknown = null;
   private launchAgentManagedThisSession = false;
@@ -191,6 +204,8 @@ export default class MindmapPlugin extends Plugin {
   statusBarEl: HTMLElement | null = null;
   private engineActivity: EngineActivitySnapshot | null = null;
   private unsubscribeActivity: (() => void) | null = null;
+  private readonly indexChangeListeners = new Set<(change: { revision: number; paths?: readonly string[] }) => void>();
+  private unsubscribeIndexChanges: (() => void) | null = null;
   private statusRenderTimer: number | null = null;
   private activeNoteEligibility: ActiveNoteEligibility = NO_ACTIVE_NOTE;
   private pendingScanService: ProductionPendingScanService | null = null;
@@ -209,6 +224,12 @@ export default class MindmapPlugin extends Plugin {
     lastRunAt: null,
     result: null,
   };
+  private readonly diagnosticsListeners = new Set<() => void>();
+  private activeNotePriority: ActiveNotePriority | null = null;
+  private preflightPromise: Promise<PreflightResult> | null = null;
+  private preflightEngine: ProductionEngine | null = null;
+  private preflightRetryTimer: number | null = null;
+  private preflightRetryDelay = 5_000;
 
   /**
    * Checkpoint 11: the ONE production, write-capable TypeScript engine this
@@ -236,6 +257,26 @@ export default class MindmapPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    this.diagnosticsState.inProgress = true;
+    this.activeNotePriority = new ActiveNotePriority({
+      clear: () => this.productionEngine?.clearActiveNotePriority(),
+      isSaved: (notePath) => {
+        const file = this.app.workspace.getActiveFile();
+        if (file?.path !== notePath) return false;
+        return this.app.workspace.getLeavesOfType("markdown").every((leaf) => {
+          const view = leaf.view;
+          return !(view instanceof MarkdownView) || view.file?.path !== notePath || !view.editor || view.getMode() === "preview" || view.editor.getValue() === view.data;
+        });
+      },
+      prioritize: async (notePath, signal) => { await this.productionEngine?.prioritizeActiveNote(notePath, signal); },
+    }, { setTimeout: (callback, ms) => window.setTimeout(callback, ms), clearTimeout: (handle) => window.clearTimeout(handle as number) });
+    const selectActiveNote = (): void => { this.activeNotePriority?.select(this.app.workspace.getActiveFile()?.path ?? null); };
+    this.registerEvent(this.app.workspace.on("file-open", selectActiveNote));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", selectActiveNote));
+    this.registerEvent(this.app.workspace.on("editor-change", (_editor, info) => {
+      if (info.file?.path === this.app.workspace.getActiveFile()?.path) this.activeNotePriority?.edited(info.file?.path ?? null);
+    }));
+    selectActiveNote();
 
     this.statusBarEl = this.addStatusBarItem();
     configureStatusBarElement(this.statusBarEl, (event) => this.openStatusMenu(event));
@@ -270,7 +311,7 @@ export default class MindmapPlugin extends Plugin {
       () => this.updateStatusBar(),
     );
     registerMindmapCommands(this);
-    this.syncScheduler();
+    void this.syncScheduler();
     registerVaultRefreshEvents(this.app.vault, (event) => this.registerEvent(event), (reason, paths) => {
       this.pendingScanService?.requestRefresh(reason, paths);
     });
@@ -281,11 +322,21 @@ export default class MindmapPlugin extends Plugin {
   }
 
   private async onLayoutReadyDeferred(): Promise<void> {
-    await this.retireLegacyLaunchAgents();
-    await this.refreshAutomaticResearchPolicyStatus();
-    await this.migrateLegacyConfigOnce();
-    await this.startProductionEngine();
-    void this.runPreflight("startup").then(() => this.updateStatusBar());
+    this.diagnosticsState.inProgress = true;
+    this.notifyDiagnostics();
+    try {
+      await this.retireLegacyLaunchAgents();
+      await this.refreshAutomaticResearchPolicyStatus();
+      await this.migrateLegacyConfigOnce();
+      await this.startProductionEngine();
+      if (!this.diagnosticsState.result) await this.runPreflight("startup");
+    } catch {
+      this.diagnosticsState.result = this.preflightFailure();
+      this.diagnosticsState.lastRunAt = Date.now();
+    } finally {
+      this.diagnosticsState.inProgress = false;
+      if (!this.unloaded) { this.notifyDiagnostics(); this.schedulePreflightRetry(); }
+    }
     void this.pendingScanService?.warm().then(() => this.updateStatusBar());
     if (this.settings.readingMode === "reading") {
       void this.readingModeController?.start();
@@ -293,6 +344,16 @@ export default class MindmapPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.unloaded = true;
+    this.activeNotePriority?.close();
+    if (this.preflightRetryTimer !== null) window.clearTimeout(this.preflightRetryTimer);
+    this.preflightRetryTimer = null;
+    this.diagnosticsListeners.clear();
+    void this.startingEngine?.dispose();
+    void this.retiringEngine?.dispose();
+    this.unsubscribeIndexChanges?.();
+    this.unsubscribeIndexChanges = null;
+    this.indexChangeListeners.clear();
     void this.productionEngine?.dispose();
     this.productionEngine = null;
     this.pendingScanService?.dispose();
@@ -314,17 +375,42 @@ export default class MindmapPlugin extends Plugin {
     this.settings.launchAgentDailyMinute = normalizeMinute(this.settings.launchAgentDailyMinute);
     this.settings.launchAgentWeeklyHour = normalizeHour(this.settings.launchAgentWeeklyHour);
     this.settings.launchAgentWeeklyMinute = normalizeMinute(this.settings.launchAgentWeeklyMinute);
+    this.lastAppliedSettings = cloneSettings(this.settings);
+    this.settingsEffectQueue = new SettingsEffectQueue(this.settings);
   }
 
-  async saveSettings(): Promise<void> {
+  async saveSettings(options: { explicitEngineActivation?: boolean } = {}): Promise<void> {
     this.settings.schedulerIntervalMinutes = normalizeSchedulerInterval(this.settings.schedulerIntervalMinutes);
     this.settings.launchAgentDailyHour = normalizeHour(this.settings.launchAgentDailyHour);
     this.settings.launchAgentDailyMinute = normalizeMinute(this.settings.launchAgentDailyMinute);
     this.settings.launchAgentWeeklyHour = normalizeHour(this.settings.launchAgentWeeklyHour);
     this.settings.launchAgentWeeklyMinute = normalizeMinute(this.settings.launchAgentWeeklyMinute);
-    await this.saveData(this.settings);
-    this.syncScheduler();
-    this.pendingScanService?.requestRefresh("settings updated");
+    const next = cloneSettings(this.settings);
+    const queue = this.settingsEffectQueue ??= new SettingsEffectQueue(this.lastAppliedSettings ?? next);
+    try {
+      await queue.enqueue(next, {
+        persist: async (snapshot) => {
+          if (this.unloaded) throw new Error("Mindmap was unloaded before settings could be applied.");
+          await this.saveData(snapshot);
+        },
+        adoptPersisted: (persisted, requested) => { restoreEngineSettingsInPlace(this.settings, requested, persisted); },
+        reconfigureEngine: async (snapshot) => { await this.startProductionEngine(true, snapshot); },
+        syncScheduler: async (snapshot) => { await this.syncScheduler(snapshot); },
+        refreshPending: () => { this.pendingScanService?.requestRefresh("settings updated"); },
+        recoverActivation: async (previous, attempted) => {
+          const restored = withEngineSettings(attempted, previous);
+          await this.saveData(restored);
+          restoreEngineSettingsInPlace(this.settings, attempted, restored);
+          await this.syncScheduler(restored);
+          return restored;
+        },
+      }, {
+        ...options,
+        forceEngineActivation: () => options.explicitEngineActivation === true && this.productionEngine === null,
+      });
+    } finally {
+      this.lastAppliedSettings = queue.getAppliedSnapshot();
+    }
   }
 
   /** One-time-by-absence retirement of content-owned 0.2.x Python LaunchAgents; foreign or ambiguous files are never touched. */
@@ -368,14 +454,14 @@ export default class MindmapPlugin extends Plugin {
   }
 
   /** Checkpoint 11: the TypeScript `ProductionEngine` is the ONLY backend for live/lookup related queries -- there is no Python semantic worker fallback anymore. An unavailable engine fails closed with a thrown error, which the sidebar UI already renders as an error state. */
-  async queryLiveRelated(path: string): Promise<LiveRelatedResponse> {
+  async queryLiveRelated(path: string, ensureIndex = this.settings.liveSemanticEnsureActiveNoteIndexed): Promise<LiveRelatedResponse> {
     if (!this.settings.liveSemanticLookupEnabled) {
       throw new Error("Live semantic lookup is disabled.");
     }
     if (!this.productionEngine) {
       throw new Error("The Mindmap TypeScript engine is not available for this vault.");
     }
-    const result = await this.productionEngine.queryLiveRelated(path, this.settings.liveSemanticEnsureActiveNoteIndexed);
+    const result = await this.productionEngine.queryLiveRelated(path, ensureIndex);
     return {
       path: result.path,
       hash: result.sourceHash,
@@ -384,6 +470,25 @@ export default class MindmapPlugin extends Plugin {
       index_result: null,
       related: MindmapPlugin.toLiveRelatedResults(result.related),
     };
+  }
+
+  subscribeIndexChanges(listener: (change: { revision: number; paths?: readonly string[] }) => void): () => void {
+    this.indexChangeListeners.add(listener);
+    return () => this.indexChangeListeners.delete(listener);
+  }
+
+  private bindIndexChanges(engine: ProductionEngine | null): void {
+    this.unsubscribeIndexChanges?.();
+    this.unsubscribeIndexChanges = null;
+    if (!engine) return;
+    this.unsubscribeIndexChanges = engine.subscribeIndexChanges((change) => {
+      if (this.productionEngine !== engine) return;
+      for (const listener of this.indexChangeListeners) {
+        try { listener(change); } catch {
+          // A closed or failing view cannot prevent other subscribers from refreshing.
+        }
+      }
+    });
   }
 
   async queryLookupRelated(query: string, limit?: number): Promise<LookupRelatedResponse> {
@@ -398,9 +503,10 @@ export default class MindmapPlugin extends Plugin {
   }
 
   getSchedulerConfig(): SchedulerConfig {
+    const settings = this.schedulerAppliedSettings ?? this.settings;
     return {
-      mode: this.settings.schedulerMode,
-      intervalMinutes: this.settings.schedulerIntervalMinutes,
+      mode: settings.schedulerMode,
+      intervalMinutes: settings.schedulerIntervalMinutes,
     };
   }
 
@@ -490,6 +596,71 @@ export default class MindmapPlugin extends Plugin {
 
   getWebResearchStatus(): { mode: "off" | "manual" | "automatic-reading"; activity: string; lastError: string | null; automatic: AutomaticResearchPolicyState } {
     return { mode: this.settings.webResearchMode, activity: this.webResearchActivity, lastError: this.webResearchLastError, automatic: { ...this.automaticResearchPolicyStatus } };
+  }
+
+  async selectWebResearchMode(mode: "off" | "manual" | "automatic-reading"): Promise<boolean> {
+    if (mode === this.settings.webResearchMode) return true;
+    if (this.webResearchPromise) {
+      new Notice("Web research is running. Change the mode after it finishes.", 8000);
+      return false;
+    }
+    if (mode === "automatic-reading" && this.settings.readingMode !== "reading") {
+      new Notice("Enable Apple Books import before Automatic research.", 8000);
+      return false;
+    }
+
+    if (mode === "manual" && this.settings.webResearchMode === "off") {
+      const confirmed = await confirmMindmapRun(this.app, {
+        title: "Enable Manual Web Research?",
+        message: "Selected text or a bounded active-note excerpt is processed locally. Exa receives only derived queries and returns bounded source excerpts and metadata. Unrelated vault content is never sent externally.",
+        confirmText: "Enable manual research",
+        confirmClass: "mod-cta",
+      });
+      if (!confirmed) return false;
+    }
+    if (mode === "automatic-reading") {
+      const confirmed = await confirmMindmapRun(this.app, {
+        title: "Enable Automatic Apple Books Research?",
+        message: "Apple Books excerpts stay local for query derivation. Exa receives only derived queries and returns bounded sources. Automatic work is limited to five notes per sync and ten per day.",
+        confirmText: "Enable automatic research",
+        confirmClass: "mod-cta",
+      });
+      if (!confirmed) return false;
+    }
+    if (mode !== "off") {
+      try {
+        await this.getWebResearchPrerequisites();
+      } catch (error) {
+        this.webResearchActivity = "error";
+        this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research is not ready.";
+        new Notice(this.webResearchLastError, 8000);
+        this.updateStatusBar();
+        return false;
+      }
+    }
+
+    const previousMode = this.settings.webResearchMode;
+    const previousActivity = this.webResearchActivity;
+    const previousError = this.webResearchLastError;
+    this.settings.webResearchMode = mode;
+    this.webResearchActivity = mode === "off" ? "off" : "ready";
+    this.webResearchLastError = null;
+    try {
+      await this.saveSettings();
+    } catch {
+      this.settings.webResearchMode = previousMode;
+      this.webResearchActivity = previousActivity;
+      this.webResearchLastError = previousError ?? "Could not save Web Research mode.";
+      new Notice(this.webResearchLastError, 8000);
+      this.updateStatusBar();
+      return false;
+    }
+    if (mode === "automatic-reading") {
+      await this.refreshAutomaticResearchPolicyStatus();
+      await this.syncReadingMode();
+    }
+    this.updateStatusBar();
+    return true;
   }
 
   async toggleWebResearchMode(): Promise<void> {
@@ -940,11 +1111,18 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async saveScopeSetup(selection: ScopeSelection): Promise<void> {
+    const previous = { currentPaths: [...this.settings.scopeCurrentPaths], allPaths: [...this.settings.scopeAllPaths] };
     writeScopeSetup(this.settings, selection);
-    await this.saveSettings();
+    try {
+      await this.saveSettings({ explicitEngineActivation: true });
+    } catch (error) {
+      if (error instanceof SettingsApplyError && error.phase === "persistence") {
+        this.settings.scopeCurrentPaths = previous.currentPaths;
+        this.settings.scopeAllPaths = previous.allPaths;
+      }
+      throw error;
+    }
     this.appendLog("[setup] Updated scope folders in plugin settings");
-    this.pendingScanService?.requestRefresh("scope setup updated");
-    await this.startProductionEngine();
     this.updateStatusBar();
   }
 
@@ -954,9 +1132,27 @@ export default class MindmapPlugin extends Plugin {
 
   async saveLlmProviderConfig(patch: Partial<Pick<LlmProviderConfigStatus, "baseUrl" | "model" | "maxTokens">>): Promise<void> {
     writeLlmProviderConfig(this.settings, patch);
-    await this.saveSettings();
+    await this.saveSettings({ explicitEngineActivation: true });
     this.appendLog("[setup] Updated Ollama metadata provider config in plugin settings");
-    await this.startProductionEngine();
+  }
+
+  async saveLocalAiConfig(config: LocalAiConfig): Promise<void> {
+    const previous: LocalAiConfig = {
+      embedBaseUrl: this.settings.embedBaseUrl, embedModel: this.settings.embedModel, embedDimension: this.settings.embedDimension,
+      llmBaseUrl: this.settings.llmBaseUrl, llmModel: this.settings.llmModel, llmMaxTokens: this.settings.llmMaxTokens,
+    };
+    writeLocalAiConfig(this.settings, config);
+    try {
+      await this.saveSettings({ explicitEngineActivation: true });
+    } catch (error) {
+      if (error instanceof SettingsApplyError && error.phase === "persistence") writeLocalAiConfig(this.settings, previous);
+      throw error;
+    }
+    this.appendLog("[setup] Updated local AI configuration in plugin settings");
+  }
+
+  async testLocalAiConfig(config: LocalAiConfig): Promise<string> {
+    return await probeLocalAiDraft(config, requestUrlFetch);
   }
 
   /** One compact, path-free readiness summary for the settings Overview row. */
@@ -966,6 +1162,8 @@ export default class MindmapPlugin extends Plugin {
       productionEngineAvailable: this.productionEngine !== null,
       scopeComplete: scope.complete,
       preflightOk: this.diagnosticsState.result?.ok ?? null,
+      checking: this.diagnosticsState.inProgress,
+      summary: this.diagnosticsState.result?.summary,
     });
   }
 
@@ -1023,7 +1221,7 @@ export default class MindmapPlugin extends Plugin {
   showStatusSummary(): void {
     const state = buildMindmapStatusBarState(this, this.getStatusBarInternalState());
     new Notice(buildStatusSummary({
-      ready: this.productionEngine !== null && state.scopeReady && state.preflightOk !== false,
+      ready: this.productionEngine !== null && state.scopeReady && state.preflightOk === true && !state.preflightInProgress,
       pendingAvailable: state.pendingAvailable,
       currentPending: state.currentPending,
       allPending: state.allPending,
@@ -1035,12 +1233,18 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async setSchedulerMode(mode: SchedulerMode): Promise<void> {
+    const previous = this.settings.schedulerMode;
     this.settings.schedulerMode = mode;
-    await this.saveSettings();
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      if (error instanceof SettingsApplyError && error.phase === "persistence") this.settings.schedulerMode = previous;
+      throw error;
+    }
     const message = mode === "launchAgent"
-      ? "Mindmap LaunchAgent scheduler enabled. Runs continue when Obsidian is closed."
+      ? "Scheduled opening enabled. macOS opens this vault at the configured times; Mindmap processes notes after Obsidian is open."
       : mode === "interval"
-        ? `Mindmap interval scheduler enabled. Next run ${formatTimestamp(this.schedulerState.nextRunAt)}.`
+        ? `Mindmap will check for work while Obsidian is open. Next check ${formatTimestamp(this.schedulerState.nextRunAt)}.`
         : "Mindmap schedulers disabled. Manual runs remain available.";
     new Notice(message, 8000);
   }
@@ -1053,23 +1257,42 @@ export default class MindmapPlugin extends Plugin {
    * `rawStdout`/`rawStderr` stay empty and `exitCode` is derived from
    * `summary.runtimeReady`), never a behavior change to the UI itself.
    */
-  private static toPreflightResult(report: PreflightReportV1): PreflightResult {
-    const ok = report.summary.runtimeReady;
-    return {
-      ok,
-      summary: `TypeScript engine preflight: ${report.summary.overallStatus} (${report.summary.requiredOkCount}/${report.summary.requiredCount} required, ${report.summary.optionalOkCount}/${report.summary.optionalCount} optional ok).`,
-      checks: report.checks.map((check) => ({
-        code: check.code,
-        label: check.code,
-        status: check.status === "ok" ? "ok" : "error",
-        message: check.message,
-        guidance: check.guidance,
-        context: check.context,
-      })),
-      rawStdout: "",
-      rawStderr: "",
-      exitCode: ok ? 0 : 1,
-    };
+  private static toPreflightResult(report: PreflightReportV1, migrationReady = true): PreflightResult {
+    return presentPreflight(report, migrationReady);
+  }
+
+  subscribeDiagnostics(listener: () => void): () => void {
+    this.diagnosticsListeners.add(listener);
+    return () => this.diagnosticsListeners.delete(listener);
+  }
+
+  private notifyDiagnostics(): void {
+    for (const listener of this.diagnosticsListeners) {
+      try { listener(); } catch { /* A closed settings view cannot interrupt startup. */ }
+    }
+    this.updateStatusBar();
+  }
+
+  private preflightFailure(): PreflightResult {
+    return { ok: false, summary: "Setup checks could not finish. Check Local AI settings and try Check setup again.", checks: [], rawStdout: "", rawStderr: "", exitCode: 1 };
+  }
+
+  private schedulePreflightRetry(): void {
+    const result = this.diagnosticsState.result;
+    if (result?.ok) {
+      if (this.preflightRetryTimer !== null) window.clearTimeout(this.preflightRetryTimer);
+      this.preflightRetryTimer = null;
+      this.preflightRetryDelay = 5_000;
+      return;
+    }
+    if (this.preflightRetryTimer !== null) return;
+    if (this.unloaded || !this.productionEngine || !this.settings.embedModel.trim() || !this.settings.llmModel.trim()) return;
+    if (!result?.checks.some((check) => ["OLLAMA_EMBEDDINGS", "LOCAL_METADATA_PROVIDER"].includes(check.code) && check.status === "error")) return;
+    this.preflightRetryTimer = window.setTimeout(() => {
+      this.preflightRetryTimer = null;
+      void this.runPreflight("startup");
+    }, this.preflightRetryDelay);
+    this.preflightRetryDelay = Math.min(this.preflightRetryDelay * 2, 60_000);
   }
 
   /**
@@ -1083,24 +1306,38 @@ export default class MindmapPlugin extends Plugin {
    */
   private async runProductionPreflight(trigger: "manual" | "startup", engine: ProductionEngine): Promise<PreflightResult> {
     this.diagnosticsState.inProgress = true;
-    this.updateStatusBar();
-    const report = await engine.recheckReadiness();
-    const result = MindmapPlugin.toPreflightResult(report);
-    this.diagnosticsState.inProgress = false;
+    this.notifyDiagnostics();
+    let result: PreflightResult;
+    try {
+      const report = await engine.recheckReadiness();
+      await this.refreshCachedMigrationStatus();
+      result = MindmapPlugin.toPreflightResult(report, this.cachedMigrationStatus?.phase === "complete");
+    } catch {
+      result = this.preflightFailure();
+    } finally {
+      if (engine === this.productionEngine && !this.unloaded) this.diagnosticsState.inProgress = false;
+    }
+    if (engine !== this.productionEngine || this.unloaded) return result;
     this.diagnosticsState.result = result;
     this.diagnosticsState.lastRunAt = Date.now();
     this.appendLog(`[preflight] ${result.summary}`);
-    this.updateStatusBar();
-    if (trigger === "manual" || !result.ok) {
-      new Notice(formatPreflightNotice(result), 12000);
-    }
+    this.notifyDiagnostics();
+    this.schedulePreflightRetry();
+    if (trigger === "manual") new Notice(result.summary, 12000);
     return result;
   }
 
   /** Checkpoint 11: `ProductionEngine` is mandatory on this desktop-only plugin -- there is no Python subprocess fallback anymore. An unavailable engine (construction failure, or the desktop filesystem adapter itself missing) fails closed with one fixed result, never a spawn. */
   async runPreflight(trigger: "manual" | "startup"): Promise<PreflightResult> {
     if (this.productionEngine) {
-      return await this.runProductionPreflight(trigger, this.productionEngine);
+      const engine = this.productionEngine;
+      if (this.preflightPromise && this.preflightEngine === engine) return this.preflightPromise;
+      this.preflightEngine = engine;
+      const promise = this.runProductionPreflight(trigger, engine);
+      this.preflightPromise = promise;
+      try { return await promise; } finally {
+        if (this.preflightPromise === promise) { this.preflightPromise = null; this.preflightEngine = null; }
+      }
     }
     const summary = "The Mindmap TypeScript engine is not available for this vault. Preflight is unavailable.";
     const result: PreflightResult = {
@@ -1125,25 +1362,28 @@ export default class MindmapPlugin extends Plugin {
     if (trigger === "manual") {
       new Notice(summary, 10000);
     }
-    this.updateStatusBar();
+    this.notifyDiagnostics();
     return result;
   }
 
-  private syncScheduler(): void {
-    if (isSchedulerEnabled(this.settings.schedulerMode) && !this.isRuntimeSetupBlocking()) {
-      this.startScheduler();
-    } else if (isSchedulerEnabled(this.settings.schedulerMode)) {
+  private async syncScheduler(settings: MindmapSettings = this.settings): Promise<void> {
+    this.schedulerAppliedSettings = cloneSettings(settings);
+    if (isSchedulerEnabled(settings.schedulerMode) && !this.isRuntimeSetupBlocking()) {
+      this.startScheduler(settings);
+    } else if (isSchedulerEnabled(settings.schedulerMode)) {
       this.stopScheduler("Mindmap runtime setup is required before the interval scheduler can run.");
     } else {
       this.stopScheduler("Manual mode. Interval scheduler disabled.");
     }
 
-    if (isLaunchAgentSchedulerEnabled(this.settings.schedulerMode) && this.productionEngine) {
-      void this.reconcileLaunchAgents();
+    if (isLaunchAgentSchedulerEnabled(settings.schedulerMode) && this.productionEngine) {
+      await this.reconcileLaunchAgents(settings);
     } else if (this.launchAgentManagedThisSession) {
-      void this.disableManagedLaunchAgents("Background wake scheduler disabled.");
+      await this.disableManagedLaunchAgents("Background wake scheduler disabled.");
+      await this.syncCoreSchedules(settings);
+    } else {
+      await this.syncCoreSchedules(settings);
     }
-    void this.syncCoreSchedules();
 
     this.updateStatusBar();
   }
@@ -1193,7 +1433,7 @@ export default class MindmapPlugin extends Plugin {
    * due. Python is never installed into, or executed by, any LaunchAgent
    * this method writes.
    */
-  private async reconcileLaunchAgents(): Promise<void> {
+  private async reconcileLaunchAgents(settings: MindmapSettings = this.settings): Promise<void> {
     const syncId = ++this.launchAgentSyncId;
     if (process.platform !== "darwin") {
       this.schedulerState.launchAgentMessage = "Background wake scheduling is only available on macOS.";
@@ -1210,10 +1450,10 @@ export default class MindmapPlugin extends Plugin {
     try {
       const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       const cadences: WakeCadence[] = [
-        { hour: normalizeHour(this.settings.launchAgentDailyHour), minute: normalizeMinute(this.settings.launchAgentDailyMinute) },
+        { hour: normalizeHour(settings.launchAgentDailyHour), minute: normalizeMinute(settings.launchAgentDailyMinute) },
       ];
-      if (this.settings.launchAgentWeeklyEnabled) {
-        cadences.push({ hour: normalizeHour(this.settings.launchAgentWeeklyHour), minute: normalizeMinute(this.settings.launchAgentWeeklyMinute), weekday: 0 });
+      if (settings.launchAgentWeeklyEnabled) {
+        cadences.push({ hour: normalizeHour(settings.launchAgentWeeklyHour), minute: normalizeMinute(settings.launchAgentWeeklyMinute), weekday: 0 });
       }
       const result = await backgroundScheduler.reconcile({
         consent: true,
@@ -1229,7 +1469,7 @@ export default class MindmapPlugin extends Plugin {
       this.schedulerState.launchAgentMessage = `Background wake scheduler: ${result.status}.`;
       this.schedulerState.lastMessage = "LaunchAgent mode enabled. macOS wakes/opens Obsidian at the scheduled times; the TypeScript engine performs due work once open.";
       this.appendLog(this.schedulerState.launchAgentMessage);
-      await this.syncCoreSchedules();
+      await this.syncCoreSchedules(settings);
       this.updateStatusBar();
     } catch (error) {
       if (syncId !== this.launchAgentSyncId) {
@@ -1279,11 +1519,11 @@ export default class MindmapPlugin extends Plugin {
    * `CoreScheduler` itself only ever runs work while Obsidian is open (see
    * its own class doc); this method never touches `BackgroundScheduler`.
    */
-  private async syncCoreSchedules(): Promise<void> {
+  private async syncCoreSchedules(settings: MindmapSettings = this.settings): Promise<void> {
     const engine = this.productionEngine;
     if (!engine) return;
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const launchAgentModeActive = isLaunchAgentSchedulerEnabled(this.settings.schedulerMode);
+    const launchAgentModeActive = isLaunchAgentSchedulerEnabled(settings.schedulerMode);
     const definitions = [
       {
         schemaVersion: 1 as const,
@@ -1291,7 +1531,7 @@ export default class MindmapPlugin extends Plugin {
         kind: "daily-maintenance" as const,
         enabled: launchAgentModeActive,
         timezone,
-        cadence: { type: "daily" as const, hour: normalizeHour(this.settings.launchAgentDailyHour), minute: normalizeMinute(this.settings.launchAgentDailyMinute) },
+        cadence: { type: "daily" as const, hour: normalizeHour(settings.launchAgentDailyHour), minute: normalizeMinute(settings.launchAgentDailyMinute) },
         pipelineVersion: PRODUCTION_PIPELINE_VERSION,
         scopeId: PRODUCTION_SCOPE_ALL,
       },
@@ -1299,16 +1539,16 @@ export default class MindmapPlugin extends Plugin {
         schemaVersion: 1 as const,
         id: "weekly-refresh" as const,
         kind: "weekly-refresh" as const,
-        enabled: launchAgentModeActive && this.settings.launchAgentWeeklyEnabled,
+        enabled: launchAgentModeActive && settings.launchAgentWeeklyEnabled,
         timezone,
-        cadence: { type: "weekly" as const, weekday: 0, hour: normalizeHour(this.settings.launchAgentWeeklyHour), minute: normalizeMinute(this.settings.launchAgentWeeklyMinute) },
+        cadence: { type: "weekly" as const, weekday: 0, hour: normalizeHour(settings.launchAgentWeeklyHour), minute: normalizeMinute(settings.launchAgentWeeklyMinute) },
         pipelineVersion: PRODUCTION_PIPELINE_VERSION,
       },
       {
         schemaVersion: 1 as const,
         id: "reading-sync" as const,
         kind: "reading-sync" as const,
-        enabled: this.settings.readingMode === "reading" && this.settings.schedulerMode !== "manual",
+        enabled: settings.readingMode === "reading" && settings.schedulerMode !== "manual",
         timezone,
         cadence: { type: "interval" as const, intervalMinutes: 60 },
         pipelineVersion: PRODUCTION_PIPELINE_VERSION,
@@ -1324,10 +1564,10 @@ export default class MindmapPlugin extends Plugin {
     }
   }
 
-  private startScheduler(): void {
+  private startScheduler(settings: MindmapSettings = this.settings): void {
     this.clearSchedulerTimer();
     this.scheduleNextTick(Date.now());
-    this.appendLog(`Internal scheduler enabled with a ${normalizeSchedulerInterval(this.settings.schedulerIntervalMinutes)} minute interval.`);
+    this.appendLog(`Internal scheduler enabled with a ${normalizeSchedulerInterval(settings.schedulerIntervalMinutes)} minute interval.`);
   }
 
   private stopScheduler(message: string): void {
@@ -1771,15 +2011,13 @@ export default class MindmapPlugin extends Plugin {
    * Standard Mode stays usable on a fresh install with no provider
    * configured yet.
    */
-  private buildProductionEngineOptions(): ProductionEngineOptions | null {
+  private buildProductionEngineOptions(settings: MindmapSettings = this.settings): ProductionEngineOptions | null {
     let context: RuntimeContext;
     try {
       context = this.getRuntimeContext();
     } catch {
       return null;
     }
-    const settings = this.settings;
-
     const embeddingProvider = settings.embedBaseUrl.trim() && settings.embedModel.trim()
       ? new OllamaEmbeddingProvider({ baseUrl: settings.embedBaseUrl.trim(), model: settings.embedModel.trim() }, { fetchImpl: requestUrlFetch, sleep: createWindowSleep() })
       : null;
@@ -1884,7 +2122,9 @@ export default class MindmapPlugin extends Plugin {
         this.appendLog(`[production-engine] ${fault.source} fault: ${fault.code}`);
       },
       onMigrationComplete: () => {
-        void this.refreshCachedMigrationStatus();
+        void this.refreshCachedMigrationStatus().then(() => {
+          if (this.productionEngine && !this.diagnosticsState.inProgress) void this.runPreflight("startup");
+        });
         this.invalidateLiveMindmapViews();
       },
       importAppleBooks: this.readingStateStore ? async (payload) => {
@@ -1917,39 +2157,108 @@ export default class MindmapPlugin extends Plugin {
    * on -- a real engine bug must never be silently observed by the user
    * as "quietly running Python again."
    */
-  private async startProductionEngine(): Promise<void> {
+  private async startProductionEngine(throwOnFailure = false, settings: MindmapSettings = this.settings): Promise<void> {
+    if (this.unloaded) return;
+    if (this.preflightRetryTimer !== null) window.clearTimeout(this.preflightRetryTimer);
+    this.preflightRetryTimer = null;
+    this.preflightRetryDelay = 5_000;
+    this.diagnosticsState.inProgress = true;
+    this.notifyDiagnostics();
+    try { await this.activateProductionEngine(throwOnFailure, settings); }
+    finally {
+      this.diagnosticsState.inProgress = false;
+      if (!this.unloaded) { this.notifyDiagnostics(); this.schedulePreflightRetry(); }
+    }
+  }
+
+  private async activateProductionEngine(throwOnFailure = false, settings: MindmapSettings = this.settings): Promise<void> {
+    if (this.unloaded) return;
+    const previousEngine = this.productionEngine ?? this.retiringEngine;
+    const rollbackSettings = this.lastAppliedSettings ? cloneSettings(this.lastAppliedSettings) : null;
+    this.productionEngineFailed = false;
+    const options = this.buildProductionEngineOptions(settings);
+    if (!options) return;
+    this.retiringEngine = previousEngine;
+    this.startingEngine = null;
+    const createEngine = (engineOptions: ProductionEngineOptions): ProductionEngine => {
+      if (this.unloaded) throw new Error("Mindmap was unloaded before the replacement could start.");
+      const engine = new ProductionEngine(engineOptions);
+      this.startingEngine = engine;
+      return engine;
+    };
     this.unsubscribeActivity?.();
     this.unsubscribeActivity = null;
+    this.bindIndexChanges(null);
+    this.productionEngine = null;
     this.engineActivity = null;
-    this.updateStatusBar();
-    if (this.productionEngine) {
-      await this.productionEngine.dispose();
-      this.productionEngine = null;
-    }
-    this.productionEngineFailed = false;
-    const options = this.buildProductionEngineOptions();
-    if (!options) return;
+    const rollbackOptions = previousEngine && rollbackSettings ? this.buildProductionEngineOptions(rollbackSettings) : null;
+    let replacement: EngineReplacementResult<ProductionEngine>;
     try {
-      const engine = new ProductionEngine(options);
-      this.productionEngine = engine;
-      this.unsubscribeActivity = engine.subscribeActivity((snapshot) => {
-        if (this.productionEngine !== engine) return;
+      replacement = await replaceEngineSafely({
+        current: previousEngine,
+        createNext: () => createEngine(options),
+        createRollback: rollbackOptions ? () => createEngine(rollbackOptions) : undefined,
+        prepareCurrent: (engine) => this.prepareEngineReplacement(engine),
+      });
+    } catch (error) {
+      // A timeout does not mean the retired writer finished. Retain its barrier for every retry.
+      this.retiringEngine = this.startingEngine ?? previousEngine;
+      this.startingEngine = null;
+      if (this.unloaded) return;
+      this.productionEngineFailed = true;
+      this.appendLog(`[production-engine] replacement quiescence failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      new Notice("Mindmap is unavailable because the active job phase did not settle safely. The disposed engine was not restored. Wait for current work to settle, then apply the configuration again.", 12000);
+      this.updateStatusBar();
+      if (throwOnFailure) throw error;
+      return;
+    }
+    const candidate = replacement.engine;
+    this.retiringEngine = null;
+    this.startingEngine = null;
+    if (this.unloaded) {
+      await candidate?.dispose();
+      return;
+    }
+    const activatedSettings = replacement.recovered && rollbackSettings ? rollbackSettings : settings;
+    this.productionEngine = candidate;
+    this.bindIndexChanges(candidate);
+    await this.refreshCachedMigrationStatus();
+    this.activeNotePriority?.select(this.app.workspace.getActiveFile()?.path ?? null);
+    this.activeNotePriority?.edited(this.app.workspace.getActiveFile()?.path ?? null);
+    if (candidate) {
+      this.unsubscribeActivity = candidate.subscribeActivity((snapshot) => {
+        if (this.productionEngine !== candidate) return;
         this.engineActivity = snapshot;
         this.updateStatusBar();
       });
-      await engine.start();
-    } catch (error) {
-      this.appendLog(`[production-engine] start() failed: ${error instanceof Error ? error.message : "unknown error"}`);
-      await this.productionEngine?.dispose();
-      this.productionEngine = null;
-      this.unsubscribeActivity?.();
-      this.unsubscribeActivity = null;
-      this.engineActivity = null;
-      this.updateStatusBar();
-      this.productionEngineFailed = true;
-      new Notice("The Mindmap TypeScript engine failed to start for this vault. Automated runs, preflight, and sidebar search are unavailable until this is resolved.", 12000);
+    }
+    if (replacement.activationError) {
+      this.appendLog(`[production-engine] start() failed: ${replacement.activationError instanceof Error ? replacement.activationError.message : "unknown error"}`);
+      if (replacement.recoveryError) this.appendLog(`[production-engine] rollback start() failed: ${replacement.recoveryError instanceof Error ? replacement.recoveryError.message : "unknown error"}`);
+      this.productionEngineFailed = candidate === null;
+      new Notice(candidate
+        ? "The new Mindmap configuration could not be activated. The previous engine configuration was restored; review Local AI settings and try again."
+        : "The Mindmap TypeScript engine failed to start for this vault. Automated runs, preflight, and sidebar search are unavailable until this is resolved.", 12000);
+      this.diagnosticsState.result = {
+        ok: false,
+        summary: "The saved configuration could not be activated. Review Local AI settings and check setup again.",
+        checks: [], rawStdout: "", rawStderr: "", exitCode: 1,
+      };
+      this.diagnosticsState.lastRunAt = Date.now();
+    } else if (replacement.startResult) {
+      const report = replacement.startResult as PreflightReportV1;
+      this.diagnosticsState.result = MindmapPlugin.toPreflightResult(report, this.cachedMigrationStatus?.phase === "complete");
+      this.diagnosticsState.lastRunAt = Date.now();
     }
     await this.refreshCachedMigrationStatus();
+    await this.syncScheduler(activatedSettings);
+    this.invalidateLiveMindmapViews();
+    this.updateStatusBar();
+    if (replacement.activationError && throwOnFailure) throw replacement.activationError;
+  }
+
+  private async prepareEngineReplacement(engine: ProductionEngine): Promise<void> {
+    await prepareReplaceableEngine(engine);
   }
 
   /** Item 3: current migration status -- `null` when the production engine itself is unavailable (e.g. non-desktop filesystem adapter). Never throws. */

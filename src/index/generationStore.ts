@@ -1,7 +1,7 @@
 import { AtomicStore, joinRelative } from "../engine/atomicStore";
 import type { CanonicalPath, NoteIdentityV1 } from "../engine/contracts";
 import { AtomicBinaryStore } from "./atomicBinaryStore";
-import { CosineIndexError, normalizeVector, normalizeVectorInto, rankNotes, refineWithChunks } from "./cosineIndex";
+import { CosineIndexError, dotProduct, normalizeVector, normalizeVectorInto, rankNotes, refineWithChunks } from "./cosineIndex";
 import {
   computeMetadataChecksumHex,
   identityKey,
@@ -11,8 +11,10 @@ import {
 } from "./generationMetadata";
 import { MAX_MANIFEST_CHUNK_COUNT, MAX_MANIFEST_NOTE_COUNT, MAX_MANIFEST_SHARD_ROW_COUNT, parseVectorIndexManifestV1 } from "./indexManifest";
 import type { IndexFs } from "./indexFs";
-import { checksumHex, decodeVectorMatrix, encodeVectorMatrix, MAX_MATRIX_TOTAL_BYTES, VECTOR_MATRIX_SCHEMA_VERSION, type VectorMatrix } from "./vectorCodec";
+import { checksumHex, decodeVectorMatrixCooperatively, encodeVectorMatrix, MAX_MATRIX_TOTAL_BYTES, VECTOR_MATRIX_SCHEMA_VERSION, type VectorCodecStageMeasurement, type VectorMatrix } from "./vectorCodec";
 import type { ChunkShardNoteOffset, VectorIndexManifestV1 } from "./vectorTypes";
+import { throwIfAborted } from "./cooperativeWork";
+import { rankCompositeCooperatively } from "./cooperativeRanking";
 
 /**
  * Persists/loads one immutable, verified index generation under an owned
@@ -231,8 +233,9 @@ async function switchCurrentGenerationUnsafe(fs: IndexFs, root: string, generati
  * pointer is never touched and the verification error propagates
  * unchanged.
  */
-export async function switchCurrentGeneration(fs: IndexFs, root: string, generationId: number): Promise<void> {
-  await verifyGenerationIntegrity(fs, root, generationDirPath(generationId), generationId);
+export async function switchCurrentGeneration(fs: IndexFs, root: string, generationId: number, options: GenerationLoadOptions = {}): Promise<void> {
+  await verifyGenerationIntegrity(fs, root, generationDirPath(generationId), generationId, options);
+  throwIfAborted(options.signal);
   await switchCurrentGenerationUnsafe(fs, root, generationId);
 }
 
@@ -554,7 +557,7 @@ export async function buildGeneration(fs: IndexFs, root: string, input: BuildGen
     await manifestStore(fs, root, stagingDir).save(manifest);
 
     checkAborted(signal);
-    await verifyGenerationIntegrity(fs, root, stagingDir, input.generationId);
+    await verifyGenerationIntegrity(fs, root, stagingDir, input.generationId, { signal });
 
     // Last cancellation checkpoint: once past this point, the rename either fully completes or
     // fails on its own terms (a rename is a single atomic filesystem operation and is never left
@@ -564,7 +567,8 @@ export async function buildGeneration(fs: IndexFs, root: string, input: BuildGen
     await fs.mkdir(joinRelative(root, "generations"));
     await fs.rename(joinRelative(root, stagingDir), joinRelative(root, finalDir));
   } catch (error) {
-    if (error instanceof GenerationBuildCancelledError) {
+    if (error instanceof GenerationBuildCancelledError || signal?.aborted) {
+      if (!(error instanceof GenerationBuildCancelledError)) throw new GenerationBuildCancelledError();
       throw error;
     }
     throw new GenerationStoreError(`failed to build generation ${input.generationId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -605,8 +609,11 @@ async function verifyGenerationIntegrity(
   root: string,
   dirPath: string,
   expectedGenerationId?: number,
+  options: GenerationLoadOptions = {},
 ): Promise<{ manifest: VectorIndexManifestV1; noteMetadata: NoteRowMetadataV1[] }> {
+  throwIfAborted(options.signal);
   const loadedManifest = await loadOrThrow(manifestStore(fs, root, dirPath), "manifest.json");
+  throwIfAborted(options.signal);
   if (expectedGenerationId !== undefined && loadedManifest.generationId !== expectedGenerationId) {
     throw new GenerationStoreError(`generation ${expectedGenerationId}'s manifest declares a different generationId (${loadedManifest.generationId}).`);
   }
@@ -614,8 +621,15 @@ async function verifyGenerationIntegrity(
   const noteMetadata = await loadOrThrow(notesMetaStore(fs, root, dirPath, loadedManifest.embeddingModel), "notes.meta.json");
   let noteMatrix: VectorMatrix;
   try {
-    noteMatrix = decodeVectorMatrix(noteVectorBytes, { expectedKind: "note" });
+    noteMatrix = await decodeVectorMatrixCooperatively(noteVectorBytes, {
+      expectedKind: "note",
+      signal: options.signal,
+      ownedBufferView: fs.readFileBytesReturnsPrivateBuffer === true,
+      expectedArtifactChecksum: loadedManifest.noteMatrixChecksum,
+      onStage: (measurement) => options.onStage?.({ artifact: "notes.mvx", ...measurement }),
+    });
   } catch (error) {
+    if (options.signal?.aborted) throw options.signal.reason ?? error;
     throw new GenerationStoreError(`notes.mvx failed codec validation: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (noteMetadata.length !== noteMatrix.count) {
@@ -623,9 +637,6 @@ async function verifyGenerationIntegrity(
   }
   if (noteMatrix.count !== loadedManifest.noteCount || noteMatrix.dimension !== loadedManifest.dimension) {
     throw new GenerationStoreError("notes.mvx shape does not match manifest noteCount/dimension.");
-  }
-  if (checksumHex(noteVectorBytes) !== loadedManifest.noteMatrixChecksum) {
-    throw new GenerationStoreError("notes.mvx checksum does not match manifest.noteMatrixChecksum.");
   }
   if (computeMetadataChecksumHex(noteMetadata) !== loadedManifest.noteMetadataChecksum) {
     throw new GenerationStoreError("notes.meta.json checksum does not match manifest.noteMetadataChecksum.");
@@ -656,8 +667,12 @@ async function verifyGenerationIntegrity(
   if (noteMatrix.count > 0) {
     sampleQueryVector = noteMatrix.data.slice(0, noteMatrix.dimension);
     try {
-      sampleCandidates = rankNotes({ queryVector: sampleQueryVector, matrix: noteMatrix, ids, limit: Math.min(10, noteMatrix.count) });
+      sampleCandidates = await rankCompositeCooperatively(noteMatrix.count, (row) => ({
+        path: ids[row],
+        score: dotProduct(sampleQueryVector as Float32Array, noteMatrix.data, 0, row * noteMatrix.dimension, noteMatrix.dimension),
+      }), Math.min(10, noteMatrix.count), { signal: options.signal, yieldAfterMs: 4 });
     } catch (error) {
+      if (options.signal?.aborted) throw options.signal.reason ?? error;
       throw new GenerationStoreError(`sample rankNotes query failed against the staged generation: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -667,12 +682,20 @@ async function verifyGenerationIntegrity(
   const shardIdByIdentity = new Map<string, string>();
   let totalCoveredChunkRows = 0;
   for (const shardEntry of loadedManifest.chunkShards) {
+    throwIfAborted(options.signal);
     const shardBytes = await loadOrThrow(shardVectorStore(fs, root, dirPath, shardEntry.shardId), `${shardEntry.shardId}.mvx`);
     const offsets = await loadOrThrow(shardOffsetsStore(fs, root, dirPath, shardEntry.shardId, shardEntry.count), `${shardEntry.shardId}.offsets.json`);
     let shardMatrix: VectorMatrix;
     try {
-      shardMatrix = decodeVectorMatrix(shardBytes, { expectedKind: "chunk" });
+      shardMatrix = await decodeVectorMatrixCooperatively(shardBytes, {
+        expectedKind: "chunk",
+        signal: options.signal,
+        ownedBufferView: fs.readFileBytesReturnsPrivateBuffer === true,
+        expectedArtifactChecksum: shardEntry.checksum,
+        onStage: (measurement) => options.onStage?.({ artifact: `${shardEntry.shardId}.mvx`, ...measurement }),
+      });
     } catch (error) {
+      if (options.signal?.aborted) throw options.signal.reason ?? error;
       throw new GenerationStoreError(`${shardEntry.shardId}.mvx failed codec validation: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (shardMatrix.dimension !== loadedManifest.dimension) {
@@ -680,9 +703,6 @@ async function verifyGenerationIntegrity(
     }
     if (shardMatrix.count !== shardEntry.count) {
       throw new GenerationStoreError(`${shardEntry.shardId}.mvx declares ${shardMatrix.count} rows; manifest expects ${shardEntry.count}.`);
-    }
-    if (checksumHex(shardBytes) !== shardEntry.checksum) {
-      throw new GenerationStoreError(`${shardEntry.shardId}.mvx checksum does not match manifest.`);
     }
     if (computeMetadataChecksumHex(offsets) !== shardEntry.offsetChecksum) {
       throw new GenerationStoreError(`${shardEntry.shardId}.offsets.json checksum does not match manifest.`);
@@ -758,8 +778,8 @@ async function verifyGenerationIntegrity(
  * shard -- a corruption in a shard no query has happened to touch yet is
  * caught here, not silently left resident until some future query hits it.
  */
-export async function verifyGenerationFully(fs: IndexFs, root: string, generationId: number): Promise<{ manifest: VectorIndexManifestV1; noteMetadata: NoteRowMetadataV1[] }> {
-  return verifyGenerationIntegrity(fs, root, generationDirPath(generationId), generationId);
+export async function verifyGenerationFully(fs: IndexFs, root: string, generationId: number, options: GenerationLoadOptions = {}): Promise<{ manifest: VectorIndexManifestV1; noteMetadata: NoteRowMetadataV1[] }> {
+  return verifyGenerationIntegrity(fs, root, generationDirPath(generationId), generationId, options);
 }
 
 /** A fully loaded, resident generation: manifest + note matrix + note metadata are all small enough to keep resident; chunk shards are loaded lazily and on demand (see `loadShard`), never all at once. */
@@ -771,7 +791,24 @@ export interface LoadedGeneration {
   /** Note identity key -> the shardId that owns its chunks, or `undefined` if the note has no chunks. Built from the already-resident, already-checksum-verified note metadata -- never by reading any shard file, which would defeat lazy shard loading. */
   shardIdByNoteKey: ReadonlyMap<string, string>;
   /** Decodes and returns exactly one shard's chunk matrix + offsets, freshly from disk, re-validating both its matrix and offsets checksums against the manifest on every call. Callers are responsible for not retaining more than one shard's decoded matrix at a time (see `queryRelated` in `indexStore.ts`, which enforces this structurally). */
-  loadShard(shardId: string): Promise<{ matrix: VectorMatrix; offsets: ChunkShardNoteOffset[] }>;
+  loadShard(shardId: string, options?: GenerationLoadOptions): Promise<{ matrix: VectorMatrix; offsets: ChunkShardNoteOffset[] }>;
+}
+
+export type GenerationLoadStageMeasurement = ({ artifact: string } & VectorCodecStageMeasurement) | {
+  artifact: string;
+  stage: "binary-read" | "metadata-read-parse";
+  wallMs: number;
+  maxSynchronousSliceMs: number;
+  yieldCount: number;
+};
+
+export interface GenerationLoadOptions {
+  signal?: AbortSignal;
+  onStage?: (measurement: GenerationLoadStageMeasurement) => void;
+}
+
+function observeWall(options: GenerationLoadOptions, artifact: string, stage: "binary-read" | "metadata-read-parse", started: number): void {
+  options.onStage?.({ artifact, stage, wallMs: performance.now() - started, maxSynchronousSliceMs: 0, yieldCount: 0 });
 }
 
 /**
@@ -782,18 +819,35 @@ export interface LoadedGeneration {
  * `GenerationStoreError` on any missing/corrupt/checksum-mismatched
  * artifact -- never partially trusts a generation.
  */
-export async function loadGeneration(fs: IndexFs, root: string, generationId: number): Promise<LoadedGeneration> {
+export async function loadGeneration(fs: IndexFs, root: string, generationId: number, options: GenerationLoadOptions = {}): Promise<LoadedGeneration> {
+  throwIfAborted(options.signal);
   const dirPath = generationDirPath(generationId);
+  const manifestStarted = performance.now();
   const manifest = await loadOrThrow(manifestStore(fs, root, dirPath), `generation ${generationId} manifest.json`);
+  throwIfAborted(options.signal);
+  observeWall(options, "manifest.json", "metadata-read-parse", manifestStarted);
   if (manifest.generationId !== generationId) {
     throw new GenerationStoreError(`generation ${generationId}'s manifest declares a different generationId (${manifest.generationId}).`);
   }
+  const noteReadStarted = performance.now();
   const noteVectorBytes = await loadOrThrow(notesVectorStore(fs, root, dirPath), `generation ${generationId} notes.mvx`);
+  throwIfAborted(options.signal);
+  observeWall(options, "notes.mvx", "binary-read", noteReadStarted);
+  const noteMetadataStarted = performance.now();
   const noteMetadata = await loadOrThrow(notesMetaStore(fs, root, dirPath, manifest.embeddingModel), `generation ${generationId} notes.meta.json`);
+  throwIfAborted(options.signal);
+  observeWall(options, "notes.meta.json", "metadata-read-parse", noteMetadataStarted);
   let noteMatrix: VectorMatrix;
   try {
-    noteMatrix = decodeVectorMatrix(noteVectorBytes, { expectedKind: "note" });
+    noteMatrix = await decodeVectorMatrixCooperatively(noteVectorBytes, {
+      expectedKind: "note",
+      signal: options.signal,
+      ownedBufferView: fs.readFileBytesReturnsPrivateBuffer === true,
+      expectedArtifactChecksum: manifest.noteMatrixChecksum,
+      onStage: (measurement) => options.onStage?.({ artifact: "notes.mvx", ...measurement }),
+    });
   } catch (error) {
+    if (options.signal?.aborted) throw options.signal.reason ?? error;
     throw new GenerationStoreError(`generation ${generationId}'s notes.mvx failed codec validation: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (noteMetadata.length !== noteMatrix.count) {
@@ -801,9 +855,6 @@ export async function loadGeneration(fs: IndexFs, root: string, generationId: nu
   }
   if (noteMatrix.count !== manifest.noteCount || noteMatrix.dimension !== manifest.dimension) {
     throw new GenerationStoreError(`generation ${generationId}'s notes.mvx shape does not match its manifest.`);
-  }
-  if (checksumHex(noteVectorBytes) !== manifest.noteMatrixChecksum) {
-    throw new GenerationStoreError(`generation ${generationId}'s notes.mvx checksum does not match its manifest.`);
   }
   if (computeMetadataChecksumHex(noteMetadata) !== manifest.noteMetadataChecksum) {
     throw new GenerationStoreError(`generation ${generationId}'s notes.meta.json checksum does not match its manifest.`);
@@ -825,17 +876,34 @@ export async function loadGeneration(fs: IndexFs, root: string, generationId: nu
     noteMetadata,
     ids: noteMetadata.map((row) => row.identity.canonicalPath),
     shardIdByNoteKey,
-    async loadShard(shardId: string) {
+    async loadShard(shardId: string, shardOptions: GenerationLoadOptions = {}) {
+      // Shard work belongs to the current query, never the request that originally loaded and
+      // cached this base generation. Retaining that first signal/observer would poison later reads.
+      const effectiveOptions = shardOptions;
+      throwIfAborted(effectiveOptions.signal);
       const shardEntry = manifest.chunkShards.find((entry) => entry.shardId === shardId);
       if (!shardEntry) {
         throw new GenerationStoreError(`generation ${generationId} has no shard "${shardId}".`);
       }
+      const shardReadStarted = performance.now();
       const shardBytes = await loadOrThrow(shardVectorStore(fs, root, dirPath, shardId), `generation ${generationId} ${shardId}.mvx`);
+      throwIfAborted(effectiveOptions.signal);
+      observeWall(effectiveOptions, `${shardId}.mvx`, "binary-read", shardReadStarted);
+      const offsetsStarted = performance.now();
       const offsets = await loadOrThrow(shardOffsetsStore(fs, root, dirPath, shardId, shardEntry.count), `generation ${generationId} ${shardId}.offsets.json`);
+      throwIfAborted(effectiveOptions.signal);
+      observeWall(effectiveOptions, `${shardId}.offsets.json`, "metadata-read-parse", offsetsStarted);
       let shardMatrix: VectorMatrix;
       try {
-        shardMatrix = decodeVectorMatrix(shardBytes, { expectedKind: "chunk" });
+        shardMatrix = await decodeVectorMatrixCooperatively(shardBytes, {
+          expectedKind: "chunk",
+          signal: effectiveOptions.signal,
+          ownedBufferView: fs.readFileBytesReturnsPrivateBuffer === true,
+          expectedArtifactChecksum: shardEntry.checksum,
+          onStage: (measurement) => effectiveOptions.onStage?.({ artifact: `${shardId}.mvx`, ...measurement }),
+        });
       } catch (error) {
+        if (effectiveOptions.signal?.aborted) throw effectiveOptions.signal.reason ?? error;
         throw new GenerationStoreError(`generation ${generationId}'s ${shardId}.mvx failed codec validation: ${error instanceof Error ? error.message : String(error)}`);
       }
       if (shardMatrix.dimension !== manifest.dimension) {
@@ -843,9 +911,6 @@ export async function loadGeneration(fs: IndexFs, root: string, generationId: nu
       }
       if (shardMatrix.count !== shardEntry.count) {
         throw new GenerationStoreError(`generation ${generationId}'s ${shardId}.mvx declares ${shardMatrix.count} rows; manifest expects ${shardEntry.count}.`);
-      }
-      if (checksumHex(shardBytes) !== shardEntry.checksum) {
-        throw new GenerationStoreError(`generation ${generationId}'s ${shardId}.mvx checksum does not match its manifest.`);
       }
       if (computeMetadataChecksumHex(offsets) !== shardEntry.offsetChecksum) {
         throw new GenerationStoreError(`generation ${generationId}'s ${shardId}.offsets.json checksum does not match its manifest.`);
