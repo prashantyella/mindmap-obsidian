@@ -607,12 +607,18 @@
   color: var(--text-muted);
 }
 
-.mindmap-sidebar-collapse:hover,
+.mindmap-sidebar-collapse:hover {
+  border-color: var(--background-modifier-border);
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
 .mindmap-sidebar-collapse:focus-visible {
   border-color: var(--background-modifier-border);
   background: var(--background-modifier-hover);
   color: var(--text-normal);
-  outline: none;
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
 }
 
 .mindmap-sidebar-pin {

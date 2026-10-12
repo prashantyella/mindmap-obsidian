@@ -941,7 +941,10 @@ export class MindmapWorkspaceView extends ItemView {
         event.preventDefault();
         event.stopPropagation();
         const path = row!.dataset.path!;
-        this.collapsedPaths = toggleCollapsedPaths(this.collapsedPaths, path, [...this.renderedCandidates.keys()], event.altKey);
+        const displayedPaths = Array.from(container.querySelectorAll<HTMLElement>(":scope > [data-path]"))
+          .filter((candidateRow) => !candidateRow.hidden && Boolean(candidateRow.dataset.path))
+          .map((candidateRow) => candidateRow.dataset.path!);
+        this.collapsedPaths = toggleCollapsedPaths(this.collapsedPaths, path, displayedPaths, event.altKey);
         if (this.activePath) this.viewState = rememberCollapsedPaths(this.viewState, this.activePath, this.collapsedPaths);
         this.render();
       });

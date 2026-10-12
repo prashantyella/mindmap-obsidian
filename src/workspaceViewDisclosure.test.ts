@@ -96,6 +96,7 @@ interface TestView {
   heatmapRegionEl: FakeElement;
   retainedListEl: FakeElement;
   loadingController: null;
+  renderedCandidates: Map<string, TestCandidate>;
   ensureShell(): FakeElement;
   ensureLiveQuery(): void;
   getRelatedCandidates(): TestCandidate[];
@@ -207,9 +208,11 @@ void test("actual render keeps independent disclosures, controls, and per-note c
     view.render();
     assert.ok(detail(one));
     assert.ok(detail(two));
+    view.renderedCandidates.set("Stale.md", candidate("Stale.md"));
     bubbleClick(oneButton, one, true);
     assert.equal(detail(one), null);
     assert.equal(detail(two), null);
+    assert.deepEqual(view.getState().collapsedByNote["Other.md"], ["One.md", "Two.md"]);
     bubbleClick(oneButton, one, true);
     assert.ok(detail(one));
     assert.ok(detail(two));
@@ -249,4 +252,9 @@ void test("connection graph is rendered directly without a disclosure title", ()
   assert.match(source, /this\.renderHeatmap\(this\.heatmapRegionEl \?\? shell, candidates\)/);
   const pinRule = styles.slice(styles.lastIndexOf(".mindmap-sidebar-pin {"), styles.indexOf("}", styles.lastIndexOf(".mindmap-sidebar-pin {")) + 1);
   assert.doesNotMatch(pinRule, /position:\s*absolute|right:/);
+  const focusRuleStart = styles.indexOf(".mindmap-sidebar-collapse:focus-visible {");
+  const focusRule = styles.slice(focusRuleStart, styles.indexOf("}", focusRuleStart) + 1);
+  assert.match(focusRule, /outline:\s*2px solid var\(--interactive-accent\)/);
+  assert.match(focusRule, /outline-offset:\s*1px/);
+  assert.doesNotMatch(focusRule, /outline:\s*none/);
 });
