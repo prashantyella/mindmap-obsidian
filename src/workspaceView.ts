@@ -8,6 +8,7 @@ import {
   createLoadingLiveState,
   createReadyLiveState,
   getDisplayLiveRelated,
+  getLiveFeedback,
   getIndexRefreshTargets,
   NO_MINDMAP_CONNECTIONS_MESSAGE,
   NO_MINDMAP_CONNECTIONS_TITLE,
@@ -21,6 +22,7 @@ import {
 import { SidebarRefreshController } from "./sidebarRefreshController";
 import { SidebarLoadingController } from "./sidebarLoadingController";
 import { reconcileKeyedOrder } from "./keyedReconciler";
+import { RetainedSvgNodes } from "./retainedSvgNodes";
 
 export const MINDMAP_VIEW_TYPE = "mindmap-ai-view";
 
@@ -215,6 +217,15 @@ export class MindmapWorkspaceView extends ItemView {
   private loadingController: SidebarLoadingController | null = null;
   private pinRevealPath: string | null = null;
   private composingLookup = false;
+  private lookupForeground = false;
+  private pendingVisualRefresh = false;
+  private feedbackKey: string | null = null;
+  private heatmapDisclosureEl: HTMLDetailsElement | null = null;
+  private heatmapEl: HTMLElement | null = null;
+  private heatmapSvgEl: SVGSVGElement | null = null;
+  private heatmapTooltipEl: HTMLElement | null = null;
+  private readonly heatmapNodes = new RetainedSvgNodes<SVGElement>();
+  private readonly heatmapCandidates = new Map<string, RelatedCandidate>();
   private shellEl: HTMLElement | null = null;
   private resultsEl: HTMLElement | null = null;
   private feedbackEl: HTMLElement | null = null;
@@ -229,6 +240,7 @@ export class MindmapWorkspaceView extends ItemView {
     runLookup: () => this.runLookupQuery(),
     refreshNote: () => this.refreshActiveNoteQuery(),
     refreshIndex: () => this.refreshIndexQueries(),
+    typingEnded: () => { if (this.pendingVisualRefresh) this.render(true); },
   });
   private lookupState: LookupState = {
     query: "",
@@ -268,6 +280,13 @@ export class MindmapWorkspaceView extends ItemView {
       if (file.path !== this.activePath) return;
       this.refreshController.scheduleNoteRefresh();
     }));
+    this.registerEvent(this.app.workspace.on("editor-change", (_editor, info) => {
+      if (info.file?.path !== this.activePath) return;
+      this.refreshController.recordTyping();
+      this.liveRequestId += 1;
+      this.refreshController.invalidateNoteRequest();
+      this.liveState = createIdleLiveState(this.activePath, this.liveState.response, this.liveState.displayResponse, this.liveState.error);
+    }));
     this.register(this.plugin.subscribeIndexChanges(() => this.refreshController.scheduleIndexRefresh()));
     this.render();
   }
@@ -298,8 +317,7 @@ export class MindmapWorkspaceView extends ItemView {
     if (this.liveState.path === "") {
       return;
     }
-    this.liveState = createIdleLiveState(this.liveState.path, this.liveState.response);
-    this.render();
+    this.refreshController.scheduleNoteRefresh();
   }
 
   async onClose(): Promise<void> {
@@ -309,22 +327,32 @@ export class MindmapWorkspaceView extends ItemView {
     this.loadingController?.close();
   }
 
-  render(): void {
+  render(background = false): void {
     const content = this.ensureShell();
+    const activeFile = this.app.workspace.getActiveFile();
+    const activeElement = content.ownerDocument.activeElement;
+    if (background && activeFile?.path === this.activePath && (
+      this.refreshController.isTyping()
+      || (activeElement !== null && content.contains(activeElement))
+      || this.heatmapRegionEl?.matches(":hover")
+    )) {
+      this.pendingVisualRefresh = true;
+      return;
+    }
+    this.pendingVisualRefresh = false;
     const focusedElement = content.ownerDocument.activeElement instanceof HTMLElement && content.contains(content.ownerDocument.activeElement)
       ? content.ownerDocument.activeElement
       : null;
     const focusedPath = focusedElement
       ? focusedElement.closest<HTMLElement>("[data-path]")?.dataset.path ?? null
       : null;
-    this.feedbackEl?.empty();
-    this.heatmapRegionEl?.empty();
     this.updateLookupShell();
 
-    const activeFile = this.app.workspace.getActiveFile();
     const shell = this.feedbackEl ?? content;
 
     if (activeFile === null) {
+      if (this.heatmapRegionEl) this.heatmapRegionEl.hidden = true;
+      this.refreshController.resetTyping();
       this.activePath = null;
       this.loadingController?.update(this.getLoadingRequest());
       this.refreshController.invalidateNoteRequest();
@@ -352,6 +380,7 @@ export class MindmapWorkspaceView extends ItemView {
     }
 
     if (this.activePath !== activeFile.path) {
+      this.refreshController.resetTyping();
       this.activePath = activeFile.path;
       this.refreshController.invalidateNoteRequest();
       this.expandedPath = this.viewState.expandedByNote[activeFile.path];
@@ -366,28 +395,33 @@ export class MindmapWorkspaceView extends ItemView {
     const candidates = this.hasLookupQuery()
       ? this.getLookupCandidates(activeFile)
       : this.getDisplayCandidates(activeFile, persistedCandidates);
-    if (!this.hasLookupQuery()) this.renderLiveStatus(shell, activeFile.path, persistedCandidates.length > 0);
     if (candidates.length > 0 && this.expandedPath === undefined) {
       this.expandedPath = candidates[0].path;
     }
 
     if (candidates.length === 0) {
+      if (this.heatmapRegionEl) this.heatmapRegionEl.hidden = true;
       if (this.retainedListEl) this.retainedListEl.hidden = true;
       if (this.hasLookupQuery()) {
         this.renderLookupResults(shell, activeFile);
-      } else if (this.liveState.status === "loading") {
-        this.renderEmpty(shell, "Updating connections", "Existing connections will remain available while this finishes.");
-      } else if (this.liveState.status === "error") {
+      } else if (getLiveFeedback(this.liveState, this.plugin.settings.liveSemanticLookupEnabled) === "error") {
         this.renderEmpty(shell, "Connections unavailable", "Saved connections remain in the note. Check Local AI, then try again.");
-      } else {
+      } else if (getLiveFeedback(this.liveState, this.plugin.settings.liveSemanticLookupEnabled) === "empty") {
         this.renderEmpty(shell, NO_MINDMAP_CONNECTIONS_TITLE, NO_MINDMAP_CONNECTIONS_MESSAGE);
+      } else {
+        this.resetFeedback("none");
       }
       this.restoreFocusedRow(focusedPath, focusedElement);
       return;
     }
 
+    if (!this.hasLookupQuery()) this.renderLiveStatus(shell, activeFile.path, persistedCandidates.length > 0);
+    else this.resetFeedback("none");
     if (!this.hasLookupQuery()) {
+      if (this.heatmapRegionEl) this.heatmapRegionEl.hidden = false;
       this.renderHeatmapDisclosure(this.heatmapRegionEl ?? shell, candidates);
+    } else if (this.heatmapRegionEl) {
+      this.heatmapRegionEl.hidden = true;
     }
 
     const list = this.ensureResultList(shell);
@@ -434,6 +468,8 @@ export class MindmapWorkspaceView extends ItemView {
       searchButton.setAttribute("aria-busy", String(visible));
       if (visible && this.liveRegionEl) {
         this.liveRegionEl.textContent = this.hasLookupQuery() ? "Searching connections." : "Updating connections.";
+      } else if (!visible && this.liveRegionEl && ["Searching connections.", "Updating connections."].includes(this.liveRegionEl.textContent ?? "")) {
+        this.liveRegionEl.textContent = "";
       }
     }, {
       setTimeout: (callback, delayMs) => ownerWindow.setTimeout(callback, delayMs),
@@ -457,6 +493,17 @@ export class MindmapWorkspaceView extends ItemView {
     this.heatmapRegionEl = this.resultsEl.createDiv({ cls: "mindmap-sidebar-heatmap-region" });
     this.retainedListEl = this.resultsEl.createDiv({ cls: "mindmap-sidebar-list" });
     this.lookupInputEl = input;
+    let interactionTimer: number | null = null;
+    const endInteraction = (): void => {
+      if (interactionTimer !== null) ownerWindow.clearTimeout(interactionTimer);
+      interactionTimer = ownerWindow.setTimeout(() => {
+        interactionTimer = null;
+        if (this.pendingVisualRefresh) this.render(true);
+      }, 0);
+    };
+    this.registerDomEvent(this.resultsEl, "focusout", endInteraction);
+    this.registerDomEvent(this.heatmapRegionEl, "mouseleave", endInteraction);
+    this.register(() => { if (interactionTimer !== null) ownerWindow.clearTimeout(interactionTimer); });
 
     input.addEventListener("input", () => {
       this.lookupRequestId += 1;
@@ -515,7 +562,7 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   private renderLookupResults(container: HTMLElement, activeFile: TFile | null): void {
-    if (this.lookupState.status === "loading") {
+    if (this.lookupState.status === "loading" && this.lookupForeground) {
       this.renderEmpty(container, "Searching notes", "Finding semantic matches.");
       return;
     }
@@ -536,21 +583,20 @@ export class MindmapWorkspaceView extends ItemView {
 
   private getLoadingRequest(): string | null {
     if (this.hasLookupQuery()) {
-      return !this.composingLookup && this.lookupState.status === "loading" && this.lookupLoadingRequestId === this.lookupRequestId
+      return this.lookupForeground && !this.composingLookup && this.lookupState.status === "loading" && this.lookupLoadingRequestId === this.lookupRequestId
         ? `lookup:${this.lookupRequestId}`
         : null;
     }
-    return this.activePath !== null && this.liveState.path === this.activePath && this.liveState.status === "loading"
-      ? `note:${this.liveRequestId}`
-      : null;
+    return null;
   }
 
-  private runLookupQuery(): void {
+  private runLookupQuery(background = false): void {
     const query = this.lookupState.query.trim();
     if (!query) {
       return;
     }
     const requestId = ++this.lookupRequestId;
+    this.lookupForeground = !background;
     this.lookupLoadingRequestId = requestId;
     const generation = this.refreshController.invalidateLookup();
     this.lookupState = {
@@ -559,7 +605,7 @@ export class MindmapWorkspaceView extends ItemView {
       related: this.lookupState.related,
       error: null,
     };
-    this.render();
+    this.render(background);
 
     void this.plugin.queryLookupRelated(query)
       .then((response) => {
@@ -572,8 +618,8 @@ export class MindmapWorkspaceView extends ItemView {
           related: response.related,
           error: null,
         };
-        if (this.liveRegionEl) this.liveRegionEl.textContent = `${response.related.length} connection${response.related.length === 1 ? "" : "s"} found.`;
-        this.render();
+        if (this.lookupForeground && this.liveRegionEl) this.liveRegionEl.textContent = `${response.related.length} connection${response.related.length === 1 ? "" : "s"} found.`;
+        this.render(background);
       })
       .catch((error) => {
         if (requestId !== this.lookupRequestId || !this.refreshController.isCurrentLookup(generation)) {
@@ -585,11 +631,12 @@ export class MindmapWorkspaceView extends ItemView {
           related: this.lookupState.related,
           error: error instanceof Error ? error.message : String(error),
         };
-        this.render();
+        this.render(background);
       });
   }
 
   private ensureLiveQuery(activeFile: TFile): void {
+    if (this.refreshController.isTyping()) return;
     if (!this.plugin.settings.liveSemanticLookupEnabled) {
       return;
     }
@@ -606,63 +653,78 @@ export class MindmapWorkspaceView extends ItemView {
         if (!this.refreshController.isCurrentNote(generation) || !shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
           return;
         }
-        this.liveState = createReadyLiveState(activeFile.path, response);
-        this.render();
+        this.liveState = createReadyLiveState(activeFile.path, response, this.liveState);
+        this.render(true);
       })
       .catch((error) => {
         if (!this.refreshController.isCurrentNote(generation) || !shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
           return;
         }
         this.liveState = createErrorLiveState(activeFile.path, this.liveState, error);
-        this.render();
+        this.render(true);
       });
   }
 
   private refreshActiveNoteQuery(): void {
     if (!this.activePath) return;
     this.liveRequestId += 1;
-    this.liveState = createIdleLiveState(this.activePath, this.liveState.response);
-    this.render();
+    this.liveState = createIdleLiveState(this.activePath, this.liveState.response, this.liveState.displayResponse, this.liveState.error);
+    this.render(true);
   }
 
   private refreshIndexQueries(): void {
     const targets = getIndexRefreshTargets(this.activePath, this.lookupState.query);
+    if ((targets.live && this.liveState.status === "loading") || (targets.lookup && this.lookupState.status === "loading")) {
+      this.refreshController.scheduleIndexRefresh();
+      return;
+    }
     if (targets.live && this.activePath) {
       this.liveRequestId += 1;
-      this.liveState = createIdleLiveState(this.activePath, this.liveState.response);
+      this.liveState = createIdleLiveState(this.activePath, this.liveState.response, this.liveState.displayResponse, this.liveState.error);
     }
     if (targets.lookup) {
       this.lookupRequestId += 1;
-      this.runLookupQuery();
+      this.runLookupQuery(true);
       return;
     }
-    this.render();
+    this.render(true);
   }
 
   private renderLiveStatus(container: HTMLElement, activePath: string, hasPersisted: boolean): void {
     if (this.liveState.path !== activePath) return;
-    if (this.liveState.status === "error") {
+    if (this.liveState.error !== null) {
+      if (!this.resetFeedback(`error:${activePath}:${hasPersisted}`)) return;
       const status = container.createDiv({ cls: "mindmap-sidebar-status is-error", attr: { role: "status" } });
       status.createSpan({ text: hasPersisted ? "Live refresh failed. Showing saved connections." : "Live connections are unavailable." });
       return;
     }
+    this.resetFeedback("none");
   }
 
   private renderHeatmapDisclosure(container: HTMLElement, candidates: RelatedCandidate[]): void {
-    const disclosure = container.createEl("details", { cls: "mindmap-heatmap-disclosure" });
+    const disclosure = this.heatmapDisclosureEl ?? container.createEl("details", { cls: "mindmap-heatmap-disclosure" });
+    if (!this.heatmapDisclosureEl) {
+      this.heatmapDisclosureEl = disclosure;
+      disclosure.createEl("summary", { text: "Connection graph" });
+      disclosure.addEventListener("toggle", () => { this.viewState = { ...this.viewState, heatmapOpen: disclosure.open }; });
+    }
     disclosure.open = this.viewState.heatmapOpen;
-    disclosure.createEl("summary", { text: "Connection graph" });
-    disclosure.addEventListener("toggle", () => { this.viewState = { ...this.viewState, heatmapOpen: disclosure.open }; });
     this.renderHeatmap(disclosure, candidates);
   }
 
   private renderHeatmap(container: HTMLElement, candidates: RelatedCandidate[]): void {
-    const heatmap = container.createDiv({ cls: "mindmap-heatmap" });
-    const svg = heatmap.createSvg("svg", {
+    const heatmap = this.heatmapEl ?? container.createDiv({ cls: "mindmap-heatmap" });
+    this.heatmapEl = heatmap;
+    const svg = this.heatmapSvgEl ?? heatmap.createSvg("svg", {
       cls: "mindmap-heatmap-chart",
       attr: { viewBox: "0 0 320 300", preserveAspectRatio: "none", role: "img", "aria-label": "Mindmap connection graph for related notes" },
     });
-    const tooltip = heatmap.createDiv({ cls: "mindmap-heatmap-tooltip" });
+    this.heatmapSvgEl = svg;
+    const tooltip = this.heatmapTooltipEl ?? heatmap.createDiv({ cls: "mindmap-heatmap-tooltip" });
+    this.heatmapTooltipEl = tooltip;
+    this.heatmapCandidates.clear();
+    for (const candidate of candidates) this.heatmapCandidates.set(candidate.path, candidate);
+    this.heatmapNodes.begin();
 
     const chart = {
       left: 10,
@@ -697,62 +759,65 @@ export class MindmapWorkspaceView extends ItemView {
       tooltip.style.top = `${y}px`;
       tooltip.addClass("is-visible");
     };
-    const bindTooltip = (element: SVGElement, candidate: RelatedCandidate): void => {
+    const bindTooltip = (element: SVGElement, candidatePath: string): void => {
+      const show = (x: number, y: number): void => {
+        const candidate = this.heatmapCandidates.get(candidatePath);
+        if (candidate) showTooltip(candidate, x, y);
+      };
       element.addEventListener("mouseenter", (event) => {
-        showTooltip(candidate, event.clientX, event.clientY);
+        show(event.clientX, event.clientY);
       });
       element.addEventListener("mousemove", (event) => {
-        showTooltip(candidate, event.clientX, event.clientY);
+        show(event.clientX, event.clientY);
       });
       element.addEventListener("mouseleave", hideTooltip);
       element.addEventListener("focus", () => {
         const bounds = element.getBoundingClientRect();
-        showTooltip(candidate, bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+        show(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
       });
       element.addEventListener("blur", hideTooltip);
     };
 
     for (let level = 0; level <= chart.maxLevel; level += 1) {
-      svg.createSvg("line", {
+      this.heatmapNodes.get(`grid:${level}`, () => svg.createSvg("line", {
         cls: "mindmap-heatmap-grid",
-        attr: {
-          x1: String(chart.left),
-          x2: String(chart.width - chart.right),
-          y1: String(yFor(level)),
-          y2: String(yFor(level)),
-        },
+      }), {
+        x1: String(chart.left),
+        x2: String(chart.width - chart.right),
+        y1: String(yFor(level)),
+        y2: String(yFor(level)),
       });
     }
 
     for (const [index, candidate] of candidates.entries()) {
       const x = xFor(index);
-      const marker = svg.createSvg("rect", {
+      const markerResult = this.heatmapNodes.get(`hit:${candidate.path}`, () => svg.createSvg("rect", {
         cls: "mindmap-heatmap-hit",
-        attr: {
-          x: String(x - plotWidth / Math.max(candidates.length - 1, 1) / 2),
-          y: String(chart.top),
-          width: String(plotWidth / Math.max(candidates.length - 1, 1)),
-          height: String(plotHeight),
-          tabindex: "0",
-          role: "button",
-          "aria-label": `Select ${candidate.title}`,
-        },
+      }), {
+        x: String(x - plotWidth / Math.max(candidates.length - 1, 1) / 2),
+        y: String(chart.top),
+        width: String(plotWidth / Math.max(candidates.length - 1, 1)),
+        height: String(plotHeight),
+        tabindex: "0",
+        role: "button",
+        "aria-label": `Select ${candidate.title}`,
       });
-      if (candidate.path === this.expandedPath) {
-        marker.addClass("is-selected");
-      }
-      marker.addEventListener("click", () => {
-        this.expandedPath = candidate.path;
-        this.render();
-      });
-      marker.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
+      const marker = markerResult.node;
+      marker.toggleClass("is-selected", candidate.path === this.expandedPath);
+      if (markerResult.created) {
+        marker.addEventListener("click", () => {
           this.expandedPath = candidate.path;
           this.render();
-        }
-      });
-      bindTooltip(marker, candidate);
+        });
+        marker.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            this.expandedPath = candidate.path;
+            this.render();
+          }
+        });
+        bindTooltip(marker, candidate.path);
+      }
     }
 
     const metrics = candidates[0]?.heatmap ?? [];
@@ -761,35 +826,40 @@ export class MindmapWorkspaceView extends ItemView {
         const cell = candidate.heatmap.find((candidateMetric) => candidateMetric.key === metric.key);
         return `${xFor(index)},${yFor(cell?.level ?? 0)}`;
       });
-      const line = svg.createSvg("polyline", {
+      const { node: line } = this.heatmapNodes.get(`line:${metric.key}`, () => svg.createSvg("polyline", {
         cls: "mindmap-heatmap-line",
-        attr: { points: points.join(" ") },
-      });
+      }), { points: points.join(" ") });
       line.addClass(`is-${metric.key}`);
     }
 
     for (const [index, candidate] of candidates.entries()) {
       const x = xFor(index);
       for (const metric of candidate.heatmap) {
-        const point = svg.createSvg("circle", {
+        const pointResult = this.heatmapNodes.get(`point:${candidate.path}:${metric.key}`, () => svg.createSvg("circle", {
           cls: "mindmap-heatmap-point",
-          attr: {
-            cx: String(x),
-            cy: String(yFor(metric.level)),
-            r: candidate.path === this.expandedPath ? "2.6" : "2",
-          },
+        }), {
+          cx: String(x),
+          cy: String(yFor(metric.level)),
+          r: candidate.path === this.expandedPath ? "2.6" : "2",
         });
+        const point = pointResult.node;
         point.addClass(`is-${metric.key}`);
-        if (candidate.path === this.expandedPath) {
-          point.addClass("is-selected");
+        point.toggleClass("is-selected", candidate.path === this.expandedPath);
+        if (pointResult.created) {
+          point.addEventListener("click", () => {
+            this.expandedPath = candidate.path;
+            this.render();
+          });
+          bindTooltip(point, candidate.path);
         }
-        point.addEventListener("click", () => {
-          this.expandedPath = candidate.path;
-          this.render();
-        });
-        bindTooltip(point, candidate);
       }
     }
+    this.heatmapNodes.finish({
+      first: () => svg.firstElementChild as SVGElement | null,
+      next: (node) => node.nextElementSibling as SVGElement | null,
+      find: () => null,
+      insertBefore: (node, before) => { svg.insertBefore(node, before); },
+    });
   }
 
   private ensureResultList(container: HTMLElement): HTMLElement {
@@ -930,7 +1000,15 @@ export class MindmapWorkspaceView extends ItemView {
     return `${percent}%`;
   }
 
+  private resetFeedback(key: string): boolean {
+    if (this.feedbackKey === key) return false;
+    this.feedbackKey = key;
+    this.feedbackEl?.empty();
+    return true;
+  }
+
   private renderEmpty(container: HTMLElement, title: string, message: string): void {
+    if (container === this.feedbackEl && !this.resetFeedback(`empty:${title}:${message}`)) return;
     const empty = container.createDiv({ cls: "mindmap-sidebar-empty" });
     empty.createEl("h2", { text: title });
     empty.createEl("p", { text: message });

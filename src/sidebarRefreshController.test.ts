@@ -137,7 +137,7 @@ void test("global index revisions coalesce for one refresh and close cancels the
   controller.scheduleIndexRefresh();
   timers.advance(600);
   controller.scheduleIndexRefresh();
-  timers.advance(999);
+  timers.advance(399);
   assert.equal(refreshes, 0);
   timers.advance(1);
   assert.equal(refreshes, 1);

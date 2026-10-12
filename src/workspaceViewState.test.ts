@@ -188,7 +188,7 @@ void test("heatmap SVG classes are added as individual DOM tokens", () => {
   const workspaceViewSource = fs.readFileSync(path.join(sourceRoot, "src", "workspaceView.ts"), "utf8");
 
   assert.match(workspaceViewSource, /cls: "mindmap-heatmap-hit"/);
-  assert.match(workspaceViewSource, /marker\.addClass\("is-selected"\)/);
+  assert.match(workspaceViewSource, /marker\.toggleClass\("is-selected"/);
   assert.match(workspaceViewSource, /cls: "mindmap-heatmap-line"/);
   assert.match(workspaceViewSource, /line\.addClass\(`is-\$\{metric\.key\}`\)/);
   assert.match(workspaceViewSource, /cls: "mindmap-heatmap-point"/);
@@ -250,13 +250,12 @@ void test("migration completion invalidates the live-query cache exactly once pe
   assert.match(workspaceViewSource, /shouldSkipLiveQuery\(this\.liveState, activeFile\.path\)/);
   assert.doesNotMatch(workspaceViewSource, /response\??\.indexed\s*===\s*false/);
 
-  // The one-shot invalidation entry point: resets to idle (keeping the
-  // prior response for display continuity) and renders once, mirroring
-  // the existing metadataCache "changed" handler.
+  // One-shot invalidation follows the typing-aware debounce, rather than
+  // mutating the visible sidebar immediately when migration completes.
   assert.match(workspaceViewSource, /invalidateLiveQuery\(\)\s*:\s*void\s*\{/);
-  const invalidateBody = workspaceViewSource.slice(workspaceViewSource.indexOf("invalidateLiveQuery(): void {"));
-  assert.match(invalidateBody, /createIdleLiveState\(this\.liveState\.path, this\.liveState\.response\)/);
-  assert.match(invalidateBody, /this\.render\(\);/);
+  const invalidateBody = workspaceViewSource.slice(workspaceViewSource.indexOf("invalidateLiveQuery(): void {"), workspaceViewSource.indexOf("async onClose(): Promise<void>"));
+  assert.match(invalidateBody, /this\.refreshController\.scheduleNoteRefresh\(\)/);
+  assert.doesNotMatch(invalidateBody, /this\.render\(/);
 
   // Wired from ProductionEngine's migration-complete signal, applied to
   // every open Mindmap leaf, not just the currently active one.
