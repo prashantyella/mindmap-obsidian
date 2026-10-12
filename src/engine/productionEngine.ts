@@ -35,6 +35,7 @@ import {
 } from "./productionVaultAdapter";
 import { createProductionNoteEmbeddingSeam, createProductionNoteMetadataSeam } from "./productionProviderSeams";
 import { createCachedLiveEmbeddingSeam, type CachedLiveEmbeddingSeam } from "./liveEmbeddingCache";
+import { assessActiveNote } from "../individualNote";
 import { LIVE_QUERY_EMBEDDING_CACHE_MAX_BYTES } from "../index/budgets";
 import { selectRelatedCandidates, type RelatedCandidateScore } from "./relatedSelector";
 import type { CanonicalPath, RelatedCandidateKind } from "./contracts";
@@ -955,11 +956,12 @@ export class ProductionEngine {
    * `process-note` job `submitNoteForProcessing` would (never a daemon,
    * never a synchronous inline embed-then-index like the retired Python
    * worker) and returns immediately with the SAME "not yet indexed"
-   * loading/empty semantics the UI already renders for `indexed: false`/
-   * `stale: true` -- the caller is expected to re-query once the
-   * submitted job completes, exactly like polling any other job result.
-   * Related candidates are only ever computed against an ALREADY
-   * indexed, non-stale-at-submission-time record: `related` mirrors
+   * empty semantics for `indexed: false`. Existing indexed notes still
+   * return freshly ranked connections while the protected background job
+   * updates persisted metadata. Index-change events refresh the sidebar
+   * after the job commits; no per-render polling or manual action is needed.
+   * Related candidates are computed against an ALREADY
+   * indexed record: `related` mirrors
    * `query_related_for_note`'s selection (`selectRelatedCandidates`), and
    * the note's own vector for ranking is a FRESH embed through
    * `noteEmbeddingSeam` -- never a stored vector pulled back out of the
@@ -980,11 +982,14 @@ export class ProductionEngine {
     const indexed = record !== null;
     const stale = !indexed || record.sourceHash !== projection.sourceHash;
 
-    if (ensureIndex && stale && this.registeredRunners["process-note"]) {
-      await this.jobEngine
-        .submit({ trigger: "manual", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion })
-        .catch(() => undefined);
-      return { path: canonical, sourceHash: projection.sourceHash, indexed, stale, related: [] };
+    const eligible = ensureIndex && stale && assessActiveNote(canonical, resolved.rawContent, {
+      allScopeFolders: [...this.options.scopeFolders],
+      minimumWords: this.options.minimumWords,
+      configDir: this.options.configDir,
+      runtimeFolder: this.options.runtimeFolder,
+    }).eligible;
+    if (eligible && this.registeredRunners["process-note"]) {
+      await this.jobEngine.submit({ trigger: "scheduled", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion });
     }
 
     if (!indexed) {

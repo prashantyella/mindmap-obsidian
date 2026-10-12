@@ -884,6 +884,17 @@ void test("deferWrite: automatic non-batch work is deferred", async () => {
   assert.equal(h.vault.modifyCount, 0);
 });
 
+void test("source changes during automatic refresh preserve its protected trigger in the replacement", async () => {
+  const h = buildHarnessWithDefer(() => true);
+  await h.engine.submit({ trigger: "scheduled", kind: "process-note", identity: identity(), sourceHash: sourceHashOf(RAW_CONTENT), embeddingModel: "test-model", pipelineVersion: 1 });
+  h.vault.files.set(NOTE_PATH, `${RAW_CONTENT}\nA new edit while automatic processing is pending.`);
+  await h.engine.drain();
+  assert.equal(h.replacement.calls.length, 1);
+  const replacement = h.replacement.calls[0];
+  assert.equal("trigger" in replacement ? replacement.trigger : undefined, "scheduled");
+  assert.equal(h.vault.modifyCount, 0);
+});
+
 void test("deferWrite: focus arriving during the writer's final source read prevents mutation", async () => {
   let protectedNow = false;
   const h = buildHarnessWithDefer(() => protectedNow);

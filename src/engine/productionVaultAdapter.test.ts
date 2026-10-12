@@ -305,6 +305,13 @@ void test("createProductionNoteReplacementSeam forwards to the injected job subm
   assert.deepEqual(submitted, [{ trigger: "manual", kind: "process-note", identity: { schemaVersion: 1, kind: "path", canonicalPath: "Notes/a.md" }, sourceHash: "b".repeat(64), embeddingModel: "m", pipelineVersion: 2 }]);
 });
 
+void test("automatic note replacements preserve their protected background trigger", async () => {
+  const submitted: { trigger: string }[] = [];
+  const seam = createProductionNoteReplacementSeam({ submit: async (input) => { submitted.push(input); } }, "manual");
+  await seam.enqueueReplacement({ identity: { schemaVersion: 1, kind: "path", canonicalPath: "Notes/a.md" as never }, sourceHash: "b".repeat(64), embeddingModel: "m", pipelineVersion: 2, trigger: "scheduled" });
+  assert.equal(submitted[0].trigger, "scheduled");
+});
+
 void test("createProductionNoteReplacementSeam preserves an explicit batch item id and fails closed without bulk support", async () => {
   const submitted: unknown[] = [];
   const fakeJobEngine = { submit: async () => { throw new Error("must not use unbatched submit"); }, submitBulkChild: async (batchId: string, input: unknown) => { submitted.push({ batchId, input }); } };

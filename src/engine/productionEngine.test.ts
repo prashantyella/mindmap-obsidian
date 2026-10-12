@@ -731,7 +731,7 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) submits the exact pro
   const { vault } = sidebarFixture();
   const fs = new FakeIndexFs();
   const dataRoot = "/data";
-  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, minimumWords: 1, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
   await engine.start();
   const result = await engine.queryLiveRelated("Notes/active.md", true);
   assert.equal(result.indexed, false);
@@ -739,6 +739,32 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) submits the exact pro
   assert.deepEqual(result.related, []);
   const jobs = await engine.jobStore.list();
   assert.ok(jobs.some((persisted) => persisted.job.kind === "process-note" && persisted.job.target.kind === "note" && persisted.job.target.identity.canonicalPath === "Notes/active.md"));
+  assert.equal(jobs[0].job.trigger, "scheduled", "automatic sidebar work must not bypass editing protection as a manual job");
+  await engine.dispose();
+});
+
+void test("automatic sidebar refresh coalesces repeated requests and respects an operator pause", async () => {
+  const { vault } = sidebarFixture();
+  const engine = new ProductionEngine(baseOptions({ fs: new FakeIndexFs(), vault, vaultFileClasses: undefined, minimumWords: 1, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  await engine.pauseProcessing();
+  await Promise.all(Array.from({ length: 5 }, () => engine.queryLiveRelated("Notes/active.md", true)));
+  const jobs = await engine.jobStore.list();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].job.trigger, "scheduled");
+  assert.equal(jobs[0].status, "queued");
+  assert.equal((await engine.jobStore.getOperatorPause()).active, true);
+  await engine.dispose();
+});
+
+void test("automatic sidebar refresh never processes out-of-scope or too-short notes", async () => {
+  const files = { "Archive/long.md": "enough eligible words ".repeat(20), "Notes/short.md": "Short." };
+  const engine = new ProductionEngine(baseOptions({ fs: new FakeIndexFs(), vault: richFakeVault(files), vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  for (const notePath of Object.keys(files)) {
+    assert.equal((await engine.queryLiveRelated(notePath, true)).stale, true);
+  }
+  assert.deepEqual(await engine.jobStore.list(), []);
   await engine.dispose();
 });
 
@@ -770,7 +796,7 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed I
       return fixedProvider.embedBatch(request, options);
     },
   };
-  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: countingProvider as never }) as ProductionEngineOptions);
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, minimumWords: 1, ...readyProviders(), embeddingProvider: countingProvider as never }) as ProductionEngineOptions);
   await engine.start();
   const result = await engine.queryLiveRelated("Notes/active.md", false);
   assert.equal(result.indexed, true);
@@ -781,6 +807,14 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed I
   const repeated = await engine.queryLiveRelated("Notes/active.md", false);
   assert.deepEqual(repeated, result);
   assert.equal(providerCalls, 1, "identical validated live queries reuse one provider result");
+  files["Notes/active.md"] += " New source text.";
+  const refreshing = await engine.queryLiveRelated("Notes/active.md", true);
+  assert.equal(refreshing.stale, true);
+  assert.equal(refreshing.indexed, true);
+  assert.equal(refreshing.related[0].path, "Notes/other.md", "connections stay available while persistence updates in the background");
+  const jobs = await engine.jobStore.list();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].job.trigger, "scheduled");
   await engine.dispose();
 });
 

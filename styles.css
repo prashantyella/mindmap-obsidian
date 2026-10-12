@@ -671,7 +671,6 @@
 }
 
 .mindmap-sidebar-status.is-error { color: var(--text-error); }
-.mindmap-update-connections { flex: 0 0 auto; }
 
 @media (prefers-reduced-motion: reduce) {
   .mindmap-sidebar-card,

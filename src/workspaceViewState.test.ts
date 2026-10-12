@@ -177,6 +177,12 @@ void test("workspace view does not define a dedicated loading screen", () => {
   assert.equal(stylesSource.includes("mindmap-loading-state"), false);
 });
 
+void test("sidebar requests automatic indexing and does not introduce stale-note controls", () => {
+  const source = fs.readFileSync("src/workspaceView.ts", "utf8");
+  assert.match(source, /this\.plugin\.queryLiveRelated\(activeFile\.path\)/);
+  assert.doesNotMatch(source, /Update connections|connections are out of date|mindmap-update-connections/);
+});
+
 void test("heatmap SVG classes are added as individual DOM tokens", () => {
   const sourceRoot = process.cwd();
   const workspaceViewSource = fs.readFileSync(path.join(sourceRoot, "src", "workspaceView.ts"), "utf8");

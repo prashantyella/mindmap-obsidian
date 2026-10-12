@@ -379,8 +379,6 @@ export class MindmapWorkspaceView extends ItemView {
         this.renderEmpty(shell, "Updating connections", "Existing connections will remain available while this finishes.");
       } else if (this.liveState.status === "error") {
         this.renderEmpty(shell, "Connections unavailable", "Saved connections remain in the note. Check Local AI, then try again.");
-      } else if (this.liveState.response && (!this.liveState.response.indexed || this.liveState.response.stale)) {
-        this.renderEmpty(shell, "Connections need an update", "Update this note when you are ready.");
       } else {
         this.renderEmpty(shell, NO_MINDMAP_CONNECTIONS_TITLE, NO_MINDMAP_CONNECTIONS_MESSAGE);
       }
@@ -603,7 +601,7 @@ export class MindmapWorkspaceView extends ItemView {
     const generation = this.refreshController.invalidateNoteRequest();
     this.liveState = createLoadingLiveState(activeFile.path, this.liveState);
 
-    void this.plugin.queryLiveRelated(activeFile.path, false)
+    void this.plugin.queryLiveRelated(activeFile.path)
       .then((response) => {
         if (!this.refreshController.isCurrentNote(generation) || !shouldApplyLiveResponse(requestId, this.liveRequestId, this.activePath, activeFile.path)) {
           return;
@@ -648,26 +646,6 @@ export class MindmapWorkspaceView extends ItemView {
       status.createSpan({ text: hasPersisted ? "Live refresh failed. Showing saved connections." : "Live connections are unavailable." });
       return;
     }
-    const response = this.liveState.response;
-    if (!response || (response.indexed && !response.stale)) return;
-    const eligibility = this.plugin.getActiveNoteEligibility();
-    const eligible = eligibility.path === activePath && eligibility.eligible;
-    const status = container.createDiv({ cls: "mindmap-sidebar-status", attr: { role: "status" } });
-    status.createSpan({ text: eligible ? "This note's connections are out of date." : eligibility.reason });
-    const button = status.createEl("button", {
-      cls: "mod-cta mindmap-update-connections",
-      text: "Update connections",
-      attr: { type: "button", ...(eligible ? {} : { disabled: "true" }) },
-    });
-    button.addEventListener("click", () => {
-      button.disabled = true;
-      button.textContent = "Updating…";
-      void this.plugin.runActiveNote().finally(() => {
-        if (!button.isConnected) return;
-        button.disabled = false;
-        button.textContent = "Update connections";
-      });
-    });
   }
 
   private renderHeatmapDisclosure(container: HTMLElement, candidates: RelatedCandidate[]): void {

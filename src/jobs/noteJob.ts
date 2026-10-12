@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { CanonicalPath, MetadataOutputV1, NoteIdentityV1, RelatedCandidateV1, SourceProjectionV1 } from "../engine/contracts";
+import type { CanonicalPath, JobTrigger, MetadataOutputV1, NoteIdentityV1, RelatedCandidateV1, SourceProjectionV1 } from "../engine/contracts";
 import { EngineError, isEngineError } from "../engine/errors";
 import { MAX_EMBEDDING_DIMENSION } from "../engine/embeddingLimits";
 import type { NoteWriter } from "../engine/noteWriter";
@@ -81,7 +81,7 @@ export interface UpsertNoteOverlaySeam {
  * detected at more than one phase) safe.
  */
 export interface NoteReplacementSeam {
-  enqueueReplacement(input: { identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number; batchId?: string; batchItemId?: string }): Promise<void>;
+  enqueueReplacement(input: { identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number; batchId?: string; batchItemId?: string; trigger?: JobTrigger }): Promise<void>;
 }
 
 export interface NoteJobDeps {
@@ -100,6 +100,7 @@ export interface NoteJobDeps {
 }
 
 interface NoteJobMemory {
+  trigger?: JobTrigger;
   projection?: SourceProjectionV1;
   embedded?: EmbeddedNote;
   metadata?: MetadataOutputV1;
@@ -218,6 +219,7 @@ export class NoteJobRunner implements JobPhaseRunner {
     }
     const jobId = persisted.job.jobId;
     const memory = this.memoryFor(jobId);
+    memory.trigger = persisted.job.trigger;
     memory.batchId = persisted.job.batchId;
     memory.batchItemId = persisted.job.batchItemId;
     const pipelineVersion = persisted.job.pipelineVersion;
@@ -280,7 +282,7 @@ export class NoteJobRunner implements JobPhaseRunner {
     if (mem.replacementEnqueued) return undefined;
     try {
       const memory = this.memoryFor(jobId);
-      await this.deps.replacement.enqueueReplacement({ identity, sourceHash, embeddingModel, pipelineVersion, batchId: memory.batchId, batchItemId: memory.batchItemId });
+      await this.deps.replacement.enqueueReplacement({ identity, sourceHash, embeddingModel, pipelineVersion, batchId: memory.batchId, batchItemId: memory.batchItemId, trigger: memory.trigger });
     } catch (error) {
       return { type: "retry", failureCode: toFailureCode(error) };
     }
