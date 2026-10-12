@@ -13,25 +13,36 @@ export interface SidebarLiveState {
 
 export interface MindmapViewState {
   [key: string]: unknown;
-  heatmapOpen: boolean;
-  expandedByNote: Record<string, string | null>;
+  collapsedByNote: Record<string, string[]>;
 }
 
 export function normalizeMindmapViewState(value: unknown): MindmapViewState {
-  if (typeof value !== "object" || value === null) return { heatmapOpen: false, expandedByNote: {} };
+  if (typeof value !== "object" || value === null) return { collapsedByNote: {} };
   const record = value as Record<string, unknown>;
-  const entries = typeof record.expandedByNote === "object" && record.expandedByNote !== null
-    ? Object.entries(record.expandedByNote as Record<string, unknown>)
-      .filter((entry): entry is [string, string | null] => typeof entry[0] === "string" && (typeof entry[1] === "string" || entry[1] === null))
+  const entries = typeof record.collapsedByNote === "object" && record.collapsedByNote !== null
+    ? Object.entries(record.collapsedByNote as Record<string, unknown>)
+      .filter((entry): entry is [string, string[]] => typeof entry[0] === "string" && Array.isArray(entry[1]))
+      .map(([path, collapsed]) => [path, [...new Set(collapsed.filter((candidate): candidate is string => typeof candidate === "string"))]] as [string, string[]])
       .slice(-100)
     : [];
-  return { heatmapOpen: record.heatmapOpen === true, expandedByNote: Object.fromEntries(entries) };
+  // Legacy expandedByNote state represented a single-open accordion. Ignore
+  // it so upgrading makes every summary readable by default.
+  return { collapsedByNote: Object.fromEntries(entries) };
 }
 
-export function rememberExpandedPath(state: MindmapViewState, notePath: string, expandedPath: string | null): MindmapViewState {
-  const entries = Object.entries(state.expandedByNote).filter(([path]) => path !== notePath);
-  entries.push([notePath, expandedPath]);
-  return { ...state, expandedByNote: Object.fromEntries(entries.slice(-100)) };
+export function rememberCollapsedPaths(state: MindmapViewState, notePath: string, collapsedPaths: Iterable<string>): MindmapViewState {
+  const entries = Object.entries(state.collapsedByNote).filter(([path]) => path !== notePath);
+  entries.push([notePath, [...new Set(collapsedPaths)]]);
+  return { ...state, collapsedByNote: Object.fromEntries(entries.slice(-100)) };
+}
+
+export function toggleCollapsedPaths(current: ReadonlySet<string>, path: string, allPaths: readonly string[], toggleAll: boolean): Set<string> {
+  const next = new Set(current);
+  const collapsing = !next.has(path);
+  if (toggleAll) return collapsing ? new Set(allPaths) : new Set();
+  if (collapsing) next.add(path);
+  else next.delete(path);
+  return next;
 }
 
 export function getIndexRefreshTargets(activePath: string | null, lookupQuery: string): { live: boolean; lookup: boolean } {

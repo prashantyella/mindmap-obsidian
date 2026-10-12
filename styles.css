@@ -358,16 +358,8 @@
   padding: 8px 12px 12px;
 }
 
-.mindmap-heatmap-disclosure {
+.mindmap-sidebar-heatmap-region {
   border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.mindmap-heatmap-disclosure > summary {
-  padding: 9px 12px;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: var(--font-ui-smaller);
-  font-weight: 600;
 }
 
 .mindmap-lookup-search-icon {
@@ -552,13 +544,13 @@
   background: var(--background-modifier-hover);
 }
 
-.mindmap-sidebar-card.is-expanded {
+.mindmap-sidebar-card.is-selected {
   background: color-mix(in srgb, var(--interactive-accent) 13%, var(--background-secondary));
   outline: 1px solid color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
   outline-offset: -1px;
 }
 
-.mindmap-sidebar-card.is-expanded .mindmap-sidebar-title {
+.mindmap-sidebar-card.is-selected .mindmap-sidebar-title {
   color: color-mix(in srgb, var(--interactive-accent) 42%, var(--text-normal));
 }
 
@@ -601,10 +593,35 @@
   line-height: 1;
 }
 
+.mindmap-sidebar-collapse {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.mindmap-sidebar-collapse:hover {
+  border-color: var(--background-modifier-border);
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.mindmap-sidebar-collapse:focus-visible {
+  border-color: var(--background-modifier-border);
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
 .mindmap-sidebar-pin {
-  position: absolute;
-  top: 9px;
-  right: 48px;
   width: 26px;
   height: 26px;
   flex-basis: 26px;
