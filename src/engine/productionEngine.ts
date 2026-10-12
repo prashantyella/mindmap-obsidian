@@ -755,7 +755,7 @@ export class ProductionEngine {
       // migration reaches "complete") or by a caller-driven `recheckReadiness()` (once a degraded
       // provider recovers).
       await this.tryStartOrdinaryWork();
-      return report;
+      return this.lastPreflightReport ?? report;
     });
   }
 
@@ -903,6 +903,21 @@ export class ProductionEngine {
     }
     const sourceHash = projectSource(resolved.identity, resolved.rawContent).sourceHash;
     await this.jobEngine.submit({ trigger, kind: "process-note", identity: resolved.identity, sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion });
+  }
+
+  clearActiveNotePriority(): void { this.jobEngine.prioritizeJob(null); }
+
+  async prioritizeActiveNote(canonicalPath: string, signal: AbortSignal): Promise<void> {
+    if (signal.aborted || this.disposeRequested || !this.registeredRunners["process-note"] || !this.options.embeddingModel) return;
+    const canonical = canonicalizePath(canonicalPath);
+    const resolved = await this.noteSourceReader.read(stableNoteIdentity(canonical), signal);
+    if (!resolved || signal.aborted || this.disposeRequested) return;
+    if (!assessActiveNote(canonical, resolved.rawContent, { allScopeFolders: [...this.options.scopeFolders], minimumWords: this.options.minimumWords, configDir: this.options.configDir, runtimeFolder: this.options.runtimeFolder }).eligible) return;
+    const projection = projectSource(resolved.identity, resolved.rawContent);
+    const record = await this.indexStore.getRecord(resolved.identity, signal);
+    if (signal.aborted || this.disposeRequested) return;
+    if (record?.sourceHash === projection.sourceHash && (record.relatedVersion ?? 0) >= (this.relatedVersion ?? 0)) return;
+    await this.jobEngine.submit({ trigger: "scheduled", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion }, { prefer: () => !signal.aborted && !this.disposeRequested });
   }
 
   /**

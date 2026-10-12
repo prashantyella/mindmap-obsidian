@@ -82,6 +82,52 @@ function makeEngine(runners: Partial<Record<"process-note" | "rebuild-index" | "
   return { store, engine, clock };
 }
 
+void test("active-note priority waits for the current job, then precedes the background backlog", async () => {
+  const runner = new ScriptedRunner(linearAdvanceScript("process-note"));
+  const { engine, store } = makeEngine({ "process-note": runner });
+  const submit = (name: string) => engine.submit({ trigger: "scheduled", kind: "process-note", identity: noteIdentity(`Notes/${name}.md`), sourceHash: "a".repeat(64), embeddingModel: "m", pipelineVersion: 1 });
+  const a = await submit("A"); const b = await submit("B"); const c = await submit("C");
+  await engine.runOnce();
+  engine.prioritizeJob(c.job.jobId);
+  await engine.drain();
+  assert.deepEqual([...new Set(runner.calls.map((job) => job.job.jobId))], [a.job.jobId, c.job.jobId, b.job.jobId]);
+  assert.deepEqual((await store.list()).map((job) => job.job.jobId), [a.job.jobId, b.job.jobId, c.job.jobId], "priority does not alter the durable queue format/order");
+});
+
+void test("a new preferred version arriving mid-job still gives background work a fair turn", async () => {
+  const runner = new ScriptedRunner(linearAdvanceScript("process-note"));
+  const { engine } = makeEngine({ "process-note": runner });
+  const submit = (name: string, prefer = false) => engine.submit({ trigger: "scheduled", kind: "process-note", identity: noteIdentity(`Notes/${name}.md`), sourceHash: "a".repeat(64), embeddingModel: "m", pipelineVersion: 1 }, { prefer: () => prefer });
+  const a = await submit("A"); const b = await submit("B"); const c = await submit("C", true);
+  await engine.runOnce();
+  const snapshots: import("./jobActivity").EngineActivitySnapshot[] = [];
+  const unsubscribe = engine.subscribeActivity((snapshot) => snapshots.push(snapshot));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(snapshots[snapshots.length - 1].current?.path, "C.md", "activity must report the prioritized job, not the old queue head");
+  unsubscribe();
+  const d = await submit("D", true);
+  await engine.drain();
+  assert.deepEqual([...new Set(runner.calls.map((job) => job.job.jobId))], [c.job.jobId, a.job.jobId, d.job.jobId, b.job.jobId]);
+});
+
+void test("preferred work cannot bypass pause or editing deferral or starve background jobs", async () => {
+  let protectedNow = true;
+  let preferredId = "";
+  const linear = linearAdvanceScript("process-note");
+  const runner = new ScriptedRunner((job) => job.job.jobId === preferredId && protectedNow ? { type: "deferred" } : linear(job));
+  const { engine, store } = makeEngine({ "process-note": runner });
+  const background = await engine.submit({ trigger: "scheduled", kind: "process-note", identity: noteIdentity("Notes/A.md"), sourceHash: "a".repeat(64), embeddingModel: "m", pipelineVersion: 1 });
+  const preferred = await engine.submit({ trigger: "scheduled", kind: "process-note", identity: noteIdentity("Notes/B.md"), sourceHash: "b".repeat(64), embeddingModel: "m", pipelineVersion: 1 }, { prefer: () => true });
+  preferredId = preferred.job.jobId;
+  await engine.pauseProcessing(); await engine.drain();
+  assert.equal(runner.calls.length, 0);
+  await engine.resumeProcessing(); await engine.drain();
+  assert.equal((await store.getById(background.job.jobId))?.status, "completed");
+  assert.equal((await store.getById(preferredId))?.status, "queued");
+  protectedNow = false; engine.wake(); await engine.drain();
+  assert.equal((await store.getById(preferredId))?.status, "completed");
+});
+
 void test("bulk submission creates one atomic root/batch, rejects overlap, and adopts stable children", async () => {
   const { engine, store } = makeEngine({});
   const first = await engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "all", pipelineVersion: 1 });

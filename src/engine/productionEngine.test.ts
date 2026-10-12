@@ -757,6 +757,40 @@ void test("automatic sidebar refresh coalesces repeated requests and respects an
   await engine.dispose();
 });
 
+void test("active-note priority coalesces saved versions and does not bypass scope or cancellation", async () => {
+  const files = { "Notes/active.md": "A saved eligible note body.", "Archive/private.md": "An out of scope note body." };
+  const engine = new ProductionEngine(baseOptions({ fs: new FakeIndexFs(), vault: richFakeVault(files), vaultFileClasses: undefined, minimumWords: 1, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  await engine.pauseProcessing();
+  const cancelled = new AbortController(); cancelled.abort();
+  await engine.prioritizeActiveNote("Notes/active.md", cancelled.signal);
+  await engine.prioritizeActiveNote("Archive/private.md", new AbortController().signal);
+  assert.equal((await engine.jobStore.list()).length, 0);
+  await engine.prioritizeActiveNote("Notes/active.md", new AbortController().signal);
+  await engine.prioritizeActiveNote("Notes/active.md", new AbortController().signal);
+  const jobs = await engine.jobStore.list();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].job.trigger, "scheduled");
+  assert.equal(jobs[0].status, "queued");
+  assert.equal((await engine.jobStore.getOperatorPause()).active, true);
+  await engine.dispose();
+});
+
+void test("startup returns the latest readiness report when a model degrades during pump activation", async () => {
+  const fs = new FakeIndexFs();
+  const dataRoot = "/data";
+  await buildGeneration(fs, dataRoot, { generationId: 1, embeddingModel: "nomic-embed-text", dimension: 768, notes: [] }, {});
+  await switchCurrentGeneration(fs, dataRoot, 1);
+  await new MigrationStore(fs, dataRoot).setPhase("complete", "ALREADY_UP_TO_DATE", { discoveredCount: 0, processedCount: 0, failedCount: 0 }, new Date(0).toISOString(), { runId: "seed-run", desiredEmbeddingModel: "nomic-embed-text", desiredDimension: 768, desiredPipelineVersion: 1 });
+  const providers = readyProviders();
+  let calls = 0;
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, ...providers, embeddingDimension: 768, probes: { ...providers.probes, localMetadataProvider: async () => ({ status: ++calls === 1 ? "ok" : "unavailable", message: "Model readiness changed." }) } }));
+  const result = await engine.start();
+  assert.equal(result.checks.find((check) => check.code === "LOCAL_METADATA_PROVIDER")?.status, "unavailable");
+  assert.equal(result, engine.getLastPreflightReport());
+  await engine.dispose();
+});
+
 void test("automatic sidebar refresh never processes out-of-scope or too-short notes", async () => {
   const files = { "Archive/long.md": "enough eligible words ".repeat(20), "Notes/short.md": "Short." };
   const engine = new ProductionEngine(baseOptions({ fs: new FakeIndexFs(), vault: richFakeVault(files), vaultFileClasses: undefined, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);

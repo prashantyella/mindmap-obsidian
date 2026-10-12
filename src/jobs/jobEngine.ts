@@ -215,6 +215,17 @@ export class JobEngine {
   private readonly deferredJobIds = new Set<string>();
   private wakeGeneration = 0;
   private storeOperatorPaused = false;
+  private preferredJobId: string | null = null;
+  private continuingJobId: string | null = null;
+  private continuingWasPreferred = false;
+  private lastFinishedWasPreferred = false;
+
+  /** Ephemeral active-note preference; never bypasses pause, backoff, or editing deferral. */
+  prioritizeJob(jobId: string | null): void {
+    if (this.disposed) return;
+    this.preferredJobId = jobId;
+    this.kick();
+  }
 
   constructor(
     private readonly store: JobStore,
@@ -243,7 +254,7 @@ export class JobEngine {
 
   private async emitActivity(): Promise<void> {
     const revision = ++this.activityRevision;
-    const snapshot = deriveEngineActivity(await this.store.list(), await this.store.getBulkBatches(), await this.store.getProviderPause(), await this.store.getOperatorPause(), this.running || this.explicitDispatchCount > 0, this.disposed, this.fault?.code);
+    const snapshot = deriveEngineActivity(await this.store.list(), await this.store.getBulkBatches(), await this.store.getProviderPause(), await this.store.getOperatorPause(), this.running || this.explicitDispatchCount > 0, this.disposed, this.fault?.code, this.continuingJobId);
     snapshot.waitingForEditingCount = this.deferredJobIds.size;
     if (revision !== this.activityRevision) return;
     for (const listener of this.activityListeners) { try { listener(snapshot); } catch { /* isolated observer */ } }
@@ -307,7 +318,7 @@ export class JobEngine {
    * first trigger observed is kept as provenance on the resulting job;
    * later-coalesced submits' triggers are discarded.
    */
-  async submit(input: SubmitJobInput): Promise<PersistedJobV1> {
+  async submit(input: SubmitJobInput, options: { prefer?: () => boolean } = {}): Promise<PersistedJobV1> {
     if (this.disposed) {
       throw new EngineError("JOB_SHAPE_INVALID", "Cannot submit a job: JobEngine has been disposed.", {});
     }
@@ -335,6 +346,7 @@ export class JobEngine {
     };
     const persisted: PersistedJobV1 = { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false };
     const { job: result } = await this.store.appendOrCoalesce(persisted);
+    if (input.kind === "process-note" && options.prefer?.()) this.preferredJobId = result.job.jobId;
     this.kick();
     void this.emitActivity();
     return result;
@@ -570,14 +582,31 @@ export class JobEngine {
     const pause = await this.store.getProviderPause();
     this.storeOperatorPaused = (await this.store.getOperatorPause()).active;
     const now = this.clock.now();
-    const eligible = jobs.find((entry) => this.isEligibleNow(entry, pause, now));
+    const runnable = jobs.filter((entry) => this.isEligibleNow(entry, pause, now));
+    const continuing = runnable.find((entry) => entry.job.jobId === this.continuingJobId);
+    const preferred = runnable.find((entry) => entry.job.jobId === this.preferredJobId);
+    const background = runnable.find((entry) => entry.job.jobId !== this.preferredJobId);
+    const eligible = continuing ?? (this.lastFinishedWasPreferred && background ? background : preferred ?? runnable[0]);
     if (!eligible) return "idle";
     this.storeOperatorPaused = (await this.store.getOperatorPause()).active;
     if (this.storeOperatorPaused) { await this.emitActivity(); return "idle"; }
     // Discovery above awaits several store reads. Recheck the dispatch gate immediately before
     // changing durable job state or starting a runner phase so stop()/dispose() wins that race.
     if (!acceptsNewPhase()) return "idle";
+    const wasPreferred = continuing ? this.continuingWasPreferred : eligible.job.jobId === this.preferredJobId;
     await this.runPhaseStep(eligible);
+    const after = await this.store.getById(eligible.job.jobId);
+    if (after && this.isEligibleNow(after, pause, this.clock.now())) {
+      this.continuingJobId = eligible.job.jobId;
+      this.continuingWasPreferred = wasPreferred;
+    } else {
+      this.continuingJobId = null;
+      this.continuingWasPreferred = false;
+      if (after && isTerminalJobStatus(after.status)) {
+        this.lastFinishedWasPreferred = wasPreferred;
+        if (eligible.job.jobId === this.preferredJobId) this.preferredJobId = null;
+      }
+    }
     await this.emitActivity();
     return "processed";
   }

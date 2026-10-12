@@ -34,15 +34,15 @@ function reportInput(overrides: Partial<DiagnosticsReportInput> = {}): Diagnosti
 }
 
 void test("one-line diagnostics summary covers running/never-run/ready/failed without full detail", () => {
-  assert.equal(buildDiagnosticsOneLine({ inProgress: true, lastRunAt: null, result: null }), "Preflight is running.");
-  assert.equal(buildDiagnosticsOneLine({ inProgress: false, lastRunAt: null, result: null }), "Preflight has not run yet.");
+  assert.equal(buildDiagnosticsOneLine({ inProgress: true, lastRunAt: null, result: null }), "Checking local models and plugin setup…");
+  assert.equal(buildDiagnosticsOneLine({ inProgress: false, lastRunAt: null, result: null }), "Setup checks will run automatically when Mindmap starts.");
   assert.match(
     buildDiagnosticsOneLine({ inProgress: false, lastRunAt: 1755820800000, result: { ok: true, summary: "All checks passed.", checks: [], rawStdout: "", rawStderr: "", exitCode: 0 } }),
-    /^Ready as of/,
+    /^All checks passed\. Last checked/,
   );
   assert.equal(
     buildDiagnosticsOneLine({ inProgress: false, lastRunAt: null, result: { ok: false, summary: "Ollama is not reachable.", checks: [], rawStdout: "", rawStderr: "", exitCode: 1 } }),
-    "Not ready: Ollama is not reachable.",
+    "Ollama is not reachable.",
   );
 });
 

@@ -51,7 +51,7 @@ void test("retired runtime paths and Python setup never appear", () => {
 void test("provider Apply refreshes readiness in place and engine replacement replaces stale diagnostics", () => {
   assert.match(SOURCE, /this\.renderReadiness\(\)/);
   assert.match(SOURCE, /Configuration saved, but Local AI is not ready/);
-  assert.match(MAIN_SOURCE, /this\.diagnosticsState\.result = MindmapPlugin\.toPreflightResult\(report\)/);
+  assert.match(MAIN_SOURCE, /this\.diagnosticsState\.result = MindmapPlugin\.toPreflightResult\(report, this\.cachedMigrationStatus/);
 });
 
 void test("time and saved text failures restore the latest committed value, not the render-time value", () => {

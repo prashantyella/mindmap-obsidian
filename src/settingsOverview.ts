@@ -4,12 +4,15 @@ export interface OverviewInput {
   productionEngineAvailable: boolean;
   scopeComplete: boolean;
   preflightOk: boolean | null;
+  checking?: boolean;
+  summary?: string;
 }
 
 export interface OverviewState {
   ready: boolean;
   message: string;
   actions: OverviewAction[];
+  checking?: boolean;
 }
 
 /**
@@ -18,6 +21,7 @@ export interface OverviewState {
  * guidance/error string from scope or provider config resolution.
  */
 export function buildOverviewState(input: OverviewInput): OverviewState {
+  if (input.checking) return { ready: false, checking: true, message: "Checking local models, the connection index, and plugin setup automatically.", actions: ["openMindmap"] };
   if (!input.productionEngineAvailable) {
     return {
       ready: false,
@@ -42,10 +46,10 @@ export function buildOverviewState(input: OverviewInput): OverviewState {
   if (input.preflightOk === false) {
     return {
       ready: false,
-      message: "Preflight checks failed. Run checks to see details.",
+      message: input.summary ?? "Preflight checks failed. Run checks to see details.",
       actions: ["openMindmap", "runChecks"],
     };
   }
 
-  return { ready: true, message: "Ready.", actions: ["openMindmap"] };
+  return { ready: true, message: input.summary ?? "Ready.", actions: ["openMindmap"] };
 }

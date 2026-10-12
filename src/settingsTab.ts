@@ -15,6 +15,9 @@ export class MindmapSettingTab extends PluginSettingTab {
   private providerApplyButtonEl: HTMLButtonElement | null = null;
   private providerStatusEl: HTMLElement | null = null;
   private readinessEl: HTMLElement | null = null;
+  private unsubscribeDiagnostics: (() => void) | null = null;
+  private diagnosticsSummaryEl: HTMLElement | null = null;
+  private diagnosticsDescriptionEl: HTMLElement | null = null;
 
   constructor(app: MindmapPlugin["app"], private readonly plugin: MindmapPlugin) {
     super(app, plugin);
@@ -22,6 +25,7 @@ export class MindmapSettingTab extends PluginSettingTab {
   }
 
   display(): void {
+    this.unsubscribeDiagnostics?.();
     this.viewState.syncSavedSettings(this.plugin.settings);
     this.containerEl.empty();
     this.containerEl.addClass("mindmap-settings");
@@ -32,7 +36,14 @@ export class MindmapSettingTab extends PluginSettingTab {
     this.renderAutomation();
     this.renderIntegrations();
     this.renderAdvanced();
+    this.unsubscribeDiagnostics = this.plugin.subscribeDiagnostics(() => {
+      this.renderReadiness();
+      this.diagnosticsSummaryEl?.setText(this.plugin.getDiagnosticsOneLine());
+      this.diagnosticsDescriptionEl?.setText(this.plugin.getDiagnosticsOneLine());
+    });
   }
+
+  hide(): void { this.unsubscribeDiagnostics?.(); this.unsubscribeDiagnostics = null; }
 
   private createSection(key: SettingsSection, title: string, summary: string): HTMLElement {
     const details = this.containerEl.createEl("details", { cls: "mindmap-settings-section" });
@@ -40,7 +51,8 @@ export class MindmapSettingTab extends PluginSettingTab {
     const summaryEl = details.createEl("summary");
     const copy = summaryEl.createDiv({ cls: "mindmap-settings-section-copy" });
     copy.createEl("strong", { text: title });
-    copy.createSpan({ text: summary });
+    const description = copy.createSpan({ text: summary });
+    if (key === "advanced") this.diagnosticsSummaryEl = description;
     const action = summaryEl.createSpan({ cls: "mindmap-settings-edit", text: details.open ? "Done" : "Edit" });
     details.addEventListener("toggle", () => {
       this.viewState.disclosures[key] = details.open;
@@ -54,9 +66,9 @@ export class MindmapSettingTab extends PluginSettingTab {
     this.readinessEl.empty();
     const state = this.plugin.getOverviewState();
     const row = new Setting(this.readinessEl)
-      .setName(state.ready ? "Mindmap is ready" : "Setup needs attention")
+      .setName(state.checking ? "Checking setup" : state.ready ? "Mindmap is ready" : "Setup needs attention")
       .setDesc(state.message)
-      .setClass(`mindmap-readiness ${state.ready ? "mindmap-validation-ok" : "mindmap-validation-error"}`);
+      .setClass(state.checking ? "mindmap-readiness" : `mindmap-readiness ${state.ready ? "mindmap-validation-ok" : "mindmap-validation-error"}`);
     if (state.actions.includes("runChecks")) row.addButton((button) => button.setButtonText("Check setup").onClick(async () => {
       await this.plugin.runPreflight("manual");
       this.display();
@@ -260,6 +272,7 @@ export class MindmapSettingTab extends PluginSettingTab {
     this.providerNumber(body, "Embedding dimension", "0 uses the known-model default. Custom models may require an explicit value.", draft.embedDimension, 0, (value) => { draft.embedDimension = value; });
     this.providerNumber(body, "Maximum output tokens", "Caps metadata output, not note text sent to the local model.", draft.llmMaxTokens, DEFAULT_SETTINGS.llmMaxTokens, (value) => { draft.llmMaxTokens = value; });
     const diagnostics = new Setting(body).setName("Setup diagnostics").setDesc(this.plugin.getDiagnosticsOneLine());
+    this.diagnosticsDescriptionEl = diagnostics.descEl;
     diagnostics.addButton((button) => button.setButtonText("Check setup").onClick(async () => { await this.plugin.runPreflight("manual"); this.display(); }));
     diagnostics.addButton((button) => button.setButtonText("Copy diagnostics").onClick(async () => { await this.plugin.copyDiagnostics(); }));
     this.savedText(body, "Apple Books annotation database", "Leave blank to discover automatically.", this.plugin.settings.appleAnnotationDbPath, (value) => { this.plugin.settings.appleAnnotationDbPath = value; });

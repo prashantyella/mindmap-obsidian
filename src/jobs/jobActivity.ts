@@ -18,7 +18,7 @@ export interface EngineActivitySnapshot {
   latestFailureBatch?: { status: BulkBatchV1["status"]; failed: number };
 }
 
-export function deriveEngineActivity(jobs: readonly PersistedJobV1[], batches: readonly BulkBatchV1[], pause: ProviderPauseV1, operatorPause: { active: boolean; pausedAt?: string }, pumpEnabled: boolean, disposed: boolean, fault: string | undefined): EngineActivitySnapshot {
+export function deriveEngineActivity(jobs: readonly PersistedJobV1[], batches: readonly BulkBatchV1[], pause: ProviderPauseV1, operatorPause: { active: boolean; pausedAt?: string }, pumpEnabled: boolean, disposed: boolean, fault: string | undefined, continuingJobId?: string | null): EngineActivitySnapshot {
   const active = jobs.find((job) => job.status === "active");
   const queued = jobs.filter((job) => job.status === "queued");
   const batch = batches.find((entry) => entry.status === "active");
@@ -34,8 +34,8 @@ export function deriveEngineActivity(jobs: readonly PersistedJobV1[], batches: r
     const skipped = !preparing && enqueuedCount !== undefined && batch.discoveredTotal !== undefined ? batch.discoveredTotal - enqueuedCount : 0;
     activityBatch = { status: batch.status, preparing, processed: skipped + terminalChildren, total: batch.discoveredTotal, failed: batch.items.filter((item) => item.status === "failed" || item.status === "cancelled").length, enqueuedCount };
   }
-  const current = active ?? queued[0];
-  const path = current?.job.target.kind === "note" && current.job.target.identity.kind === "path" ? current.job.target.identity.canonicalPath.split("/").pop() : undefined;
+  const current = active ?? queued.find((job) => job.job.jobId === continuingJobId) ?? queued[0];
+  const path = current?.job.target.kind === "note" ? current.job.target.identity.canonicalPath.split("/").pop() : undefined;
   const processNoteCount = jobs.filter((job) => job.job.kind === "process-note" && (job.status === "queued" || job.status === "active")).length;
   return { state: fault ? "faulted" : operatorPause.active ? "operator-paused" : pause.active ? "paused" : disposed || !pumpEnabled ? "stopped" : active || queued.length || batch ? "running" : "idle", queuedCount: queued.length, activeCount: active ? 1 : 0, processNoteCount, bulkBlocked: batch !== undefined || jobs.some((job) => (job.job.kind === "scope-refresh" || job.job.kind === "rebuild-index") && (job.status === "queued" || job.status === "active")), current: current ? { kind: current.job.kind, phase: current.job.phase, path, attempt: current.attempt } : undefined, providerPause: pause.code, operatorPause: operatorPause.active, fault, batch: activityBatch, latestFailureBatch: terminal ? { status: terminal.status, failed: terminal.items.filter((item) => item.status === "failed" || item.status === "cancelled").length } : undefined };
 }

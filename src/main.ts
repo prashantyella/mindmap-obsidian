@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
-import { FileSystemAdapter, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { FileSystemAdapter, MarkdownView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf } from "obsidian";
+import { ActiveNotePriority } from "./activeNotePriority";
+import { presentPreflight } from "./preflightPresentation";
 
-import { formatPreflightNotice, type PreflightResult } from "./diagnostics";
+import type { PreflightResult } from "./diagnostics";
 import { listVaultFolderOptions, type ScopeSelection, type VaultFolderOption } from "./onboarding";
 import { createProductionPendingScanService, ProductionPendingScanService } from "./engine/productionPendingScan";
 import type { PendingSnapshot } from "./pendingScan";
@@ -222,6 +224,12 @@ export default class MindmapPlugin extends Plugin {
     lastRunAt: null,
     result: null,
   };
+  private readonly diagnosticsListeners = new Set<() => void>();
+  private activeNotePriority: ActiveNotePriority | null = null;
+  private preflightPromise: Promise<PreflightResult> | null = null;
+  private preflightEngine: ProductionEngine | null = null;
+  private preflightRetryTimer: number | null = null;
+  private preflightRetryDelay = 5_000;
 
   /**
    * Checkpoint 11: the ONE production, write-capable TypeScript engine this
@@ -249,6 +257,26 @@ export default class MindmapPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    this.diagnosticsState.inProgress = true;
+    this.activeNotePriority = new ActiveNotePriority({
+      clear: () => this.productionEngine?.clearActiveNotePriority(),
+      isSaved: (notePath) => {
+        const file = this.app.workspace.getActiveFile();
+        if (file?.path !== notePath) return false;
+        return this.app.workspace.getLeavesOfType("markdown").every((leaf) => {
+          const view = leaf.view;
+          return !(view instanceof MarkdownView) || view.file?.path !== notePath || !view.editor || view.getMode() === "preview" || view.editor.getValue() === view.data;
+        });
+      },
+      prioritize: async (notePath, signal) => { await this.productionEngine?.prioritizeActiveNote(notePath, signal); },
+    }, { setTimeout: (callback, ms) => window.setTimeout(callback, ms), clearTimeout: (handle) => window.clearTimeout(handle as number) });
+    const selectActiveNote = (): void => { this.activeNotePriority?.select(this.app.workspace.getActiveFile()?.path ?? null); };
+    this.registerEvent(this.app.workspace.on("file-open", selectActiveNote));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", selectActiveNote));
+    this.registerEvent(this.app.workspace.on("editor-change", (_editor, info) => {
+      if (info.file?.path === this.app.workspace.getActiveFile()?.path) this.activeNotePriority?.edited(info.file?.path ?? null);
+    }));
+    selectActiveNote();
 
     this.statusBarEl = this.addStatusBarItem();
     configureStatusBarElement(this.statusBarEl, (event) => this.openStatusMenu(event));
@@ -294,11 +322,21 @@ export default class MindmapPlugin extends Plugin {
   }
 
   private async onLayoutReadyDeferred(): Promise<void> {
-    await this.retireLegacyLaunchAgents();
-    await this.refreshAutomaticResearchPolicyStatus();
-    await this.migrateLegacyConfigOnce();
-    await this.startProductionEngine();
-    void this.runPreflight("startup").then(() => this.updateStatusBar());
+    this.diagnosticsState.inProgress = true;
+    this.notifyDiagnostics();
+    try {
+      await this.retireLegacyLaunchAgents();
+      await this.refreshAutomaticResearchPolicyStatus();
+      await this.migrateLegacyConfigOnce();
+      await this.startProductionEngine();
+      if (!this.diagnosticsState.result) await this.runPreflight("startup");
+    } catch {
+      this.diagnosticsState.result = this.preflightFailure();
+      this.diagnosticsState.lastRunAt = Date.now();
+    } finally {
+      this.diagnosticsState.inProgress = false;
+      if (!this.unloaded) { this.notifyDiagnostics(); this.schedulePreflightRetry(); }
+    }
     void this.pendingScanService?.warm().then(() => this.updateStatusBar());
     if (this.settings.readingMode === "reading") {
       void this.readingModeController?.start();
@@ -307,6 +345,10 @@ export default class MindmapPlugin extends Plugin {
 
   onunload(): void {
     this.unloaded = true;
+    this.activeNotePriority?.close();
+    if (this.preflightRetryTimer !== null) window.clearTimeout(this.preflightRetryTimer);
+    this.preflightRetryTimer = null;
+    this.diagnosticsListeners.clear();
     void this.startingEngine?.dispose();
     void this.retiringEngine?.dispose();
     this.unsubscribeIndexChanges?.();
@@ -1120,6 +1162,8 @@ export default class MindmapPlugin extends Plugin {
       productionEngineAvailable: this.productionEngine !== null,
       scopeComplete: scope.complete,
       preflightOk: this.diagnosticsState.result?.ok ?? null,
+      checking: this.diagnosticsState.inProgress,
+      summary: this.diagnosticsState.result?.summary,
     });
   }
 
@@ -1177,7 +1221,7 @@ export default class MindmapPlugin extends Plugin {
   showStatusSummary(): void {
     const state = buildMindmapStatusBarState(this, this.getStatusBarInternalState());
     new Notice(buildStatusSummary({
-      ready: this.productionEngine !== null && state.scopeReady && state.preflightOk !== false,
+      ready: this.productionEngine !== null && state.scopeReady && state.preflightOk === true && !state.preflightInProgress,
       pendingAvailable: state.pendingAvailable,
       currentPending: state.currentPending,
       allPending: state.allPending,
@@ -1213,23 +1257,42 @@ export default class MindmapPlugin extends Plugin {
    * `rawStdout`/`rawStderr` stay empty and `exitCode` is derived from
    * `summary.runtimeReady`), never a behavior change to the UI itself.
    */
-  private static toPreflightResult(report: PreflightReportV1): PreflightResult {
-    const ok = report.summary.runtimeReady;
-    return {
-      ok,
-      summary: `TypeScript engine preflight: ${report.summary.overallStatus} (${report.summary.requiredOkCount}/${report.summary.requiredCount} required, ${report.summary.optionalOkCount}/${report.summary.optionalCount} optional ok).`,
-      checks: report.checks.map((check) => ({
-        code: check.code,
-        label: check.code,
-        status: check.status === "ok" ? "ok" : "error",
-        message: check.message,
-        guidance: check.guidance,
-        context: check.context,
-      })),
-      rawStdout: "",
-      rawStderr: "",
-      exitCode: ok ? 0 : 1,
-    };
+  private static toPreflightResult(report: PreflightReportV1, migrationReady = true): PreflightResult {
+    return presentPreflight(report, migrationReady);
+  }
+
+  subscribeDiagnostics(listener: () => void): () => void {
+    this.diagnosticsListeners.add(listener);
+    return () => this.diagnosticsListeners.delete(listener);
+  }
+
+  private notifyDiagnostics(): void {
+    for (const listener of this.diagnosticsListeners) {
+      try { listener(); } catch { /* A closed settings view cannot interrupt startup. */ }
+    }
+    this.updateStatusBar();
+  }
+
+  private preflightFailure(): PreflightResult {
+    return { ok: false, summary: "Setup checks could not finish. Check Local AI settings and try Check setup again.", checks: [], rawStdout: "", rawStderr: "", exitCode: 1 };
+  }
+
+  private schedulePreflightRetry(): void {
+    const result = this.diagnosticsState.result;
+    if (result?.ok) {
+      if (this.preflightRetryTimer !== null) window.clearTimeout(this.preflightRetryTimer);
+      this.preflightRetryTimer = null;
+      this.preflightRetryDelay = 5_000;
+      return;
+    }
+    if (this.preflightRetryTimer !== null) return;
+    if (this.unloaded || !this.productionEngine || !this.settings.embedModel.trim() || !this.settings.llmModel.trim()) return;
+    if (!result?.checks.some((check) => ["OLLAMA_EMBEDDINGS", "LOCAL_METADATA_PROVIDER"].includes(check.code) && check.status === "error")) return;
+    this.preflightRetryTimer = window.setTimeout(() => {
+      this.preflightRetryTimer = null;
+      void this.runPreflight("startup");
+    }, this.preflightRetryDelay);
+    this.preflightRetryDelay = Math.min(this.preflightRetryDelay * 2, 60_000);
   }
 
   /**
@@ -1243,24 +1306,38 @@ export default class MindmapPlugin extends Plugin {
    */
   private async runProductionPreflight(trigger: "manual" | "startup", engine: ProductionEngine): Promise<PreflightResult> {
     this.diagnosticsState.inProgress = true;
-    this.updateStatusBar();
-    const report = await engine.recheckReadiness();
-    const result = MindmapPlugin.toPreflightResult(report);
-    this.diagnosticsState.inProgress = false;
+    this.notifyDiagnostics();
+    let result: PreflightResult;
+    try {
+      const report = await engine.recheckReadiness();
+      await this.refreshCachedMigrationStatus();
+      result = MindmapPlugin.toPreflightResult(report, this.cachedMigrationStatus?.phase === "complete");
+    } catch {
+      result = this.preflightFailure();
+    } finally {
+      if (engine === this.productionEngine && !this.unloaded) this.diagnosticsState.inProgress = false;
+    }
+    if (engine !== this.productionEngine || this.unloaded) return result;
     this.diagnosticsState.result = result;
     this.diagnosticsState.lastRunAt = Date.now();
     this.appendLog(`[preflight] ${result.summary}`);
-    this.updateStatusBar();
-    if (trigger === "manual" || !result.ok) {
-      new Notice(formatPreflightNotice(result), 12000);
-    }
+    this.notifyDiagnostics();
+    this.schedulePreflightRetry();
+    if (trigger === "manual") new Notice(result.summary, 12000);
     return result;
   }
 
   /** Checkpoint 11: `ProductionEngine` is mandatory on this desktop-only plugin -- there is no Python subprocess fallback anymore. An unavailable engine (construction failure, or the desktop filesystem adapter itself missing) fails closed with one fixed result, never a spawn. */
   async runPreflight(trigger: "manual" | "startup"): Promise<PreflightResult> {
     if (this.productionEngine) {
-      return await this.runProductionPreflight(trigger, this.productionEngine);
+      const engine = this.productionEngine;
+      if (this.preflightPromise && this.preflightEngine === engine) return this.preflightPromise;
+      this.preflightEngine = engine;
+      const promise = this.runProductionPreflight(trigger, engine);
+      this.preflightPromise = promise;
+      try { return await promise; } finally {
+        if (this.preflightPromise === promise) { this.preflightPromise = null; this.preflightEngine = null; }
+      }
     }
     const summary = "The Mindmap TypeScript engine is not available for this vault. Preflight is unavailable.";
     const result: PreflightResult = {
@@ -1285,7 +1362,7 @@ export default class MindmapPlugin extends Plugin {
     if (trigger === "manual") {
       new Notice(summary, 10000);
     }
-    this.updateStatusBar();
+    this.notifyDiagnostics();
     return result;
   }
 
@@ -2045,7 +2122,9 @@ export default class MindmapPlugin extends Plugin {
         this.appendLog(`[production-engine] ${fault.source} fault: ${fault.code}`);
       },
       onMigrationComplete: () => {
-        void this.refreshCachedMigrationStatus();
+        void this.refreshCachedMigrationStatus().then(() => {
+          if (this.productionEngine && !this.diagnosticsState.inProgress) void this.runPreflight("startup");
+        });
         this.invalidateLiveMindmapViews();
       },
       importAppleBooks: this.readingStateStore ? async (payload) => {
@@ -2079,6 +2158,20 @@ export default class MindmapPlugin extends Plugin {
    * as "quietly running Python again."
    */
   private async startProductionEngine(throwOnFailure = false, settings: MindmapSettings = this.settings): Promise<void> {
+    if (this.unloaded) return;
+    if (this.preflightRetryTimer !== null) window.clearTimeout(this.preflightRetryTimer);
+    this.preflightRetryTimer = null;
+    this.preflightRetryDelay = 5_000;
+    this.diagnosticsState.inProgress = true;
+    this.notifyDiagnostics();
+    try { await this.activateProductionEngine(throwOnFailure, settings); }
+    finally {
+      this.diagnosticsState.inProgress = false;
+      if (!this.unloaded) { this.notifyDiagnostics(); this.schedulePreflightRetry(); }
+    }
+  }
+
+  private async activateProductionEngine(throwOnFailure = false, settings: MindmapSettings = this.settings): Promise<void> {
     if (this.unloaded) return;
     const previousEngine = this.productionEngine ?? this.retiringEngine;
     const rollbackSettings = this.lastAppliedSettings ? cloneSettings(this.lastAppliedSettings) : null;
@@ -2129,6 +2222,9 @@ export default class MindmapPlugin extends Plugin {
     const activatedSettings = replacement.recovered && rollbackSettings ? rollbackSettings : settings;
     this.productionEngine = candidate;
     this.bindIndexChanges(candidate);
+    await this.refreshCachedMigrationStatus();
+    this.activeNotePriority?.select(this.app.workspace.getActiveFile()?.path ?? null);
+    this.activeNotePriority?.edited(this.app.workspace.getActiveFile()?.path ?? null);
     if (candidate) {
       this.unsubscribeActivity = candidate.subscribeActivity((snapshot) => {
         if (this.productionEngine !== candidate) return;
@@ -2151,7 +2247,7 @@ export default class MindmapPlugin extends Plugin {
       this.diagnosticsState.lastRunAt = Date.now();
     } else if (replacement.startResult) {
       const report = replacement.startResult as PreflightReportV1;
-      this.diagnosticsState.result = MindmapPlugin.toPreflightResult(report);
+      this.diagnosticsState.result = MindmapPlugin.toPreflightResult(report, this.cachedMigrationStatus?.phase === "complete");
       this.diagnosticsState.lastRunAt = Date.now();
     }
     await this.refreshCachedMigrationStatus();
