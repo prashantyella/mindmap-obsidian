@@ -16,7 +16,8 @@ import {
   shouldSkipLiveQuery,
   type SidebarLiveState,
   normalizeMindmapViewState,
-  rememberExpandedPath,
+  rememberCollapsedPaths,
+  toggleCollapsedPaths,
   type MindmapViewState,
 } from "./workspaceViewState";
 import { SidebarRefreshController } from "./sidebarRefreshController";
@@ -210,7 +211,8 @@ function formatScoreDetail(candidate: RelatedCandidate): string | null {
 
 export class MindmapWorkspaceView extends ItemView {
   private activePath: string | null = null;
-  private expandedPath: string | null | undefined = undefined;
+  private selectedPath: string | null | undefined = undefined;
+  private collapsedPaths = new Set<string>();
   private liveRequestId = 0;
   private lookupRequestId = 0;
   private lookupLoadingRequestId = 0;
@@ -220,7 +222,6 @@ export class MindmapWorkspaceView extends ItemView {
   private lookupForeground = false;
   private pendingVisualRefresh = false;
   private feedbackKey: string | null = null;
-  private heatmapDisclosureEl: HTMLDetailsElement | null = null;
   private heatmapEl: HTMLElement | null = null;
   private heatmapSvgEl: SVGSVGElement | null = null;
   private heatmapTooltipEl: HTMLElement | null = null;
@@ -235,7 +236,7 @@ export class MindmapWorkspaceView extends ItemView {
   private liveRegionEl: HTMLElement | null = null;
   private retainedListEl: HTMLElement | null = null;
   private readonly renderedCandidates = new Map<string, RelatedCandidate>();
-  private viewState: MindmapViewState = { heatmapOpen: false, expandedByNote: {} };
+  private viewState: MindmapViewState = { collapsedByNote: {} };
   private readonly refreshController = new SidebarRefreshController({
     runLookup: () => this.runLookupQuery(),
     refreshNote: () => this.refreshActiveNoteQuery(),
@@ -297,6 +298,7 @@ export class MindmapWorkspaceView extends ItemView {
 
   async setState(state: unknown): Promise<void> {
     this.viewState = normalizeMindmapViewState(state);
+    if (this.activePath) this.collapsedPaths = new Set(this.viewState.collapsedByNote[this.activePath] ?? []);
     this.render();
   }
 
@@ -351,12 +353,15 @@ export class MindmapWorkspaceView extends ItemView {
     const shell = this.feedbackEl ?? content;
 
     if (activeFile === null) {
+      if (this.activePath !== null) {
+        this.selectedPath = undefined;
+        this.collapsedPaths = new Set();
+      }
       if (this.heatmapRegionEl) this.heatmapRegionEl.hidden = true;
       this.refreshController.resetTyping();
       this.activePath = null;
       this.loadingController?.update(this.getLoadingRequest());
       this.refreshController.invalidateNoteRequest();
-      this.expandedPath = undefined;
       if (this.retainedListEl) this.retainedListEl.hidden = true;
       if (this.hasLookupQuery()) {
         const candidates = this.getLookupCandidates(null);
@@ -368,7 +373,7 @@ export class MindmapWorkspaceView extends ItemView {
         const list = this.ensureResultList(shell);
         const ordered = this.stabilizeCandidates(candidates, list);
         for (const candidate of ordered) {
-          this.renderCandidate(list, candidate, false);
+          this.renderCandidate(list, candidate, !this.collapsedPaths.has(candidate.path));
         }
         this.removeUnusedRows(list, new Set(candidates.map((candidate) => candidate.path)));
         this.reconcileRowOrder(list, ordered.map((candidate) => candidate.path));
@@ -383,7 +388,8 @@ export class MindmapWorkspaceView extends ItemView {
       this.refreshController.resetTyping();
       this.activePath = activeFile.path;
       this.refreshController.invalidateNoteRequest();
-      this.expandedPath = this.viewState.expandedByNote[activeFile.path];
+      this.selectedPath = undefined;
+      this.collapsedPaths = new Set(this.viewState.collapsedByNote[activeFile.path] ?? []);
       this.pinRevealPath = null;
       this.liveState = createIdleLiveState(activeFile.path);
     }
@@ -395,8 +401,8 @@ export class MindmapWorkspaceView extends ItemView {
     const candidates = this.hasLookupQuery()
       ? this.getLookupCandidates(activeFile)
       : this.getDisplayCandidates(activeFile, persistedCandidates);
-    if (candidates.length > 0 && this.expandedPath === undefined) {
-      this.expandedPath = candidates[0].path;
+    if (candidates.length > 0 && this.selectedPath === undefined) {
+      this.selectedPath = candidates[0].path;
     }
 
     if (candidates.length === 0) {
@@ -419,7 +425,7 @@ export class MindmapWorkspaceView extends ItemView {
     else this.resetFeedback("none");
     if (!this.hasLookupQuery()) {
       if (this.heatmapRegionEl) this.heatmapRegionEl.hidden = false;
-      this.renderHeatmapDisclosure(this.heatmapRegionEl ?? shell, candidates);
+      this.renderHeatmap(this.heatmapRegionEl ?? shell, candidates);
     } else if (this.heatmapRegionEl) {
       this.heatmapRegionEl.hidden = true;
     }
@@ -427,7 +433,7 @@ export class MindmapWorkspaceView extends ItemView {
     const list = this.ensureResultList(shell);
     const ordered = this.stabilizeCandidates(candidates, list);
     for (const candidate of ordered) {
-      this.renderCandidate(list, candidate, candidate.path === this.expandedPath);
+      this.renderCandidate(list, candidate, !this.collapsedPaths.has(candidate.path));
     }
     this.removeUnusedRows(list, new Set(candidates.map((candidate) => candidate.path)));
     this.reconcileRowOrder(list, ordered.map((candidate) => candidate.path));
@@ -701,17 +707,6 @@ export class MindmapWorkspaceView extends ItemView {
     this.resetFeedback("none");
   }
 
-  private renderHeatmapDisclosure(container: HTMLElement, candidates: RelatedCandidate[]): void {
-    const disclosure = this.heatmapDisclosureEl ?? container.createEl("details", { cls: "mindmap-heatmap-disclosure" });
-    if (!this.heatmapDisclosureEl) {
-      this.heatmapDisclosureEl = disclosure;
-      disclosure.createEl("summary", { text: "Connection graph" });
-      disclosure.addEventListener("toggle", () => { this.viewState = { ...this.viewState, heatmapOpen: disclosure.open }; });
-    }
-    disclosure.open = this.viewState.heatmapOpen;
-    this.renderHeatmap(disclosure, candidates);
-  }
-
   private renderHeatmap(container: HTMLElement, candidates: RelatedCandidate[]): void {
     const heatmap = this.heatmapEl ?? container.createDiv({ cls: "mindmap-heatmap" });
     this.heatmapEl = heatmap;
@@ -803,17 +798,15 @@ export class MindmapWorkspaceView extends ItemView {
         "aria-label": `Select ${candidate.title}`,
       });
       const marker = markerResult.node;
-      marker.toggleClass("is-selected", candidate.path === this.expandedPath);
+      marker.toggleClass("is-selected", candidate.path === this.selectedPath);
       if (markerResult.created) {
         marker.addEventListener("click", () => {
-          this.expandedPath = candidate.path;
-          this.render();
+          this.selectCandidateFromGraph(candidate.path);
         });
         marker.addEventListener("keydown", (event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            this.expandedPath = candidate.path;
-            this.render();
+            this.selectCandidateFromGraph(candidate.path);
           }
         });
         bindTooltip(marker, candidate.path);
@@ -840,15 +833,14 @@ export class MindmapWorkspaceView extends ItemView {
         }), {
           cx: String(x),
           cy: String(yFor(metric.level)),
-          r: candidate.path === this.expandedPath ? "2.6" : "2",
+          r: candidate.path === this.selectedPath ? "2.6" : "2",
         });
         const point = pointResult.node;
         point.addClass(`is-${metric.key}`);
-        point.toggleClass("is-selected", candidate.path === this.expandedPath);
+        point.toggleClass("is-selected", candidate.path === this.selectedPath);
         if (pointResult.created) {
           point.addEventListener("click", () => {
-            this.expandedPath = candidate.path;
-            this.render();
+            this.selectCandidateFromGraph(candidate.path);
           });
           bindTooltip(point, candidate.path);
         }
@@ -860,6 +852,13 @@ export class MindmapWorkspaceView extends ItemView {
       find: () => null,
       insertBefore: (node, before) => { svg.insertBefore(node, before); },
     });
+  }
+
+  private selectCandidateFromGraph(path: string): void {
+    this.selectedPath = path;
+    this.render();
+    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(path) : path.replace(/["\\]/g, "\\$&");
+    this.resultsEl?.querySelector<HTMLElement>(`[data-path="${escaped}"]`)?.focus({ preventScroll: true });
   }
 
   private ensureResultList(container: HTMLElement): HTMLElement {
@@ -916,16 +915,17 @@ export class MindmapWorkspaceView extends ItemView {
       const top = body.createDiv({ cls: "mindmap-sidebar-card-top" });
       const titleWrap = top.createDiv({ cls: "mindmap-sidebar-title-wrap" });
       titleWrap.createEl("a", { cls: "mindmap-sidebar-title internal-link" });
-      top.createDiv({ cls: "mindmap-sidebar-meta" });
+      const meta = top.createDiv({ cls: "mindmap-sidebar-meta" });
+      meta.createSpan({ cls: "mindmap-sidebar-score" });
+      const collapse = meta.createEl("button", { cls: "mindmap-sidebar-collapse", attr: { type: "button" } });
 
-      const toggle = (): void => {
+      const select = (): void => {
         const path = row!.dataset.path!;
-        this.expandedPath = this.expandedPath === path ? null : path;
-        if (this.activePath) this.viewState = rememberExpandedPath(this.viewState, this.activePath, this.expandedPath);
+        this.selectedPath = path;
         this.pinRevealPath = null;
         this.render();
       };
-      row.addEventListener("click", (event) => { if (!(event.target instanceof HTMLButtonElement) && !(event.target instanceof HTMLAnchorElement)) toggle(); });
+      row.addEventListener("click", (event) => { if (!(event.target instanceof HTMLButtonElement) && !(event.target instanceof HTMLAnchorElement)) select(); });
       row.addEventListener("contextmenu", (event) => { event.preventDefault(); this.pinRevealPath = this.pinRevealPath === row!.dataset.path ? null : row!.dataset.path!; this.render(); });
       row.addEventListener("keydown", (event) => {
         if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
@@ -934,8 +934,16 @@ export class MindmapWorkspaceView extends ItemView {
           this.render();
         } else if ((event.key === "Enter" || event.key === " ") && event.target === row) {
           event.preventDefault();
-          toggle();
+          select();
         }
+      });
+      collapse.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const path = row!.dataset.path!;
+        this.collapsedPaths = toggleCollapsedPaths(this.collapsedPaths, path, [...this.renderedCandidates.keys()], event.altKey);
+        if (this.activePath) this.viewState = rememberCollapsedPaths(this.viewState, this.activePath, this.collapsedPaths);
+        this.render();
       });
       pin.addEventListener("click", (event) => {
         event.preventDefault();
@@ -959,6 +967,7 @@ export class MindmapWorkspaceView extends ItemView {
       });
     }
 
+    row.toggleClass("is-selected", candidate.path === this.selectedPath);
     row.toggleClass("is-expanded", expanded);
     row.toggleClass("is-pin-revealed", this.pinRevealPath === candidate.path);
     row.setAttribute("aria-expanded", String(expanded));
@@ -982,6 +991,11 @@ export class MindmapWorkspaceView extends ItemView {
     let scoreEl = meta.querySelector<HTMLElement>(".mindmap-sidebar-score");
     if (score && !scoreEl) scoreEl = meta.createSpan({ cls: "mindmap-sidebar-score" });
     if (scoreEl) { scoreEl.textContent = score; scoreEl.hidden = !score; if (score) scoreEl.setAttribute("aria-label", `${score} similarity`); }
+    const collapse = row.querySelector<HTMLButtonElement>(".mindmap-sidebar-collapse")!;
+    collapse.empty();
+    setIcon(collapse, expanded ? "chevron-up" : "chevron-down");
+    collapse.setAttribute("aria-label", `${expanded ? "Collapse" : "Expand"} ${candidate.title}`);
+    collapse.setAttribute("aria-expanded", String(expanded));
     const body = row.querySelector<HTMLElement>(".mindmap-sidebar-card-body")!;
     let detail = body.querySelector<HTMLElement>(".mindmap-sidebar-detail");
     if (expanded) {

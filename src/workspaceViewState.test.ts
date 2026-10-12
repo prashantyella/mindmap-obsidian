@@ -13,9 +13,10 @@ import {
   getIndexRefreshTargets,
   NO_MINDMAP_CONNECTIONS_MESSAGE,
   normalizeMindmapViewState,
-  rememberExpandedPath,
+  rememberCollapsedPaths,
   shouldApplyLiveResponse,
   shouldSkipLiveQuery,
+  toggleCollapsedPaths,
   type SidebarLiveState,
 } from "./workspaceViewState";
 
@@ -25,13 +26,38 @@ void test("any committed index revision refreshes both active-note and current l
   assert.deepEqual(getIndexRefreshTargets(null, "semantic question"), { live: false, lookup: true });
 });
 
-void test("view state restores heatmap and bounds per-note expansion to 100 entries", () => {
-  let state = normalizeMindmapViewState({ heatmapOpen: true, expandedByNote: {} });
-  for (let index = 0; index < 105; index += 1) state = rememberExpandedPath(state, `Note-${index}.md`, `Related-${index}.md`);
-  assert.equal(state.heatmapOpen, true);
-  assert.equal(Object.keys(state.expandedByNote).length, 100);
-  assert.equal(state.expandedByNote["Note-0.md"], undefined);
-  assert.equal(state.expandedByNote["Note-104.md"], "Related-104.md");
+void test("view state bounds per-note disclosure choices to 100 entries", () => {
+  let state = normalizeMindmapViewState({ collapsedByNote: {} });
+  for (let index = 0; index < 105; index += 1) state = rememberCollapsedPaths(state, `Note-${index}.md`, [`Related-${index}.md`]);
+  assert.equal(Object.keys(state.collapsedByNote).length, 100);
+  assert.equal(state.collapsedByNote["Note-0.md"], undefined);
+  assert.deepEqual(state.collapsedByNote["Note-104.md"], ["Related-104.md"]);
+});
+
+void test("old single-expanded state migrates to all summaries expanded", () => {
+  const migrated = normalizeMindmapViewState({ heatmapOpen: false, expandedByNote: { "Note.md": null, "Other.md": "Related.md" } });
+  assert.deepEqual(migrated.collapsedByNote, {});
+});
+
+void test("summary disclosures toggle independently and Alt toggles all toward the clicked target state", () => {
+  let collapsed = toggleCollapsedPaths(new Set(), "One.md", ["One.md", "Two.md"], false);
+  assert.deepEqual([...collapsed], ["One.md"]);
+  collapsed = toggleCollapsedPaths(collapsed, "Two.md", ["One.md", "Two.md"], false);
+  assert.deepEqual([...collapsed], ["One.md", "Two.md"]);
+  collapsed = toggleCollapsedPaths(collapsed, "One.md", ["One.md", "Two.md"], false);
+  assert.deepEqual([...collapsed], ["Two.md"]);
+
+  collapsed = toggleCollapsedPaths(new Set(), "One.md", ["One.md", "Two.md"], true);
+  assert.deepEqual([...collapsed], ["One.md", "Two.md"]);
+  collapsed = toggleCollapsedPaths(collapsed, "One.md", ["One.md", "Two.md"], true);
+  assert.deepEqual([...collapsed], []);
+});
+
+void test("per-note disclosure choices survive state round-trips while new notes remain expanded", () => {
+  const saved = rememberCollapsedPaths(normalizeMindmapViewState(undefined), "One.md", ["Related.md"]);
+  const restored = normalizeMindmapViewState(JSON.parse(JSON.stringify(saved)));
+  assert.deepEqual(restored.collapsedByNote["One.md"], ["Related.md"]);
+  assert.equal(restored.collapsedByNote["Two.md"], undefined);
 });
 
 function createLiveResponse(pathValue: string, relatedPath = "Related.md", indexed = true): LiveRelatedResponse {
