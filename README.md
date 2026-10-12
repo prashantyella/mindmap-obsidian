@@ -35,6 +35,8 @@ ollama pull llama3.1:8b
 
 Open the Mindmap sidebar to explore connections or search across indexed notes. Connections refresh automatically; saved active notes are prioritized after typing settles, without interrupting your writing.
 
+Summaries are expanded by default. Use a note's collapse button to toggle its summary, or Alt/Option-click it to expand or collapse all visible summaries.
+
 Use the status menu to pause or resume processing. Under **Automation**, choose manual runs, periodic processing while Obsidian is open, or scheduled processing on macOS.
 
 Summaries, tags, concepts, and related-note links are stored in note properties. To keep them out of the reading area, choose **Obsidian Settings → Editor → Properties in document → Hidden**. This hides the properties without deleting them.

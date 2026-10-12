@@ -9,6 +9,21 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.9
+
+### Changed
+- Show the sidebar graph without a heading or collapse control.
+- Expand related-note summaries by default, with independent collapse buttons.
+- Support Alt/Option-click to expand or collapse all visible sidebar summaries.
+- Preserve per-note disclosure choices across refreshes and note switches, without applying selection styling to every expanded card.
+- Simplify the README overview and update setup and privacy guidance.
+
+### Fixed
+- Keep pin, score, and collapse controls separate and expose them to keyboard and assistive-technology users.
+- Limit bulk disclosure changes to visible results and provide a visible keyboard-focus indicator.
+
+`minAppVersion` remains `1.7.2`; desktop only. Existing notes, settings, and font choices are unchanged.
+
 ## 0.3.8
 
 ### Changed
