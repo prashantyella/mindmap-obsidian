@@ -616,9 +616,6 @@
 }
 
 .mindmap-sidebar-pin {
-  position: absolute;
-  top: 9px;
-  right: 48px;
   width: 26px;
   height: 26px;
   flex-basis: 26px;

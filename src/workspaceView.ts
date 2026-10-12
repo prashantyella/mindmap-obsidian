@@ -908,14 +908,14 @@ export class MindmapWorkspaceView extends ItemView {
     const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(candidate.path) : candidate.path.replace(/["\\]/g, "\\$&");
     let row = container.querySelector<HTMLElement>(`:scope > [data-path="${escaped}"]`);
     if (!row) {
-      row = container.createDiv({ cls: "mindmap-sidebar-card", attr: { role: "button", tabindex: "0", "data-path": candidate.path } });
-      const pin = row.createEl("button", { cls: "mindmap-sidebar-pin", attr: { type: "button", tabindex: "0" } });
-      setIcon(pin, "pin");
+      row = container.createDiv({ cls: "mindmap-sidebar-card", attr: { role: "group", tabindex: "0", "data-path": candidate.path } });
       const body = row.createDiv({ cls: "mindmap-sidebar-card-body" });
       const top = body.createDiv({ cls: "mindmap-sidebar-card-top" });
       const titleWrap = top.createDiv({ cls: "mindmap-sidebar-title-wrap" });
       titleWrap.createEl("a", { cls: "mindmap-sidebar-title internal-link" });
       const meta = top.createDiv({ cls: "mindmap-sidebar-meta" });
+      const pin = meta.createEl("button", { cls: "mindmap-sidebar-pin", attr: { type: "button", tabindex: "0" } });
+      setIcon(pin, "pin");
       meta.createSpan({ cls: "mindmap-sidebar-score" });
       const collapse = meta.createEl("button", { cls: "mindmap-sidebar-collapse", attr: { type: "button" } });
 
@@ -970,7 +970,6 @@ export class MindmapWorkspaceView extends ItemView {
     row.toggleClass("is-selected", candidate.path === this.selectedPath);
     row.toggleClass("is-expanded", expanded);
     row.toggleClass("is-pin-revealed", this.pinRevealPath === candidate.path);
-    row.setAttribute("aria-expanded", String(expanded));
     const pin = row.querySelector<HTMLButtonElement>(".mindmap-sidebar-pin")!;
     pin.toggleClass("is-pinned", Boolean(candidate.pinned));
     pin.setAttribute("aria-label", candidate.pinned ? `Unpin ${candidate.title}` : `Pin ${candidate.title}`);
