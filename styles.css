@@ -370,43 +370,19 @@
   font-weight: 600;
 }
 
-.mindmap-inline-loading {
-  position: absolute;
-  top: 18px;
-  right: 20px;
-  z-index: 3;
-  display: flex;
-  width: 28px;
-  height: 28px;
+.mindmap-lookup-search-icon {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  pointer-events: none;
 }
 
-.mindmap-loading-spinner {
-  display: inline-flex;
-  width: 18px;
-  height: 18px;
-  align-items: center;
-  justify-content: center;
+.mindmap-lookup-loading {
   color: var(--text-accent);
 }
 
-.mindmap-loading-spinner-icon {
-  display: block;
-  width: 16px;
-  height: 16px;
-  border: 2px solid currentcolor;
-  border-right-color: transparent;
-  border-bottom-color: color-mix(in srgb, currentcolor 35%, transparent);
-  border-radius: 999px;
-  animation: mindmap-loading-spin 0.75s linear infinite;
-}
-
-@keyframes mindmap-loading-spin {
-  to {
-    transform: rotate(360deg);
-  }
+.mindmap-lookup-loading[hidden],
+.mindmap-lookup-search-icon[hidden] {
+  display: none;
 }
 
 .mindmap-heatmap-chart {
@@ -700,7 +676,6 @@
 @media (prefers-reduced-motion: reduce) {
   .mindmap-sidebar-card,
   .mindmap-sidebar-pin { transition: none; }
-  .mindmap-loading-spinner-icon { animation-duration: 1.5s; }
 }
 
 .mindmap-sidebar-empty {
@@ -1031,10 +1006,6 @@
 
   .mindmap-status-swirling::before,
   .mindmap-status-swirling::after {
-    animation: none;
-  }
-
-  .mindmap-loading-spinner-icon {
     animation: none;
   }
 }

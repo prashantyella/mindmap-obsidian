@@ -19,6 +19,7 @@ import {
   type MindmapViewState,
 } from "./workspaceViewState";
 import { SidebarRefreshController } from "./sidebarRefreshController";
+import { SidebarLoadingController } from "./sidebarLoadingController";
 import { reconcileKeyedOrder } from "./keyedReconciler";
 
 export const MINDMAP_VIEW_TYPE = "mindmap-ai-view";
@@ -205,22 +206,13 @@ function formatScoreDetail(candidate: RelatedCandidate): string | null {
   return `${candidate.source === "live" ? "Live" : "Saved"} ${kind} match (${percent}%).`;
 }
 
-function renderLoadingSpinner(container: HTMLElement): void {
-  const spinner = container.createDiv({
-    cls: "mindmap-loading-spinner",
-    attr: {
-      role: "status",
-      "aria-label": "Loading",
-    },
-  });
-  spinner.createSpan({ cls: "mindmap-loading-spinner-icon" });
-}
-
 export class MindmapWorkspaceView extends ItemView {
   private activePath: string | null = null;
   private expandedPath: string | null | undefined = undefined;
   private liveRequestId = 0;
   private lookupRequestId = 0;
+  private lookupLoadingRequestId = 0;
+  private loadingController: SidebarLoadingController | null = null;
   private pinRevealPath: string | null = null;
   private composingLookup = false;
   private shellEl: HTMLElement | null = null;
@@ -314,6 +306,7 @@ export class MindmapWorkspaceView extends ItemView {
     this.liveRequestId += 1;
     this.lookupRequestId += 1;
     this.refreshController.close();
+    this.loadingController?.close();
   }
 
   render(): void {
@@ -333,14 +326,12 @@ export class MindmapWorkspaceView extends ItemView {
 
     if (activeFile === null) {
       this.activePath = null;
+      this.loadingController?.update(this.getLoadingRequest());
       this.refreshController.invalidateNoteRequest();
       this.expandedPath = undefined;
       if (this.retainedListEl) this.retainedListEl.hidden = true;
       if (this.hasLookupQuery()) {
         const candidates = this.getLookupCandidates(null);
-        if (this.isLoadingVisible()) {
-          this.renderInlineLoadingIndicator(shell);
-        }
         if (candidates.length === 0) {
           this.renderLookupResults(shell, null);
           this.restoreFocusedRow(focusedPath, focusedElement);
@@ -369,6 +360,7 @@ export class MindmapWorkspaceView extends ItemView {
     }
 
     this.ensureLiveQuery(activeFile);
+    this.loadingController?.update(this.getLoadingRequest());
 
     const persistedCandidates = this.getRelatedCandidates(activeFile);
     const candidates = this.hasLookupQuery()
@@ -381,9 +373,6 @@ export class MindmapWorkspaceView extends ItemView {
 
     if (candidates.length === 0) {
       if (this.retainedListEl) this.retainedListEl.hidden = true;
-      if (this.isLoadingVisible()) {
-        this.renderInlineLoadingIndicator(shell);
-      }
       if (this.hasLookupQuery()) {
         this.renderLookupResults(shell, activeFile);
       } else if (this.liveState.status === "loading") {
@@ -397,10 +386,6 @@ export class MindmapWorkspaceView extends ItemView {
       }
       this.restoreFocusedRow(focusedPath, focusedElement);
       return;
-    }
-
-    if (this.isLoadingVisible()) {
-      this.renderInlineLoadingIndicator(shell);
     }
 
     if (!this.hasLookupQuery()) {
@@ -440,7 +425,23 @@ export class MindmapWorkspaceView extends ItemView {
         "aria-label": "Search",
       },
     });
-    setIcon(searchButton, "search");
+    const searchIcon = searchButton.createSpan({ cls: "mindmap-lookup-search-icon", attr: { "aria-hidden": "true" } });
+    setIcon(searchIcon, "search");
+    const loadingIcon = searchButton.createSpan({ cls: "mindmap-status-swirling mindmap-lookup-loading", attr: { "aria-hidden": "true" } });
+    loadingIcon.hidden = true;
+    const ownerWindow = input.ownerDocument.defaultView ?? window;
+    this.loadingController = new SidebarLoadingController((visible) => {
+      loadingIcon.hidden = !visible;
+      searchIcon.hidden = visible;
+      searchButton.setAttribute("aria-busy", String(visible));
+      if (visible && this.liveRegionEl) {
+        this.liveRegionEl.textContent = this.hasLookupQuery() ? "Searching connections." : "Updating connections.";
+      }
+    }, {
+      setTimeout: (callback, delayMs) => ownerWindow.setTimeout(callback, delayMs),
+      clearTimeout: (handle) => ownerWindow.clearTimeout(handle as number),
+    });
+    this.register(() => this.loadingController?.close());
     const clearButton = search.createEl("button", {
       cls: "mindmap-lookup-button",
       attr: {
@@ -535,8 +536,15 @@ export class MindmapWorkspaceView extends ItemView {
     return this.lookupState.query.trim().length > 0;
   }
 
-  private isLoadingVisible(): boolean {
-    return this.hasLookupQuery() ? this.lookupState.status === "loading" : this.liveState.status === "loading";
+  private getLoadingRequest(): string | null {
+    if (this.hasLookupQuery()) {
+      return !this.composingLookup && this.lookupState.status === "loading" && this.lookupLoadingRequestId === this.lookupRequestId
+        ? `lookup:${this.lookupRequestId}`
+        : null;
+    }
+    return this.activePath !== null && this.liveState.path === this.activePath && this.liveState.status === "loading"
+      ? `note:${this.liveRequestId}`
+      : null;
   }
 
   private runLookupQuery(): void {
@@ -545,6 +553,7 @@ export class MindmapWorkspaceView extends ItemView {
       return;
     }
     const requestId = ++this.lookupRequestId;
+    this.lookupLoadingRequestId = requestId;
     const generation = this.refreshController.invalidateLookup();
     this.lookupState = {
       query,
@@ -630,11 +639,6 @@ export class MindmapWorkspaceView extends ItemView {
       return;
     }
     this.render();
-  }
-
-  private renderInlineLoadingIndicator(container: HTMLElement): void {
-    const indicator = container.createDiv({ cls: "mindmap-inline-loading" });
-    renderLoadingSpinner(indicator);
   }
 
   private renderLiveStatus(container: HTMLElement, activePath: string, hasPersisted: boolean): void {
