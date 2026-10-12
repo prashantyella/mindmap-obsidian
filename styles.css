@@ -254,7 +254,7 @@
   flex-direction: column;
   background: var(--background-primary);
   color: var(--text-normal);
-  font-family: var(--font-interface);
+  font-family: Geist, var(--font-interface);
 }
 
 .mindmap-sidebar-content {
@@ -664,7 +664,7 @@
 .mindmap-sidebar-title {
   display: block;
   color: var(--text-normal);
-  font-family: var(--font-interface);
+  font-family: "Geist Pixel", "Geist Mono", var(--font-monospace);
   font-size: var(--font-ui-medium);
   font-weight: 600;
   line-height: 1.35;
@@ -678,7 +678,7 @@
 
 .mindmap-sidebar-summary {
   color: var(--text-normal);
-  font-family: var(--font-interface);
+  font-family: "Geist Mono", var(--font-monospace);
   font-size: var(--font-ui-small);
   line-height: 1.45;
 }
