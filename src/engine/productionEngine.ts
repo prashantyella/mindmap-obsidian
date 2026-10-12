@@ -1004,7 +1004,11 @@ export class ProductionEngine {
       runtimeFolder: this.options.runtimeFolder,
     }).eligible;
     if (eligible && this.registeredRunners["process-note"]) {
-      await this.jobEngine.submit({ trigger: "scheduled", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion });
+      try {
+        await this.jobEngine.submit({ trigger: "scheduled", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion });
+      } catch {
+        // Best-effort background persistence must not hide valid ranked connections.
+      }
     }
 
     if (!indexed) {

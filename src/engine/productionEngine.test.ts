@@ -802,7 +802,7 @@ void test("automatic sidebar refresh never processes out-of-scope or too-short n
   await engine.dispose();
 });
 
-void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed IndexStore view against a FRESH embed of the active note's current text once the note is already indexed, excluding itself", async () => {
+void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed IndexStore view against a FRESH embed of the active note's current text once the note is already indexed, excluding itself", async (t) => {
   const { vault, files } = sidebarFixture();
   const fs = new FakeIndexFs();
   const dataRoot = "/data";
@@ -849,6 +849,16 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) ranks the committed I
   const jobs = await engine.jobStore.list();
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0].job.trigger, "scheduled");
+  t.mock.method(engine.jobEngine, "submit", async () => { throw new Error("Queue persistence unavailable"); });
+  const failedRefresh = await engine.queryLiveRelated("Notes/active.md", true);
+  assert.equal(failedRefresh.indexed, true);
+  assert.equal(failedRefresh.stale, true);
+  assert.deepEqual(failedRefresh.related, refreshing.related, "background submission failure must not hide valid connections");
+  files["Notes/new.md"] = "A new eligible note body.";
+  const notIndexed = await engine.queryLiveRelated("Notes/new.md", true);
+  assert.equal(notIndexed.indexed, false);
+  assert.equal(notIndexed.stale, true);
+  assert.deepEqual(notIndexed.related, []);
   await engine.dispose();
 });
 
