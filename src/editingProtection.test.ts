@@ -13,7 +13,7 @@ class FakeClock implements EditingProtectionClock {
   advance(ms: number): void { this.nowMs += ms; for (const [id, task] of [...this.tasks]) if (task.at <= this.nowMs) { this.tasks.delete(id); task.callback(); } }
 }
 
-void test("recent edits, focused panes, and unsaved secondary panes protect a note", () => {
+void test("recent edits and unsaved secondary panes protect a note", () => {
   const clock = new FakeClock();
   let snapshots: EditorSnapshot[] = [];
   const protection = new EditingProtection(() => snapshots, clock);
@@ -22,8 +22,6 @@ void test("recent edits, focused panes, and unsaved secondary panes protect a no
   assert.equal(protection.isProtected("Note.md"), true);
   clock.advance(1);
   assert.equal(protection.isProtected("Note.md"), false);
-  snapshots = [{ path: "Note.md", focused: true, unsaved: false }];
-  assert.equal(protection.isProtected("Note.md"), true);
   snapshots = [{ path: "Note.md", focused: false, unsaved: true }];
   assert.equal(protection.isProtected("Note.md"), true);
   snapshots = [{ path: "Note.md", focused: false, unsaved: false }];
@@ -47,29 +45,63 @@ void test("reading panes do not protect, renames follow edits, idle wakes once, 
   assert.equal(wakes, 1);
 });
 
-void test("focus-only protection wakes after blur even without a recent edit", () => {
+void test("a focused, saved note becomes safe after typing is idle", () => {
   const clock = new FakeClock();
-  let snapshots: EditorSnapshot[] = [{ path: "Focused.md", focused: true, unsaved: false }];
+  const snapshots: EditorSnapshot[] = [{ path: "Focused.md", focused: true, unsaved: false, content: "saved" }];
   const protection = new EditingProtection(() => snapshots, clock);
   let wakes = 0;
   protection.subscribeSafeTransition(() => { wakes += 1; });
-  assert.equal(protection.isProtected("Focused.md"), true);
-  snapshots = [{ path: "Focused.md", focused: false, unsaved: false }];
-  protection.refresh();
+  protection.recordEdit("Focused.md");
+  assert.equal(protection.isProtected("Focused.md", "saved"), true);
+  clock.advance(2_000);
+  assert.equal(wakes, 1);
+  assert.equal(protection.isProtected("Focused.md", "saved"), false);
+});
+
+void test("typing again restarts the idle transition", () => {
+  const clock = new FakeClock();
+  const snapshots: EditorSnapshot[] = [{ path: "Focused.md", focused: true, unsaved: false, content: "saved" }];
+  const protection = new EditingProtection(() => snapshots, clock);
+  let wakes = 0;
+  protection.subscribeSafeTransition(() => { wakes += 1; });
+  protection.recordEdit("Focused.md");
+  assert.equal(protection.isProtected("Focused.md", "saved"), true);
+  clock.advance(1_500);
+  protection.recordEdit("Focused.md");
+  clock.advance(500);
+  assert.equal(wakes, 0);
+  assert.equal(protection.isProtected("Focused.md", "saved"), true);
+  clock.advance(1_500);
   assert.equal(wakes, 1);
 });
 
-void test("final saved-source comparison protects an unfocused buffer until its save commits", () => {
+void test("unsaved and mismatching buffers remain protected until matching content is saved", () => {
   const clock = new FakeClock();
-  const snapshots: EditorSnapshot[] = [{ path: "Other.md", focused: false, unsaved: false, content: "new buffer" }];
+  const snapshots: EditorSnapshot[] = [{ path: "Other.md", focused: true, unsaved: true, content: "new buffer" }];
   const protection = new EditingProtection(() => snapshots, clock);
   let wakes = 0;
   protection.subscribeSafeTransition(() => { wakes += 1; });
   assert.equal(protection.isProtected("Other.md", "old disk source"), true);
+  snapshots[0] = { path: "Other.md", focused: true, unsaved: false, content: "new buffer" };
   protection.refresh();
   assert.equal(wakes, 0);
   protection.recordSaved("Other.md", "new buffer");
   assert.equal(wakes, 1);
   assert.equal(protection.isProtected("Other.md", "new buffer"), false);
   protection.dispose();
+});
+
+void test("dispose cancels a pending idle wake and removes subscriptions", () => {
+  const clock = new FakeClock();
+  const protection = new EditingProtection(() => [], clock);
+  let wakes = 0;
+  const unsubscribe = protection.subscribeSafeTransition(() => { wakes += 1; });
+  protection.recordEdit("Note.md");
+  assert.equal(protection.isProtected("Note.md"), true);
+  protection.dispose();
+  unsubscribe();
+  clock.advance(2_000);
+  protection.refresh();
+  assert.equal(wakes, 0);
+  assert.equal(clock.tasks.size, 0);
 });

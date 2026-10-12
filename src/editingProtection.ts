@@ -52,7 +52,8 @@ export class EditingProtection {
 
   private snapshotProtected(snapshot: EditorSnapshot): boolean {
     const saved = this.savedContent.get(snapshot.path);
-    return snapshot.focused || snapshot.unsaved
+    // Focus alone is safe once editor-change has been idle; dirty or divergent buffers are not.
+    return snapshot.unsaved
       || (saved !== undefined && snapshot.content !== undefined && snapshot.content !== saved);
   }
 
