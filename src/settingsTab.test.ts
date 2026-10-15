@@ -51,12 +51,12 @@ void test("integration controls await transactional selectors and always redraw 
   const integrations = SOURCE.slice(SOURCE.indexOf("private renderIntegrations("), SOURCE.indexOf("private renderAdvanced("));
   assert.match(integrations, /await this\.plugin\.selectReadingMode\(value \? "reading" : "standard"\); this\.display\(\)/);
   assert.match(integrations, /await this\.plugin\.selectWebResearchMode\(value \? "manual" : "off"\);[\s\S]*this\.display\(\)/);
-  assert.match(MAIN_SOURCE, /const previousMode = this\.settings\.webResearchMode;[\s\S]*catch \{[\s\S]*this\.settings\.webResearchMode = previousMode/,
-    "failed saves must roll the authoritative mode back before Settings redraws");
+  assert.match(MAIN_SOURCE, /webResearchModeTransition\.change\(/,
+    "all settings and menu mode changes must use the tested transactional coordinator");
   assert.match(MAIN_SOURCE, /if \(!confirmed\) return false/,
     "cancelled consent must leave the authoritative mode unchanged before Settings redraws");
-  assert.match(MAIN_SOURCE, /if \(this\.webResearchModeChanging\)[\s\S]*return false/,
-    "rapid repeated changes must not race persisted and in-memory modes");
+  assert.match(MAIN_SOURCE, /toggleAutomaticReadingResearch\(\)[\s\S]*selectWebResearchMode\(automatic \? "manual" : "automatic-reading"\)/,
+    "subordinate Automatic changes must share the master toggle's coordinator");
 });
 
 void test("retired runtime paths and Python setup never appear", () => {

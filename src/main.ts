@@ -24,6 +24,7 @@ import { collectResearch, researchNote } from "./webResearch";
 import { prepareActiveNoteResearchInput } from "./researchInput";
 import { renderCompanionResearchContent } from "./researchWriter";
 import { MAX_RESEARCH_INPUT_CHARS, WebResearchError } from "./webResearchTypes";
+import { WebResearchModeTransition, type WebResearchModeSnapshot } from "./webResearchModeTransition";
 import { createReadingStateStore, type ReadingStateStore } from "./readingState";
 import { createObsidianVaultApi } from "./readingVault";
 import { ReadingModeController, type ReadingHealth, type ReadingMode, type ReadingPreview } from "./readingMode";
@@ -216,7 +217,7 @@ export default class MindmapPlugin extends Plugin {
   private webResearchActivity: "off" | "ready" | "deriving" | "searching" | "writing" | "error" = "off";
   private webResearchLastError: string | null = null;
   private webResearchPromise: Promise<ResearchFileResult> | null = null;
-  private webResearchModeChanging = false;
+  private readonly webResearchModeTransition = new WebResearchModeTransition();
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
   private focusLookupOnNextRender = false;
@@ -600,77 +601,79 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async selectWebResearchMode(mode: "off" | "manual" | "automatic-reading"): Promise<boolean> {
-    if (mode === this.settings.webResearchMode) return true;
-    if (this.webResearchModeChanging) {
+    const result = await this.webResearchModeTransition.change({
+      target: mode,
+      snapshot: () => ({ mode: this.settings.webResearchMode, activity: this.webResearchActivity, lastError: this.webResearchLastError }),
+      prepare: async (previous) => {
+        if (this.webResearchPromise) {
+          new Notice("Web research is running. Change the mode after it finishes.", 8000);
+          return false;
+        }
+        if (mode === "automatic-reading" && this.settings.readingMode !== "reading") {
+          new Notice("Enable Apple Books import before Automatic research.", 8000);
+          return false;
+        }
+        if (mode === "automatic-reading" && this.isRuntimeSetupBlocking()) {
+          new Notice("Mindmap runtime setup is required before automatic reading research can be enabled.", 8000);
+          return false;
+        }
+        if (mode === "manual" && previous.mode === "off") {
+          const confirmed = await confirmMindmapRun(this.app, {
+            title: "Enable Manual Web Research?",
+            message: "Selected text or a bounded active-note excerpt is processed locally. Exa receives only derived queries and returns bounded source excerpts and metadata. Unrelated vault content is never sent externally.",
+            confirmText: "Enable manual research",
+            confirmClass: "mod-cta",
+          });
+          if (!confirmed) return false;
+        }
+        if (mode === "automatic-reading") {
+          const confirmed = await confirmMindmapRun(this.app, {
+            title: "Enable Automatic Apple Books Research?",
+            message: "Apple Books excerpts stay local for query derivation. Exa receives only derived queries and returns bounded sources. Automatic work is limited to five notes per sync and ten per day.",
+            confirmText: "Enable automatic research",
+            confirmClass: "mod-cta",
+          });
+          if (!confirmed) return false;
+        }
+        if (mode !== "off" && (previous.mode === "off" || mode === "automatic-reading")) {
+          try {
+            await this.getWebResearchPrerequisites();
+          } catch (error) {
+            this.webResearchActivity = "error";
+            this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research is not ready.";
+            new Notice(this.webResearchLastError, 8000);
+            this.updateStatusBar();
+            return false;
+          }
+        }
+        return true;
+      },
+      apply: (next: WebResearchModeSnapshot) => {
+        this.settings.webResearchMode = next.mode;
+        this.webResearchActivity = next.activity;
+        this.webResearchLastError = next.lastError;
+      },
+      persist: async () => { await this.saveSettings(); },
+    });
+
+    if (result === "busy") {
       new Notice("Internet research mode is already changing.", 5000);
       return false;
     }
-    if (this.webResearchPromise) {
-      new Notice("Web research is running. Change the mode after it finishes.", 8000);
-      return false;
-    }
-    if (mode === "automatic-reading" && this.settings.readingMode !== "reading") {
-      new Notice("Enable Apple Books import before Automatic research.", 8000);
-      return false;
-    }
-
-    this.webResearchModeChanging = true;
-    try {
-      if (mode === "manual" && this.settings.webResearchMode === "off") {
-        const confirmed = await confirmMindmapRun(this.app, {
-          title: "Enable Manual Web Research?",
-          message: "Selected text or a bounded active-note excerpt is processed locally. Exa receives only derived queries and returns bounded source excerpts and metadata. Unrelated vault content is never sent externally.",
-          confirmText: "Enable manual research",
-          confirmClass: "mod-cta",
-        });
-        if (!confirmed) return false;
-      }
-      if (mode === "automatic-reading") {
-        const confirmed = await confirmMindmapRun(this.app, {
-          title: "Enable Automatic Apple Books Research?",
-          message: "Apple Books excerpts stay local for query derivation. Exa receives only derived queries and returns bounded sources. Automatic work is limited to five notes per sync and ten per day.",
-          confirmText: "Enable automatic research",
-          confirmClass: "mod-cta",
-        });
-        if (!confirmed) return false;
-      }
-      if (mode !== "off") {
-        try {
-          await this.getWebResearchPrerequisites();
-        } catch (error) {
-          this.webResearchActivity = "error";
-          this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research is not ready.";
-          new Notice(this.webResearchLastError, 8000);
-          this.updateStatusBar();
-          return false;
-        }
-      }
-
-      const previousMode = this.settings.webResearchMode;
-      const previousActivity = this.webResearchActivity;
-      const previousError = this.webResearchLastError;
-      this.settings.webResearchMode = mode;
-      this.webResearchActivity = mode === "off" ? "off" : "ready";
-      this.webResearchLastError = null;
-      try {
-        await this.saveSettings();
-      } catch {
-        this.settings.webResearchMode = previousMode;
-        this.webResearchActivity = previousActivity;
-        this.webResearchLastError = previousError ?? "Could not save Web Research mode.";
-        new Notice(this.webResearchLastError, 8000);
-        this.updateStatusBar();
-        return false;
-      }
-      if (mode === "automatic-reading") {
-        await this.refreshAutomaticResearchPolicyStatus();
-        await this.syncReadingMode();
-      }
+    if (result === "cancelled") return false;
+    if (result === "save-failed") {
+      this.webResearchLastError ??= "Could not save Web Research mode.";
+      new Notice(this.webResearchLastError, 8000);
       this.updateStatusBar();
-      return true;
-    } finally {
-      this.webResearchModeChanging = false;
+      return false;
     }
+    if (result === "unchanged") return true;
+    if (mode === "automatic-reading") {
+      await this.refreshAutomaticResearchPolicyStatus();
+      await this.syncReadingMode();
+    }
+    this.updateStatusBar();
+    return true;
   }
 
   async toggleWebResearchMode(): Promise<void> {
@@ -680,67 +683,13 @@ export default class MindmapPlugin extends Plugin {
   }
 
   async toggleAutomaticReadingResearch(): Promise<void> {
-    if (this.webResearchPromise) {
-      new Notice("Web research is already running; automatic mode cannot change yet.", 8000);
-      return;
-    }
-    if (this.settings.webResearchMode === "automatic-reading") {
-      const previousMode = this.settings.webResearchMode;
-      const previousActivity = this.webResearchActivity;
-      const previousError = this.webResearchLastError;
-      this.settings.webResearchMode = "manual";
-      this.webResearchActivity = "ready";
-      try { await this.saveSettings(); } catch {
-        this.settings.webResearchMode = previousMode;
-        this.webResearchActivity = previousActivity;
-        this.webResearchLastError = previousError ?? "Could not save Automatic Reading Research mode.";
-        new Notice(this.webResearchLastError, 8000);
-        this.updateStatusBar();
-        return;
-      }
+    const automatic = this.settings.webResearchMode === "automatic-reading";
+    const changed = await this.selectWebResearchMode(automatic ? "manual" : "automatic-reading");
+    if (changed && automatic) {
       new Notice("Automatic reading research paused; manual research remains available.", 5000);
-      this.updateStatusBar();
-      return;
+    } else if (changed) {
+      new Notice("Automatic reading research enabled.", 5000);
     }
-    if (this.settings.readingMode !== "reading") {
-      new Notice("Enable reading mode before automatic research.", 8000);
-      return;
-    }
-    if (this.isRuntimeSetupBlocking()) {
-      new Notice("Mindmap runtime setup is required before automatic reading research can be enabled.", 8000);
-      return;
-    }
-    const confirmed = await confirmMindmapRun(this.app, {
-      title: "Enable Automatic Reading Research?",
-      message: "Apple annotation excerpts stay local to Qwen. Exa receives only one or two derived queries and returns up to five bounded source excerpts and metadata. Automatic work is limited to five notes per sync and ten per day.",
-      confirmText: "Enable automatic research",
-      confirmClass: "mod-cta",
-    });
-    if (!confirmed) return;
-    try { await this.getWebResearchPrerequisites(); } catch (error) {
-      this.webResearchActivity = "error";
-      this.webResearchLastError = error instanceof WebResearchError ? error.message : "Automatic research is not ready.";
-      new Notice(this.webResearchLastError, 8000);
-      this.updateStatusBar();
-      return;
-    }
-    const previousMode = this.settings.webResearchMode;
-    const previousActivity = this.webResearchActivity;
-    const previousError = this.webResearchLastError;
-    this.settings.webResearchMode = "automatic-reading";
-    this.webResearchActivity = "ready";
-    this.webResearchLastError = null;
-    try { await this.saveSettings(); } catch {
-      this.settings.webResearchMode = previousMode;
-      this.webResearchActivity = previousActivity;
-      this.webResearchLastError = previousError ?? "Could not save Automatic Reading Research mode.";
-      new Notice(this.webResearchLastError, 8000);
-      this.updateStatusBar();
-      return;
-    }
-    await this.refreshAutomaticResearchPolicyStatus();
-    await this.syncReadingMode();
-    new Notice("Automatic reading research enabled.", 5000);
   }
 
   async retryAutomaticResearch(): Promise<void> {
