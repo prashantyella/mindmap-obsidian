@@ -1,0 +1,45 @@
+{
+  "notes": [
+    { "path": "Garden/Tomato pruning.md", "theme": "garden", "text": "Indeterminate tomato vines need regular pruning. Remove suckers below the first flower cluster, keep one or two leaders, and tie new growth loosely to a trellis. Prune on a dry morning so cuts heal quickly." },
+    { "path": "Garden/Tomato suckers.md", "theme": "garden", "text": "For tall indeterminate tomatoes, pinch side shoots that emerge between a leaf and the main stem. Keep two main leaders and support them. Avoid pruning wet plants because fresh cuts can spread disease." },
+    { "path": "Garden/Compost balance.md", "theme": "garden", "text": "A compost pile works best with roughly two buckets of dry brown material for each bucket of fresh green material. Turn it when the center cools, and add water only until it feels like a wrung sponge." },
+    { "path": "Garden/Seed starting.md", "theme": "garden", "text": "Start pepper and tomato seeds indoors under a strong light. Use sterile mix, bottom water after germination, and run a fan gently so seedlings develop sturdy stems before hardening off outdoors." },
+    { "path": "Garden/Slug control.md", "theme": "garden", "text": "Reduce slug damage by watering in the morning, removing damp hiding places, and checking plants after dusk. Iron phosphate bait is a targeted fallback when habitat changes are not enough." },
+
+    { "path": "Systems/Retry budgets.md", "theme": "systems", "text": "Retries need a shared budget, exponential backoff, and jitter. Stop retrying after the deadline or when the error is permanent. Unbounded retries amplify an outage and can overload a recovering dependency." },
+    { "path": "Systems/Idempotency keys.md", "theme": "systems", "text": "An idempotency key lets a server recognize repeated payment requests. Store the key with the completed response and reject reuse with different parameters so network retries cannot create duplicate charges." },
+    { "path": "Systems/Queue backpressure.md", "theme": "systems", "text": "A bounded queue makes overload visible. Producers should slow down or shed work when consumers lag. Monitor queue age as well as depth because an old shallow queue can still violate latency targets." },
+    { "path": "Systems/Circuit breakers.md", "theme": "systems", "text": "A circuit breaker stops calls after repeated dependency failures, probes recovery in a half-open state, and closes after successful trials. Pair it with deadlines and jittered retry budgets to avoid a retry storm." },
+    { "path": "Systems/Distributed tracing.md", "theme": "systems", "text": "Propagate a trace identifier across service boundaries and record spans for queues, database calls, and outbound requests. Sampling should retain errors and unusually slow traces without collecting every request." },
+
+    { "path": "Kitchen/Sourdough feeding.md", "theme": "fermentation", "text": "Feed a sourdough starter by weight with equal flour and water. Keep a small seed amount, refresh it at a predictable temperature, and use it near peak rise when bubbles and aroma show strong fermentation." },
+    { "path": "Kitchen/Sourdough schedule.md", "theme": "fermentation", "text": "A reliable sourdough routine tracks starter ratio, room temperature, and time to peak. Warmer starter ferments faster. Refresh after it peaks if acidity becomes sharp and rise begins to weaken." },
+    { "path": "Kitchen/Kimchi salt.md", "theme": "fermentation", "text": "Salt napa cabbage until flexible, rinse it, then pack it beneath its brine with garlic, ginger, and chile. Burp the jar and taste daily; refrigeration slows fermentation when the acidity is right." },
+    { "path": "Kitchen/Coffee extraction.md", "theme": "coffee", "text": "Sour coffee often indicates under-extraction. Grind finer, extend contact time, or use hotter water one change at a time. Bitter and drying flavors can indicate the opposite problem or channeling." },
+    { "path": "Kitchen/Coffee bloom.md", "theme": "coffee", "text": "Freshly roasted coffee releases carbon dioxide during the bloom. Wet all grounds with about twice their mass in water, wait thirty to forty-five seconds, then pour evenly to reduce channeling." },
+
+    { "path": "Training/Progressive overload.md", "theme": "training", "text": "Strength improves when training stress increases gradually. Add a small amount of weight or a repetition while technique stays consistent, then use easier weeks when fatigue masks performance." },
+    { "path": "Training/Deload weeks.md", "theme": "training", "text": "A deload reduces lifting volume and sometimes intensity for several sessions. Schedule one when fatigue accumulates, bar speed slows, and sleep or motivation worsens, then resume progressive overload conservatively." },
+    { "path": "Training/Deadlift setup.md", "theme": "training", "text": "For a conventional deadlift, place the bar over midfoot, hinge to grip it, bring the shins forward, brace the trunk, and pull slack from the bar before pushing the floor away." },
+    { "path": "Training/Running easy.md", "theme": "training", "text": "Easy runs should feel conversational and support recovery between hard sessions. Increase weekly distance gradually, keep most running easy, and reduce load when soreness changes normal stride." },
+    { "path": "Training/Sleep recovery.md", "theme": "training", "text": "Consistent sleep supports strength adaptation and endurance recovery. Keep a regular wake time, reduce late caffeine, and treat a sudden performance drop as a reason to inspect sleep and total training load." },
+
+    { "path": "Music/Slow practice.md", "theme": "music", "text": "Practice a difficult passage slowly enough to play with relaxed, accurate movement. Use a metronome, repeat small groups, and increase tempo only after several clean repetitions." },
+    { "path": "Music/Spaced repertoire.md", "theme": "music", "text": "Retain repertoire by revisiting pieces on expanding intervals instead of cramming. Short retrieval attempts over several days expose weak transitions and make later performance more reliable." },
+    { "path": "Music/Ear training.md", "theme": "music", "text": "Sing intervals before checking them on an instrument. Transcribe short melodies, compare the result, and revisit errors later so interval recognition becomes retrieval rather than guessing." },
+    { "path": "Music/Stage nerves.md", "theme": "music", "text": "Reduce performance anxiety with repeated low-stakes run-throughs, a familiar breathing routine, and practice starting from several points in the piece. Simulate the stage rather than relying on one perfect beginning." },
+    { "path": "Inbox/Tiny.md", "theme": "short", "text": "Buy new strings.", "excluded": true }
+  ],
+  "queries": [
+    { "path": "Garden/Tomato pruning.md", "relevant": ["Garden/Tomato suckers.md", "Garden/Seed starting.md"] },
+    { "path": "Garden/Compost balance.md", "relevant": ["Garden/Seed starting.md", "Garden/Slug control.md"] },
+    { "path": "Systems/Retry budgets.md", "relevant": ["Systems/Circuit breakers.md", "Systems/Idempotency keys.md", "Systems/Queue backpressure.md"] },
+    { "path": "Systems/Idempotency keys.md", "relevant": ["Systems/Retry budgets.md", "Systems/Circuit breakers.md"] },
+    { "path": "Kitchen/Sourdough feeding.md", "relevant": ["Kitchen/Sourdough schedule.md", "Kitchen/Kimchi salt.md"] },
+    { "path": "Kitchen/Coffee extraction.md", "relevant": ["Kitchen/Coffee bloom.md"] },
+    { "path": "Training/Progressive overload.md", "relevant": ["Training/Deload weeks.md", "Training/Sleep recovery.md"] },
+    { "path": "Training/Running easy.md", "relevant": ["Training/Sleep recovery.md", "Training/Deload weeks.md"] },
+    { "path": "Music/Slow practice.md", "relevant": ["Music/Spaced repertoire.md", "Music/Stage nerves.md"] },
+    { "path": "Music/Ear training.md", "relevant": ["Music/Spaced repertoire.md", "Music/Slow practice.md"] }
+  ]
+}

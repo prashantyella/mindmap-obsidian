@@ -43,9 +43,9 @@ Summaries, tags, concepts, and related-note links are stored in note properties.
 
 ## Apple Books and research
 
-Enable Apple Books import to bring highlights into your vault as readable annotation notes. The first import lets you choose whether to process existing highlights; new highlights are processed automatically while Reading Mode is active and Obsidian is open.
+Use the **Apple Books import** toggle in settings or the status menu to bring highlights into your vault as readable annotation notes. The first import lets you choose whether to process existing highlights; new highlights are processed automatically while import is enabled and Obsidian is open.
 
-Web research is optional. Choose **Manual** to research selected text or a note, or **Automatic for Apple Books** for eligible highlights. Research results for highlights are saved in separate companion notes, keeping the original annotations intact.
+The separate **Internet research** toggle is off unless you enable it with consent. Enabling starts in **Manual** mode for selected text or an active note; choose **Automatic for Apple Books** in settings for eligible highlights. Research results for highlights are saved in separate companion notes, keeping the original annotations intact.
 
 ## Privacy
 

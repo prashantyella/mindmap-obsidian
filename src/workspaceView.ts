@@ -24,6 +24,7 @@ import { SidebarRefreshController } from "./sidebarRefreshController";
 import { SidebarLoadingController } from "./sidebarLoadingController";
 import { reconcileKeyedOrder } from "./keyedReconciler";
 import { RetainedSvgNodes } from "./retainedSvgNodes";
+import { clampHeatmapTooltip, createHeatmapGeometry } from "./heatmapGeometry";
 
 export const MINDMAP_VIEW_TYPE = "mindmap-ai-view";
 
@@ -225,6 +226,11 @@ export class MindmapWorkspaceView extends ItemView {
   private heatmapEl: HTMLElement | null = null;
   private heatmapSvgEl: SVGSVGElement | null = null;
   private heatmapTooltipEl: HTMLElement | null = null;
+  private heatmapResizeObserver: ResizeObserver | null = null;
+  private heatmapResizeFrame: number | null = null;
+  private heatmapResizeWindow: Window | null = null;
+  private heatmapClosed = false;
+  private heatmapWidth: number | null = null;
   private readonly heatmapNodes = new RetainedSvgNodes<SVGElement>();
   private readonly heatmapCandidates = new Map<string, RelatedCandidate>();
   private shellEl: HTMLElement | null = null;
@@ -276,6 +282,7 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.heatmapClosed = false;
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.render()));
     this.registerEvent(this.app.metadataCache.on("changed", (file) => {
       if (file.path !== this.activePath) return;
@@ -323,10 +330,12 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.heatmapClosed = true;
     this.liveRequestId += 1;
     this.lookupRequestId += 1;
     this.refreshController.close();
     this.loadingController?.close();
+    this.disconnectHeatmapResize();
   }
 
   render(background = false): void {
@@ -712,28 +721,20 @@ export class MindmapWorkspaceView extends ItemView {
     this.heatmapEl = heatmap;
     const svg = this.heatmapSvgEl ?? heatmap.createSvg("svg", {
       cls: "mindmap-heatmap-chart",
-      attr: { viewBox: "0 0 320 300", preserveAspectRatio: "none", role: "img", "aria-label": "Mindmap connection graph for related notes" },
+      attr: { role: "img", "aria-label": "Mindmap connection graph for related notes" },
     });
     this.heatmapSvgEl = svg;
+    this.ensureHeatmapResize(svg);
     const tooltip = this.heatmapTooltipEl ?? heatmap.createDiv({ cls: "mindmap-heatmap-tooltip" });
     this.heatmapTooltipEl = tooltip;
     this.heatmapCandidates.clear();
     for (const candidate of candidates) this.heatmapCandidates.set(candidate.path, candidate);
     this.heatmapNodes.begin();
 
-    const chart = {
-      left: 10,
-      right: 10,
-      top: 14,
-      bottom: 22,
-      width: 320,
-      height: 300,
-      maxLevel: 4,
-    };
-    const plotWidth = chart.width - chart.left - chart.right;
-    const plotHeight = chart.height - chart.top - chart.bottom;
-    const xFor = (index: number): number => chart.left + (candidates.length <= 1 ? plotWidth / 2 : (plotWidth * index) / (candidates.length - 1));
-    const yFor = (level: number): number => chart.top + plotHeight - (plotHeight * level) / chart.maxLevel;
+    const measuredWidth = svg.getBoundingClientRect().width;
+    if (measuredWidth > 0) this.heatmapWidth = measuredWidth;
+    const chart = createHeatmapGeometry(this.heatmapWidth ?? 320, candidates.length);
+    svg.setAttribute("viewBox", `0 0 ${chart.width} ${chart.height}`);
     const hideTooltip = (): void => {
       tooltip.removeClass("is-visible");
     };
@@ -747,12 +748,16 @@ export class MindmapWorkspaceView extends ItemView {
         row.createSpan({ cls: "mindmap-heatmap-tooltip-detail", text: `${metric.detail} (${metric.level}/4)` });
       }
 
-      const bounds = heatmap.getBoundingClientRect();
-      const x = Math.min(Math.max(clientX - bounds.left + 12, 12), bounds.width - 208);
-      const y = Math.min(Math.max(clientY - bounds.top + 12, 12), bounds.height - 148);
-      tooltip.style.left = `${x}px`;
-      tooltip.style.top = `${y}px`;
       tooltip.addClass("is-visible");
+      const bounds = heatmap.getBoundingClientRect();
+      const tooltipBounds = tooltip.getBoundingClientRect();
+      const position = clampHeatmapTooltip(
+        { x: clientX - bounds.left, y: clientY - bounds.top },
+        { width: bounds.width, height: bounds.height },
+        { width: tooltipBounds.width, height: tooltipBounds.height },
+      );
+      tooltip.style.left = `${position.x}px`;
+      tooltip.style.top = `${position.y}px`;
     };
     const bindTooltip = (element: SVGElement, candidatePath: string): void => {
       const show = (x: number, y: number): void => {
@@ -773,26 +778,26 @@ export class MindmapWorkspaceView extends ItemView {
       element.addEventListener("blur", hideTooltip);
     };
 
-    for (let level = 0; level <= chart.maxLevel; level += 1) {
+    for (let level = 0; level <= 4; level += 1) {
       this.heatmapNodes.get(`grid:${level}`, () => svg.createSvg("line", {
         cls: "mindmap-heatmap-grid",
       }), {
         x1: String(chart.left),
         x2: String(chart.width - chart.right),
-        y1: String(yFor(level)),
-        y2: String(yFor(level)),
+        y1: String(chart.yFor(level)),
+        y2: String(chart.yFor(level)),
       });
     }
 
     for (const [index, candidate] of candidates.entries()) {
-      const x = xFor(index);
+      const hit = chart.hitBounds(index);
       const markerResult = this.heatmapNodes.get(`hit:${candidate.path}`, () => svg.createSvg("rect", {
         cls: "mindmap-heatmap-hit",
       }), {
-        x: String(x - plotWidth / Math.max(candidates.length - 1, 1) / 2),
+        x: String(hit.x),
         y: String(chart.top),
-        width: String(plotWidth / Math.max(candidates.length - 1, 1)),
-        height: String(plotHeight),
+        width: String(hit.width),
+        height: String(chart.plotHeight),
         tabindex: "0",
         role: "button",
         "aria-label": `Select ${candidate.title}`,
@@ -817,7 +822,7 @@ export class MindmapWorkspaceView extends ItemView {
     for (const metric of metrics) {
       const points = candidates.map((candidate, index) => {
         const cell = candidate.heatmap.find((candidateMetric) => candidateMetric.key === metric.key);
-        return `${xFor(index)},${yFor(cell?.level ?? 0)}`;
+        return `${chart.xFor(index)},${chart.yFor(cell?.level ?? 0)}`;
       });
       const { node: line } = this.heatmapNodes.get(`line:${metric.key}`, () => svg.createSvg("polyline", {
         cls: "mindmap-heatmap-line",
@@ -826,13 +831,13 @@ export class MindmapWorkspaceView extends ItemView {
     }
 
     for (const [index, candidate] of candidates.entries()) {
-      const x = xFor(index);
+      const x = chart.xFor(index);
       for (const metric of candidate.heatmap) {
         const pointResult = this.heatmapNodes.get(`point:${candidate.path}:${metric.key}`, () => svg.createSvg("circle", {
           cls: "mindmap-heatmap-point",
         }), {
           cx: String(x),
-          cy: String(yFor(metric.level)),
+          cy: String(chart.yFor(metric.level)),
           r: candidate.path === this.selectedPath ? "2.6" : "2",
         });
         const point = pointResult.node;
@@ -852,6 +857,43 @@ export class MindmapWorkspaceView extends ItemView {
       find: () => null,
       insertBefore: (node, before) => { svg.insertBefore(node, before); },
     });
+  }
+
+  private ensureHeatmapResize(svg: SVGSVGElement): void {
+    const ownerWindow = svg.ownerDocument.defaultView ?? window;
+    if (this.heatmapClosed) return;
+    if (this.heatmapResizeObserver !== null && this.heatmapResizeWindow === ownerWindow) return;
+    if (this.heatmapResizeObserver !== null || this.heatmapResizeFrame !== null) this.disconnectHeatmapResize();
+    if (typeof ownerWindow.ResizeObserver !== "function") return;
+    this.heatmapResizeWindow = ownerWindow;
+    const observer = new ownerWindow.ResizeObserver((entries) => {
+      if (this.heatmapClosed || this.heatmapResizeObserver !== observer || this.heatmapResizeWindow !== ownerWindow) return;
+      const width = entries.find((entry) => entry.target === svg)?.contentRect.width ?? svg.getBoundingClientRect().width;
+      if (!(width > 0) || width === this.heatmapWidth) return;
+      this.heatmapWidth = width;
+      if (this.heatmapResizeFrame !== null) return;
+      const frame = ownerWindow.requestAnimationFrame(() => {
+        if (this.heatmapResizeFrame !== frame) return;
+        this.heatmapResizeFrame = null;
+        const heatmap = this.heatmapEl;
+        if (this.heatmapClosed || this.heatmapResizeObserver !== observer || this.heatmapResizeWindow !== ownerWindow
+          || this.heatmapSvgEl !== svg || heatmap === null || this.heatmapCandidates.size === 0) return;
+        this.renderHeatmap(heatmap, [...this.heatmapCandidates.values()]);
+      });
+      this.heatmapResizeFrame = frame;
+    });
+    this.heatmapResizeObserver = observer;
+    observer.observe(svg);
+  }
+
+  private disconnectHeatmapResize(): void {
+    this.heatmapResizeObserver?.disconnect();
+    this.heatmapResizeObserver = null;
+    if (this.heatmapResizeFrame !== null) {
+      this.heatmapResizeWindow?.cancelAnimationFrame(this.heatmapResizeFrame);
+      this.heatmapResizeFrame = null;
+    }
+    this.heatmapResizeWindow = null;
   }
 
   private selectCandidateFromGraph(path: string): void {

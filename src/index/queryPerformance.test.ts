@@ -71,7 +71,6 @@ void test("opt-in 1k/10k full-query benchmark", { skip: process.env.MINDMAP_RUN_
         await queryRelatedUncached(storage, root, options);
         uncachedMs.push(performance.now() - started);
       }
-      const store = new IndexStore(storage, root);
       const stageMeasurements: Array<{ stage: string; wallMs: number; maxSynchronousSliceMs: number }> = [];
       const measuredOptions = {
         ...options,
@@ -81,11 +80,16 @@ void test("opt-in 1k/10k full-query benchmark", { skip: process.env.MINDMAP_RUN_
       const histogram = monitorEventLoopDelay({ resolution: 1 });
       histogram.enable();
       await new Promise<void>((resolve) => setImmediate(resolve));
-      const coldStarted = performance.now();
       const readsBeforeCold = storage instanceof FakeIndexFs ? storage.readFileCalls.length : 0;
-      await store.queryRelated(measuredOptions);
-      const coldMs = performance.now() - coldStarted;
+      const coldMs: number[] = [];
+      for (let iteration = 0; iteration < 5; iteration += 1) {
+        const coldStore = new IndexStore(storage, root);
+        const started = performance.now();
+        await coldStore.queryRelated(measuredOptions);
+        coldMs.push(performance.now() - started);
+      }
       const readsAfterCold = storage instanceof FakeIndexFs ? storage.readFileCalls.length : 0;
+      const store = new IndexStore(storage, root);
       const warmMs: number[] = [];
       for (let iteration = 0; iteration < 20; iteration += 1) {
         const started = performance.now();
@@ -94,6 +98,7 @@ void test("opt-in 1k/10k full-query benchmark", { skip: process.env.MINDMAP_RUN_
       }
       await new Promise<void>((resolve) => setImmediate(resolve));
       histogram.disable();
+      const observedMemory = process.memoryUsage();
       const largestShardCount = 10_000;
       const stageNames = [...new Set(stageMeasurements.map((stage) => stage.stage))];
       const stageAverageWallMs = Object.fromEntries(stageNames.map((stageName) => {
@@ -107,7 +112,8 @@ void test("opt-in 1k/10k full-query benchmark", { skip: process.env.MINDMAP_RUN_
         fs: useNode ? "NodeOwnedFs" : "FakeIndexFs",
         uncachedP50Ms: Number(percentile(uncachedMs, 0.5).toFixed(2)),
         uncachedP95Ms: Number(percentile(uncachedMs, 0.95).toFixed(2)),
-        coldMs: Number(coldMs.toFixed(2)),
+        coldP50Ms: Number(percentile(coldMs, 0.5).toFixed(2)),
+        coldP95Ms: Number(percentile(coldMs, 0.95).toFixed(2)),
         warmP50Ms: Number(percentile(warmMs, 0.5).toFixed(2)),
         warmP95Ms: Number(percentile(warmMs, 0.95).toFixed(2)),
         longestEventLoopDelayMs: Number((histogram.max / 1e6).toFixed(2)),
@@ -120,6 +126,7 @@ void test("opt-in 1k/10k full-query benchmark", { skip: process.env.MINDMAP_RUN_
         providerCalls: 0,
         stageAverageWallMs,
         maxMeasuredSynchronousSliceMs: Number(Math.max(0, ...stageMeasurements.map((stage) => stage.maxSynchronousSliceMs)).toFixed(2)),
+        observedMemoryMiB: Object.fromEntries((["rss", "heapUsed", "external", "arrayBuffers"] as const).map((key) => [key, Number((observedMemory[key] / 1024 / 1024).toFixed(2))])),
         runtime: process.version,
         hardware: `${os.cpus()[0]?.model ?? "unknown"}; ${os.cpus().length} logical CPUs; ${Math.round(os.totalmem() / 1024 / 1024 / 1024)} GiB RAM`,
       };
