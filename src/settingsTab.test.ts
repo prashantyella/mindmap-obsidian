@@ -37,11 +37,26 @@ void test("Automation uses the approved labels and one HH:MM field per schedule"
   assert.match(SOURCE, /parseTimeOfDay\(value\)/);
 });
 
-void test("research is one Off, Manual, Automatic selector and diagnostics stay in Advanced", () => {
-  assert.match(SOURCE, /addOption\("off", "Off"\).*addOption\("manual", "Manual"\).*addOption\("automatic-reading", "Automatic for Apple Books"\)/s);
+void test("integrations use authoritative on/off toggles with a subordinate enabled research mode", () => {
+  assert.match(SOURCE, /setName\("Apple Books import"\)[\s\S]*setValue\(reading\)/);
+  assert.match(SOURCE, /setName\("Internet research"\)[\s\S]*setValue\(research\.mode !== "off"\)/);
+  assert.match(SOURCE, /if \(research\.mode !== "off"\)[\s\S]*setName\("Research mode"\)[\s\S]*addOption\("manual", "Manual"\).*addOption\("automatic-reading", "Automatic for Apple Books"\)/s);
+  assert.match(SOURCE, /value \? "manual" : "off"/, "enabling defaults safely to Manual and disabling persists Off");
   assert.match(SOURCE, /selectWebResearchMode/);
   assert.match(SOURCE, /Copy diagnostics/);
   assert.match(SOURCE, /Apple Books annotation database/);
+});
+
+void test("integration controls await transactional selectors and always redraw from authoritative settings", () => {
+  const integrations = SOURCE.slice(SOURCE.indexOf("private renderIntegrations("), SOURCE.indexOf("private renderAdvanced("));
+  assert.match(integrations, /await this\.plugin\.selectReadingMode\(value \? "reading" : "standard"\); this\.display\(\)/);
+  assert.match(integrations, /await this\.plugin\.selectWebResearchMode\(value \? "manual" : "off"\);[\s\S]*this\.display\(\)/);
+  assert.match(MAIN_SOURCE, /const previousMode = this\.settings\.webResearchMode;[\s\S]*catch \{[\s\S]*this\.settings\.webResearchMode = previousMode/,
+    "failed saves must roll the authoritative mode back before Settings redraws");
+  assert.match(MAIN_SOURCE, /if \(!confirmed\) return false/,
+    "cancelled consent must leave the authoritative mode unchanged before Settings redraws");
+  assert.match(MAIN_SOURCE, /if \(this\.webResearchModeChanging\)[\s\S]*return false/,
+    "rapid repeated changes must not race persisted and in-memory modes");
 });
 
 void test("retired runtime paths and Python setup never appear", () => {

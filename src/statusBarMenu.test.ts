@@ -252,13 +252,11 @@ void test("healthy standard-mode menu stays within budget: Mode, Run, Research, 
   assert.equal(items.some((item) => item.title === "Reading" && item.label), false);
   assert.deepEqual(items.map((item) => item.title), [
     "Mode",
-    "Standard Mode",
-    "Reading Mode (experimental)",
+    "Apple Books import",
     "Run",
     "Run current scope",
     "Research",
-    "Manual research",
-    "Automatic for Reading",
+    "Internet research",
     "Navigation",
     "Open Mindmap",
     "Open settings",
@@ -297,29 +295,20 @@ void test("no per-note Process/Open path pairs and no passive duplicate current-
 });
 
 // ---------------------------------------------------------------------------
-// (2) Mode: actionable/idempotent Standard and Reading radio rows.
+// (2) Mode: one Apple Books on/off control backed by readingMode.
 // ---------------------------------------------------------------------------
 
-void test("Mode rows are explicit radio choices: current mode is checked and disabled, the other is actionable", () => {
+void test("Apple Books import is a checked toggle with mode-select action wiring", () => {
   const inStandard = buildStatusBarMenuItems(state({ readingMode: "standard" }));
-  const standardRow = inStandard.find((item) => item.title === "Standard Mode");
-  const readingRow = inStandard.find((item) => item.title === "Reading Mode (experimental)");
-  assert.equal(standardRow?.checked, true);
-  assert.equal(standardRow?.disabled, true);
-  assert.equal(standardRow?.action, undefined);
+  const readingRow = inStandard.find((item) => item.title === "Apple Books import");
   assert.equal(readingRow?.checked, false);
-  assert.equal(readingRow?.disabled, false);
   assert.equal(readingRow?.action, "selectReadingMode");
+  assert.equal(inStandard.some((item) => item.title === "Standard Mode" || item.title === "Reading Mode (experimental)"), false);
 
   const inReading = buildStatusBarMenuItems(state({ readingMode: "reading" }));
-  const standardRow2 = inReading.find((item) => item.title === "Standard Mode");
-  const readingRow2 = inReading.find((item) => item.title === "Reading Mode (experimental)");
-  assert.equal(standardRow2?.checked, false);
-  assert.equal(standardRow2?.disabled, false);
-  assert.equal(standardRow2?.action, "selectStandardMode");
+  const readingRow2 = inReading.find((item) => item.title === "Apple Books import");
   assert.equal(readingRow2?.checked, true);
-  assert.equal(readingRow2?.disabled, true);
-  assert.equal(readingRow2?.action, undefined);
+  assert.equal(readingRow2?.action, "selectStandardMode");
 });
 
 // ---------------------------------------------------------------------------
@@ -441,26 +430,46 @@ void test("Reading errors surface through the top recovery row, not as a passive
 // text/active-note/reprocess removed from the menu; usage/retry conditional.
 // ---------------------------------------------------------------------------
 
-void test("Research group offers only the Manual research and Automatic for Reading toggles", () => {
+void test("Research group offers an Internet research toggle and subordinate mode choices only while enabled", () => {
+  const off = buildStatusBarMenuItems(state({ webResearchMode: "off" }));
+  const offToggle = off.find((item) => item.title === "Internet research");
+  assert.equal(offToggle?.checked, false);
+  assert.equal(offToggle?.action, "toggleWebResearchMode");
+  assert.equal(off.some((item) => item.title === "Manual" || item.title === "Automatic for Reading"), false);
+
   const items = buildStatusBarMenuItems(state({ webResearchMode: "manual" }));
-  assert.ok(items.some((item) => item.title === "Manual research"));
+  assert.equal(items.find((item) => item.title === "Internet research")?.checked, true);
+  assert.ok(items.some((item) => item.title === "Manual"));
   assert.ok(items.some((item) => item.title === "Automatic for Reading"));
   assert.equal(items.some((item) => item.action === "researchSelectedText"), false);
   assert.equal(items.some((item) => item.action === "researchActiveNote"), false);
   assert.equal(items.some((item) => item.action === "researchAndReprocessActiveNote"), false);
 });
 
-void test("Manual research reads checked when included by Automatic, and is inert while Automatic is active", () => {
+void test("subordinate research mode rows expose one checked choice and switch Automatic back to Manual", () => {
   const manual = buildStatusBarMenuItems(state({ webResearchMode: "manual" }));
-  const manualRow = manual.find((item) => item.title === "Manual research");
+  const manualRow = manual.find((item) => item.title === "Manual");
   assert.equal(manualRow?.checked, true);
-  assert.equal(manualRow?.action, "toggleWebResearchMode");
+  assert.equal(manualRow?.disabled, true);
+  assert.equal(manualRow?.action, undefined);
 
   const automatic = buildStatusBarMenuItems(state({ webResearchMode: "automatic-reading", readingMode: "reading" }));
-  const manualUnderAutomatic = automatic.find((item) => item.title === "Manual research");
-  assert.equal(manualUnderAutomatic?.checked, true);
-  assert.equal(manualUnderAutomatic?.disabled, true);
-  assert.equal(manualUnderAutomatic?.action, undefined);
+  const manualUnderAutomatic = automatic.find((item) => item.title === "Manual");
+  assert.equal(manualUnderAutomatic?.checked, false);
+  assert.equal(manualUnderAutomatic?.disabled, false);
+  assert.equal(manualUnderAutomatic?.action, "toggleAutomaticReadingResearch");
+});
+
+void test("Apple Books and Internet research toggles are independent authoritative settings", () => {
+  const manualWithoutBooks = buildStatusBarMenuItems(state({ readingMode: "standard", webResearchMode: "manual" }));
+  assert.equal(manualWithoutBooks.find((item) => item.title === "Apple Books import")?.checked, false);
+  assert.equal(manualWithoutBooks.find((item) => item.title === "Internet research")?.checked, true);
+  assert.equal(manualWithoutBooks.find((item) => item.title === "Manual")?.checked, true);
+
+  const booksWithoutResearch = buildStatusBarMenuItems(state({ readingMode: "reading", webResearchMode: "off" }));
+  assert.equal(booksWithoutResearch.find((item) => item.title === "Apple Books import")?.checked, true);
+  assert.equal(booksWithoutResearch.find((item) => item.title === "Internet research")?.checked, false);
+  assert.equal(booksWithoutResearch.some((item) => item.title === "Manual" || item.title === "Automatic for Reading"), false);
 });
 
 void test("Automatic for Reading toggle enables when Reading is active and pauses independent of runtime state", () => {

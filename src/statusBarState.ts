@@ -384,18 +384,10 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     }] : []),
     { title: "Mode", label: true },
     {
-      title: "Standard Mode",
-      icon: "orbit",
-      checked: state.readingMode === "standard",
-      disabled: state.readingMode === "standard",
-      action: state.readingMode === "standard" ? undefined : "selectStandardMode",
-    },
-    {
-      title: "Reading Mode (experimental)",
+      title: "Apple Books import",
       icon: "book-open",
       checked: state.readingMode === "reading",
-      disabled: state.readingMode === "reading",
-      action: state.readingMode === "reading" ? undefined : "selectReadingMode",
+      action: state.readingMode === "reading" ? "selectStandardMode" : "selectReadingMode",
     },
     { title: "Run", label: true },
     ...(state.activeNote.eligible ? [{
@@ -428,19 +420,25 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     ] : []),
     { title: "Research", label: true },
     {
-      title: "Manual research",
+      title: "Internet research",
       icon: "globe-2",
-      checked: state.webResearchMode === "manual" || automaticActive,
-      disabled: researchBusy || automaticActive,
-      action: automaticActive ? undefined : "toggleWebResearchMode",
+      checked: state.webResearchMode !== "off",
+      disabled: researchBusy,
+      action: "toggleWebResearchMode",
     },
-    {
+    ...(state.webResearchMode !== "off" ? [{
+      title: "Manual",
+      icon: "globe-2" as IconName,
+      checked: state.webResearchMode === "manual",
+      disabled: researchBusy || state.webResearchMode === "manual",
+      action: state.webResearchMode === "automatic-reading" ? "toggleAutomaticReadingResearch" as const : undefined,
+    }, {
       title: "Automatic for Reading",
-      icon: "sparkles",
+      icon: "sparkles" as IconName,
       checked: automaticActive,
-      action: "toggleAutomaticReadingResearch",
+      action: "toggleAutomaticReadingResearch" as const,
       disabled: researchBusy || (!automaticActive && state.readingMode !== "reading"),
-    },
+    }] : []),
     // Automatic-mode pauses/errors are only ever represented here, never
     // repeated in the top recovery row, so an actionable automatic issue
     // (a pause reason, or a plain activity error/lastError) must all route

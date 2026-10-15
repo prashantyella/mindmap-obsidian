@@ -249,10 +249,14 @@ export class MindmapSettingTab extends PluginSettingTab {
     new Setting(body).setName("Apple Books import").setDesc(reading ? "New annotations are imported and processed while Obsidian is open." : "Off. Enabling previews the first import and asks for confirmation.").addToggle((toggle) => toggle.setValue(reading).onChange(async (value) => {
       await this.plugin.selectReadingMode(value ? "reading" : "standard"); this.display();
     }));
-    new Setting(body).setName("Web research").setDesc("Manual works on selected text or the active note. Automatic is limited to eligible Apple Books annotations.").addDropdown((dropdown) => dropdown
-      .addOption("off", "Off").addOption("manual", "Manual").addOption("automatic-reading", "Automatic for Apple Books").setValue(research.mode)
+    new Setting(body).setName("Internet research").setDesc(research.mode === "off" ? "Off. Enabling asks for consent and defaults to Manual." : "On. Exa receives only locally derived queries, never raw note text.").addToggle((toggle) => toggle.setValue(research.mode !== "off").onChange(async (value) => {
+      await this.plugin.selectWebResearchMode(value ? "manual" : "off");
+      this.display();
+    }));
+    if (research.mode !== "off") new Setting(body).setName("Research mode").setDesc("Manual works on selected text or the active note. Automatic is limited to eligible Apple Books annotations.").addDropdown((dropdown) => dropdown
+      .addOption("manual", "Manual").addOption("automatic-reading", "Automatic for Apple Books").setValue(research.mode)
       .onChange(async (value) => {
-        await this.plugin.selectWebResearchMode(value === "manual" || value === "automatic-reading" ? value : "off");
+        await this.plugin.selectWebResearchMode(value === "automatic-reading" ? value : "manual");
         this.display();
       }));
     if (research.mode === "automatic-reading") {

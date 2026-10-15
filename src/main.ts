@@ -216,6 +216,7 @@ export default class MindmapPlugin extends Plugin {
   private webResearchActivity: "off" | "ready" | "deriving" | "searching" | "writing" | "error" = "off";
   private webResearchLastError: string | null = null;
   private webResearchPromise: Promise<ResearchFileResult> | null = null;
+  private webResearchModeChanging = false;
   private mindmapLocalGraphLeaf: WorkspaceLeaf | null = null;
   private mindmapLocalGraphPath: string | null = null;
   private focusLookupOnNextRender = false;
@@ -600,6 +601,10 @@ export default class MindmapPlugin extends Plugin {
 
   async selectWebResearchMode(mode: "off" | "manual" | "automatic-reading"): Promise<boolean> {
     if (mode === this.settings.webResearchMode) return true;
+    if (this.webResearchModeChanging) {
+      new Notice("Internet research mode is already changing.", 5000);
+      return false;
+    }
     if (this.webResearchPromise) {
       new Notice("Web research is running. Change the mode after it finishes.", 8000);
       return false;
@@ -609,112 +614,69 @@ export default class MindmapPlugin extends Plugin {
       return false;
     }
 
-    if (mode === "manual" && this.settings.webResearchMode === "off") {
-      const confirmed = await confirmMindmapRun(this.app, {
-        title: "Enable Manual Web Research?",
-        message: "Selected text or a bounded active-note excerpt is processed locally. Exa receives only derived queries and returns bounded source excerpts and metadata. Unrelated vault content is never sent externally.",
-        confirmText: "Enable manual research",
-        confirmClass: "mod-cta",
-      });
-      if (!confirmed) return false;
-    }
-    if (mode === "automatic-reading") {
-      const confirmed = await confirmMindmapRun(this.app, {
-        title: "Enable Automatic Apple Books Research?",
-        message: "Apple Books excerpts stay local for query derivation. Exa receives only derived queries and returns bounded sources. Automatic work is limited to five notes per sync and ten per day.",
-        confirmText: "Enable automatic research",
-        confirmClass: "mod-cta",
-      });
-      if (!confirmed) return false;
-    }
-    if (mode !== "off") {
+    this.webResearchModeChanging = true;
+    try {
+      if (mode === "manual" && this.settings.webResearchMode === "off") {
+        const confirmed = await confirmMindmapRun(this.app, {
+          title: "Enable Manual Web Research?",
+          message: "Selected text or a bounded active-note excerpt is processed locally. Exa receives only derived queries and returns bounded source excerpts and metadata. Unrelated vault content is never sent externally.",
+          confirmText: "Enable manual research",
+          confirmClass: "mod-cta",
+        });
+        if (!confirmed) return false;
+      }
+      if (mode === "automatic-reading") {
+        const confirmed = await confirmMindmapRun(this.app, {
+          title: "Enable Automatic Apple Books Research?",
+          message: "Apple Books excerpts stay local for query derivation. Exa receives only derived queries and returns bounded sources. Automatic work is limited to five notes per sync and ten per day.",
+          confirmText: "Enable automatic research",
+          confirmClass: "mod-cta",
+        });
+        if (!confirmed) return false;
+      }
+      if (mode !== "off") {
+        try {
+          await this.getWebResearchPrerequisites();
+        } catch (error) {
+          this.webResearchActivity = "error";
+          this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research is not ready.";
+          new Notice(this.webResearchLastError, 8000);
+          this.updateStatusBar();
+          return false;
+        }
+      }
+
+      const previousMode = this.settings.webResearchMode;
+      const previousActivity = this.webResearchActivity;
+      const previousError = this.webResearchLastError;
+      this.settings.webResearchMode = mode;
+      this.webResearchActivity = mode === "off" ? "off" : "ready";
+      this.webResearchLastError = null;
       try {
-        await this.getWebResearchPrerequisites();
-      } catch (error) {
-        this.webResearchActivity = "error";
-        this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research is not ready.";
+        await this.saveSettings();
+      } catch {
+        this.settings.webResearchMode = previousMode;
+        this.webResearchActivity = previousActivity;
+        this.webResearchLastError = previousError ?? "Could not save Web Research mode.";
         new Notice(this.webResearchLastError, 8000);
         this.updateStatusBar();
         return false;
       }
-    }
-
-    const previousMode = this.settings.webResearchMode;
-    const previousActivity = this.webResearchActivity;
-    const previousError = this.webResearchLastError;
-    this.settings.webResearchMode = mode;
-    this.webResearchActivity = mode === "off" ? "off" : "ready";
-    this.webResearchLastError = null;
-    try {
-      await this.saveSettings();
-    } catch {
-      this.settings.webResearchMode = previousMode;
-      this.webResearchActivity = previousActivity;
-      this.webResearchLastError = previousError ?? "Could not save Web Research mode.";
-      new Notice(this.webResearchLastError, 8000);
+      if (mode === "automatic-reading") {
+        await this.refreshAutomaticResearchPolicyStatus();
+        await this.syncReadingMode();
+      }
       this.updateStatusBar();
-      return false;
+      return true;
+    } finally {
+      this.webResearchModeChanging = false;
     }
-    if (mode === "automatic-reading") {
-      await this.refreshAutomaticResearchPolicyStatus();
-      await this.syncReadingMode();
-    }
-    this.updateStatusBar();
-    return true;
   }
 
   async toggleWebResearchMode(): Promise<void> {
-    if (this.webResearchPromise) {
-      new Notice("Web research is already running; mode cannot change yet.", 8000);
-      return;
-    }
-    if (this.settings.webResearchMode === "manual") {
-      const previous = this.settings.webResearchMode;
-      this.settings.webResearchMode = "off";
-      this.webResearchActivity = "off";
-      this.webResearchLastError = null;
-      try { await this.saveSettings(); } catch {
-        this.settings.webResearchMode = previous;
-        this.webResearchActivity = "error";
-        this.webResearchLastError = "Could not save Web Research mode.";
-        new Notice(this.webResearchLastError, 8000);
-        this.updateStatusBar();
-        return;
-      }
-      this.updateStatusBar();
-      new Notice("Manual web research disabled.", 5000);
-      return;
-    }
-    const confirmed = await confirmMindmapRun(this.app, {
-      title: "Enable Manual Web Research?",
-      message: "Selected text or a bounded active-note excerpt is processed locally by Qwen. Exa receives only one or two derived queries and returns up to five bounded source excerpts and metadata. Unrelated vault content is never sent externally.",
-      confirmText: "Enable manual research",
-      confirmClass: "mod-cta",
-    });
-    if (!confirmed) return;
-    try {
-      await this.getWebResearchPrerequisites();
-    } catch (error) {
-      this.webResearchActivity = "error";
-      this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research is not ready.";
-      new Notice(this.webResearchLastError, 8000);
-      this.updateStatusBar();
-      return;
-    }
-    const previous = this.settings.webResearchMode;
-    this.settings.webResearchMode = "manual";
-    this.webResearchActivity = "ready";
-    this.webResearchLastError = null;
-    try { await this.saveSettings(); } catch {
-      this.settings.webResearchMode = previous;
-      this.webResearchActivity = "error";
-      this.webResearchLastError = "Could not save Web Research mode.";
-      new Notice(this.webResearchLastError, 8000);
-      this.updateStatusBar();
-      return;
-    }
-    this.updateStatusBar();
-    new Notice("Manual web research enabled.", 5000);
+    const enabled = this.settings.webResearchMode !== "off";
+    const changed = await this.selectWebResearchMode(enabled ? "off" : "manual");
+    if (changed) new Notice(enabled ? "Internet research disabled." : "Internet research enabled in Manual mode.", 5000);
   }
 
   async toggleAutomaticReadingResearch(): Promise<void> {
