@@ -30,21 +30,22 @@ function summary(values: readonly number[]): { p50Ms: number; p95Ms: number } {
 }
 
 async function measureSidebarTimer(kind: "lookup" | "note" | "typing-idle", samples = 20): Promise<number[]> {
-  const started = performance.now();
   const latencies: number[] = [];
   const controllers: SidebarRefreshController[] = [];
   await new Promise<void>((resolve) => {
-    const record = () => {
-      latencies.push(performance.now() - started);
-      if (latencies.length === samples) resolve();
-    };
     for (let index = 0; index < samples; index += 1) {
+      let started = 0;
+      const record = () => {
+        latencies.push(performance.now() - started);
+        if (latencies.length === samples) resolve();
+      };
       const controller = new SidebarRefreshController({
         runLookup: kind === "lookup" ? record : () => undefined,
         refreshNote: kind === "note" ? record : () => undefined,
         typingEnded: kind === "typing-idle" ? record : () => undefined,
       });
       controllers.push(controller);
+      started = performance.now();
       if (kind === "lookup") controller.scheduleLookup();
       else if (kind === "note") controller.scheduleNoteRefresh();
       else controller.recordTyping();
