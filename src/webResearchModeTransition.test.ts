@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { WebResearchModeTransition, type WebResearchModeSnapshot } from "./webResearchModeTransition";
+import { prerequisiteFailureState, WebResearchModeTransition, type WebResearchModeSnapshot } from "./webResearchModeTransition";
 
 function harness(initial: WebResearchModeSnapshot, readingMode: "standard" | "reading" = "standard") {
   let current = { ...initial };
@@ -81,4 +81,31 @@ void test("an overlap is busy even when the first change has applied the same mo
   releaseSave();
   assert.equal(await first, "changed");
   assert.deepEqual(h.durable(), h.current());
+});
+
+void test("failed Automatic prerequisites preserve an existing Manual snapshot", async () => {
+  const previous: WebResearchModeSnapshot = { mode: "manual", activity: "ready", lastError: "existing context" };
+  const failure = prerequisiteFailureState(previous, "Provider unavailable");
+  assert.equal(failure.exposeInStatus, false);
+  assert.deepEqual(failure.snapshot, previous);
+
+  const h = harness(previous, "reading");
+  const result = await h.transition.change(h.options("automatic-reading", async () => {
+    const prepared = prerequisiteFailureState(h.current(), "Provider unavailable");
+    assert.equal(prepared.exposeInStatus, false);
+    assert.deepEqual(prepared.snapshot, previous);
+    return false;
+  }));
+  assert.equal(result, "cancelled");
+  assert.deepEqual(h.current(), previous);
+  assert.deepEqual(h.durable(), previous);
+  assert.equal(h.saves(), 0);
+});
+
+void test("failed first enable remains actionable in status without persisting a mode", () => {
+  const previous: WebResearchModeSnapshot = { mode: "off", activity: "off", lastError: null };
+  assert.deepEqual(prerequisiteFailureState(previous, "Provider unavailable"), {
+    snapshot: { mode: "off", activity: "error", lastError: "Provider unavailable" },
+    exposeInStatus: true,
+  });
 });

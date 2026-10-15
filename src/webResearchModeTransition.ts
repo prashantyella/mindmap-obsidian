@@ -9,6 +9,14 @@ export interface WebResearchModeSnapshot {
 
 export type WebResearchModeChangeResult = "changed" | "unchanged" | "busy" | "cancelled" | "save-failed";
 
+export function prerequisiteFailureState(previous: WebResearchModeSnapshot, message: string): {
+  snapshot: WebResearchModeSnapshot;
+  exposeInStatus: boolean;
+} {
+  if (previous.mode !== "off") return { snapshot: previous, exposeInStatus: false };
+  return { snapshot: { ...previous, activity: "error", lastError: message }, exposeInStatus: true };
+}
+
 /** Serializes consent/preflight/save so an unsaved transient mode can never start a competing change. */
 export class WebResearchModeTransition {
   private changing = false;

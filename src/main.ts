@@ -24,7 +24,7 @@ import { collectResearch, researchNote } from "./webResearch";
 import { prepareActiveNoteResearchInput } from "./researchInput";
 import { renderCompanionResearchContent } from "./researchWriter";
 import { MAX_RESEARCH_INPUT_CHARS, WebResearchError } from "./webResearchTypes";
-import { WebResearchModeTransition, type WebResearchModeSnapshot } from "./webResearchModeTransition";
+import { prerequisiteFailureState, WebResearchModeTransition, type WebResearchModeSnapshot } from "./webResearchModeTransition";
 import { createReadingStateStore, type ReadingStateStore } from "./readingState";
 import { createObsidianVaultApi } from "./readingVault";
 import { ReadingModeController, type ReadingHealth, type ReadingMode, type ReadingPreview } from "./readingMode";
@@ -639,10 +639,14 @@ export default class MindmapPlugin extends Plugin {
           try {
             await this.getWebResearchPrerequisites();
           } catch (error) {
-            this.webResearchActivity = "error";
-            this.webResearchLastError = error instanceof WebResearchError ? error.message : "Web Research is not ready.";
-            new Notice(this.webResearchLastError, 8000);
-            this.updateStatusBar();
+            const message = error instanceof WebResearchError ? error.message : "Web Research is not ready.";
+            const failure = prerequisiteFailureState(previous, message);
+            if (failure.exposeInStatus) {
+              this.webResearchActivity = failure.snapshot.activity;
+              this.webResearchLastError = failure.snapshot.lastError;
+              this.updateStatusBar();
+            }
+            new Notice(message, 8000);
             return false;
           }
         }
