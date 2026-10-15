@@ -9,6 +9,21 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.10
+
+### Changed
+- Add independent Apple Books import and Internet research on/off controls in settings and the native status menu, preserving consent and Manual/Automatic research choices.
+- Hide completed migration details and internal engine labels from the status menu, keeping relevant progress and recovery actions.
+- Add opt-in performance benchmarks and a synthetic local-model connection-quality evaluator without changing embedding models or ranking settings.
+
+### Fixed
+- Keep graph geometry and markers proportional when the sidebar resizes, with full-width rendering and narrow-panel tooltip positioning.
+- Clean up resize observers and animation frames safely across view closure and pop-out windows.
+- Serialize research-mode transitions, roll back failed saves, and preserve an existing research mode when a requested change fails its prerequisites.
+- Reject invalid quality-evaluation bounds and measure each sidebar timing sample from its own scheduling timestamp.
+
+`minAppVersion` remains `1.7.2`; desktop only. Existing notes, settings, and font choices are preserved.
+
 ## 0.3.9
 
 ### Changed
