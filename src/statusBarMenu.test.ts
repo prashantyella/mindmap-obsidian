@@ -651,12 +651,34 @@ void test("Checkpoint 10B item 3: the migration section is absent from the menu 
   assert.equal(items.some((item) => item.action === "startMigration" || item.action === "retryMigration" || item.action === "cancelMigration"), false);
 });
 
+void test("completed migration is omitted despite contract canStart, while routine controls remain", () => {
+  const items = buildStatusBarMenuItems(state({
+    readingMode: "reading",
+    webResearchMode: "manual",
+    migration: { phase: "complete", message: "complete", discoveredCount: 920, processedCount: 920, canStart: true, canRetry: false, canCancel: false },
+  }));
+  assert.equal(items.some((item) => item.title === "Mindmap engine (TypeScript)" || item.title.startsWith("Migration:")), false);
+  assert.equal(items.some((item) => item.action === "startMigration" || item.action === "retryMigration" || item.action === "cancelMigration"), false);
+  assert.equal(items.find((item) => item.title === "Apple Books import")?.action, "selectStandardMode");
+  assert.equal(items.find((item) => item.title === "Internet research")?.action, "toggleWebResearchMode");
+  assert.equal(items.find((item) => item.title === "Run current scope")?.action, "runCurrent");
+  assert.equal(items.find((item) => item.title === "Open Mindmap")?.action, "openMindmap");
+});
+
 void test("Checkpoint 10B item 3: a not-started migration shows a Start action but never Retry/Cancel", () => {
   const items = buildStatusBarMenuItems(state({ migration: { phase: "not-started", message: "not started", discoveredCount: 0, processedCount: 0, canStart: true, canRetry: false, canCancel: false } }));
   assert.ok(items.some((item) => item.action === "startMigration"));
   assert.equal(items.some((item) => item.action === "retryMigration"), false);
   assert.equal(items.some((item) => item.action === "cancelMigration"), false);
   assert.ok(items.some((item) => item.title.includes("Migration: not started (0/0)")));
+  assert.equal(items.some((item) => item.title === "Mindmap engine (TypeScript)"), false);
+});
+
+void test("cancelled migration keeps one Start recovery action and its status", () => {
+  const items = buildStatusBarMenuItems(state({ migration: { phase: "cancelled", message: "cancelled", discoveredCount: 40, processedCount: 12, canStart: true, canRetry: false, canCancel: false } }));
+  assert.equal(items.filter((item) => item.action === "startMigration").length, 1);
+  assert.equal(items.some((item) => item.action === "retryMigration" || item.action === "cancelMigration"), false);
+  assert.ok(items.some((item) => item.title === "Migration: cancelled (12/40)"));
 });
 
 void test("Checkpoint 10B item 3: an in-flight migration shows a Cancel action and progress counts, never Start/Retry", () => {
@@ -668,8 +690,8 @@ void test("Checkpoint 10B item 3: an in-flight migration shows a Cancel action a
 });
 
 void test("Checkpoint 10B item 3: a failed migration shows a Retry action, never Start/Cancel", () => {
-  const items = buildStatusBarMenuItems(state({ migration: { phase: "failed", message: "failed retryable", discoveredCount: 10, processedCount: 3, canStart: false, canRetry: true, canCancel: false } }));
-  assert.ok(items.some((item) => item.action === "retryMigration"));
+  const items = buildStatusBarMenuItems(state({ migration: { phase: "failed", message: "failed retryable", discoveredCount: 10, processedCount: 3, canStart: true, canRetry: true, canCancel: false } }));
+  assert.equal(items.filter((item) => item.action === "retryMigration").length, 1);
   assert.equal(items.some((item) => item.action === "startMigration"), false);
   assert.equal(items.some((item) => item.action === "cancelMigration"), false);
 });

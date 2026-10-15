@@ -357,18 +357,20 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
 
   const topRecoveryRow = buildTopRecoveryRow(state);
 
-  // Item 3 (Checkpoint 10B): shown only once a migration record actually exists for this vault
-  // (`state.migration` is `undefined` when the production engine itself is unavailable). A
-  // terminal "complete"/"cancelled" state with nothing left to retry shows status only, no action
-  // row -- Start/Retry/Cancel appear exactly when `canStart`/`canRetry`/`canCancel` say so.
+  // Migration is an attention/recovery surface, not routine engine identity. A complete
+  // record stays available to engine APIs but is intentionally omitted here. Failed records
+  // prefer Retry over the contract's broader canStart affordance to avoid duplicate actions.
   const migration = state.migration;
-  const migrationItems: StatusBarMenuItemDescriptor[] = migration
+  const migrationItems: StatusBarMenuItemDescriptor[] = migration && migration.phase !== "complete"
     ? [
-      { title: "Mindmap engine (TypeScript)", label: true },
       { title: `Migration: ${migration.message} (${migration.processedCount}/${migration.discoveredCount})`, icon: "database", disabled: true },
-      ...(migration.canStart ? [{ title: "Start migration", icon: "play" as IconName, action: "startMigration" as const }] : []),
-      ...(migration.canRetry ? [{ title: "Retry migration", icon: "refresh-cw" as IconName, action: "retryMigration" as const }] : []),
-      ...(migration.canCancel ? [{ title: "Cancel migration", icon: "x" as IconName, action: "cancelMigration" as const }] : []),
+      ...(migration.phase === "failed" && migration.canRetry
+        ? [{ title: "Retry migration", icon: "refresh-cw" as IconName, action: "retryMigration" as const }]
+        : migration.canStart
+          ? [{ title: "Start migration", icon: "play" as IconName, action: "startMigration" as const }]
+          : migration.canCancel
+            ? [{ title: "Cancel migration", icon: "x" as IconName, action: "cancelMigration" as const }]
+            : []),
     ]
     : [];
 
