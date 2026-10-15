@@ -11,6 +11,7 @@
     "lint:obsidian": "eslint --config eslint.obsidian.config.mjs src",
     "typecheck": "tsc --noEmit",
     "test": "tsx --import ./scripts/test-setup.mjs --test $(find src -name '*.test.ts' -print)",
+    "quality:connections": "tsx scripts/evaluate-connection-quality.ts",
     "check": "npm run lint && npm run lint:obsidian && npm run typecheck && npm test && npm run build && npm run validate",
     "validate": "node scripts/validate-release.mjs",
     "release:prepare": "npm run build && npm run validate && node scripts/prepare-release.mjs"
