@@ -74,6 +74,14 @@ export function evaluateConnectionQuality(
   embeddings: ReadonlyMap<string, QualityEmbedding>,
   options: Omit<RelatedSelectionOptions, "selfPath"> & { candidateLimit: number },
 ): ConnectionQualityResult {
+  if (!Number.isInteger(options.relatedLimit) || options.relatedLimit <= 0) {
+    throw new Error("quality evaluation relatedLimit must be a positive integer");
+  }
+  for (const query of fixture.queries) {
+    if (!Array.isArray(query.relevant) || query.relevant.length === 0) {
+      throw new Error(`quality query ${query.path} must include at least one explicit relevance judgment`);
+    }
+  }
   const paths = fixture.notes.filter((note) => !note.excluded).map((note) => canonicalizePath(note.path));
   if (new Set(paths).size !== paths.length) throw new Error("quality fixture contains duplicate note paths");
   const first = embeddings.get(paths[0]);
@@ -125,7 +133,7 @@ export function evaluateConnectionQuality(
       precisionAtK: relevantReturned.length / options.relatedLimit,
       expectedCoverage: relevantReturned.length / Math.min(options.relatedLimit, relevant.size),
       labeledCorePrecision: coreReturned.length === 0 ? 1 : relevantCore.length / coreReturned.length,
-      recallAtK: relevant.size === 0 ? 1 : relevantReturned.length / relevant.size,
+      recallAtK: relevantReturned.length / relevant.size,
       reciprocalRank: firstRelevant === -1 ? 0 : 1 / (firstRelevant + 1),
       selfHit: returned.includes(selfPath),
     };
