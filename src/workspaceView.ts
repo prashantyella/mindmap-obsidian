@@ -228,6 +228,8 @@ export class MindmapWorkspaceView extends ItemView {
   private heatmapTooltipEl: HTMLElement | null = null;
   private heatmapResizeObserver: ResizeObserver | null = null;
   private heatmapResizeFrame: number | null = null;
+  private heatmapResizeWindow: Window | null = null;
+  private heatmapClosed = false;
   private heatmapWidth: number | null = null;
   private readonly heatmapNodes = new RetainedSvgNodes<SVGElement>();
   private readonly heatmapCandidates = new Map<string, RelatedCandidate>();
@@ -280,6 +282,7 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.heatmapClosed = false;
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.render()));
     this.registerEvent(this.app.metadataCache.on("changed", (file) => {
       if (file.path !== this.activePath) return;
@@ -327,6 +330,7 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.heatmapClosed = true;
     this.liveRequestId += 1;
     this.lookupRequestId += 1;
     this.refreshController.close();
@@ -856,32 +860,40 @@ export class MindmapWorkspaceView extends ItemView {
   }
 
   private ensureHeatmapResize(svg: SVGSVGElement): void {
-    if (this.heatmapResizeObserver !== null) return;
     const ownerWindow = svg.ownerDocument.defaultView ?? window;
+    if (this.heatmapClosed) return;
+    if (this.heatmapResizeObserver !== null && this.heatmapResizeWindow === ownerWindow) return;
+    if (this.heatmapResizeObserver !== null || this.heatmapResizeFrame !== null) this.disconnectHeatmapResize();
     if (typeof ownerWindow.ResizeObserver !== "function") return;
-    this.heatmapResizeObserver = new ownerWindow.ResizeObserver((entries) => {
+    this.heatmapResizeWindow = ownerWindow;
+    const observer = new ownerWindow.ResizeObserver((entries) => {
+      if (this.heatmapClosed || this.heatmapResizeObserver !== observer || this.heatmapResizeWindow !== ownerWindow) return;
       const width = entries.find((entry) => entry.target === svg)?.contentRect.width ?? svg.getBoundingClientRect().width;
       if (!(width > 0) || width === this.heatmapWidth) return;
       this.heatmapWidth = width;
       if (this.heatmapResizeFrame !== null) return;
-      this.heatmapResizeFrame = ownerWindow.requestAnimationFrame(() => {
+      const frame = ownerWindow.requestAnimationFrame(() => {
+        if (this.heatmapResizeFrame !== frame) return;
         this.heatmapResizeFrame = null;
         const heatmap = this.heatmapEl;
-        if (this.heatmapSvgEl !== svg || heatmap === null || this.heatmapCandidates.size === 0) return;
+        if (this.heatmapClosed || this.heatmapResizeObserver !== observer || this.heatmapResizeWindow !== ownerWindow
+          || this.heatmapSvgEl !== svg || heatmap === null || this.heatmapCandidates.size === 0) return;
         this.renderHeatmap(heatmap, [...this.heatmapCandidates.values()]);
       });
+      this.heatmapResizeFrame = frame;
     });
-    this.heatmapResizeObserver.observe(svg);
+    this.heatmapResizeObserver = observer;
+    observer.observe(svg);
   }
 
   private disconnectHeatmapResize(): void {
     this.heatmapResizeObserver?.disconnect();
     this.heatmapResizeObserver = null;
     if (this.heatmapResizeFrame !== null) {
-      const ownerWindow = this.heatmapSvgEl?.ownerDocument.defaultView ?? window;
-      ownerWindow.cancelAnimationFrame(this.heatmapResizeFrame);
+      this.heatmapResizeWindow?.cancelAnimationFrame(this.heatmapResizeFrame);
       this.heatmapResizeFrame = null;
     }
+    this.heatmapResizeWindow = null;
   }
 
   private selectCandidateFromGraph(path: string): void {
