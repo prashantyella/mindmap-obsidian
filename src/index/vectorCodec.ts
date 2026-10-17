@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { runCooperativeBlocks, throwIfAborted, yieldWithWindowTimer, type CooperativeWorkOptions } from "./cooperativeWork";
+import { runCooperativeBlocks, throwIfAborted, yieldToProcessingLoop, type CooperativeWorkOptions } from "./cooperativeWork";
 
 /**
  * Stable, versioned little-endian binary format for a contiguous matrix of
@@ -265,7 +265,7 @@ export async function decodeVectorMatrixCooperatively(bytes: Uint8Array, options
     const snapshotMetrics = await runCooperativeBlocks(bytes.length, 64 * 1024, (start, end) => snapshot.set(bytes.subarray(start, end), start), options);
     options.onStage?.({ stage: "snapshot-copy", wallMs: now() - snapshotStarted, maxSynchronousSliceMs: snapshotMetrics.maxSliceMs, yieldCount: snapshotMetrics.yieldCount, usedOwnedView: false });
     workingBytes = snapshot;
-    await (options.yieldControl ?? yieldWithWindowTimer)(options.signal);
+    await (options.yieldControl ?? yieldToProcessingLoop)(options.signal);
     throwIfAborted(options.signal);
   }
   const { view, kind, dimension, count, vectorByteLength } = canView ? initial : parseHeader(workingBytes, options.expectedKind);
@@ -275,7 +275,7 @@ export async function decodeVectorMatrixCooperatively(bytes: Uint8Array, options
   const declaredChecksum = workingBytes.subarray(HEADER_BYTES + vectorByteLength, HEADER_BYTES + vectorByteLength + CHECKSUM_BYTES);
   if (!bytesEqual(declaredChecksum, checksumResult.digest)) throw new VectorCodecError("checksum mismatch: the vector matrix bytes have been altered or are corrupt.");
 
-  await (options.yieldControl ?? yieldWithWindowTimer)(options.signal);
+  await (options.yieldControl ?? yieldToProcessingLoop)(options.signal);
   throwIfAborted(options.signal);
   if (options.expectedArtifactChecksum !== undefined) {
     const manifestHashStarted = now();
@@ -284,7 +284,7 @@ export async function decodeVectorMatrixCooperatively(bytes: Uint8Array, options
     if (Buffer.from(manifestHash.digest).toString("hex") !== options.expectedArtifactChecksum) {
       throw new VectorCodecError("manifest checksum mismatch: the encoded matrix artifact does not match its manifest.");
     }
-    await (options.yieldControl ?? yieldWithWindowTimer)(options.signal);
+    await (options.yieldControl ?? yieldToProcessingLoop)(options.signal);
     throwIfAborted(options.signal);
   }
   const snapshotView = !canView && IS_LITTLE_ENDIAN && workingBytes.buffer instanceof ArrayBuffer && workingBytes.byteOffset === 0 && workingBytes.byteLength === workingBytes.buffer.byteLength;
@@ -318,7 +318,7 @@ export async function decodeVectorMatrixCooperatively(bytes: Uint8Array, options
   if (currentRow >= 0) assertRowIsUnitNormOrZeroCount(sumSquares, currentRow);
   throwIfAborted(options.signal);
   options.onStage?.({ stage: "validation-materialization", wallMs: now() - validationStarted, maxSynchronousSliceMs: validation.maxSliceMs, yieldCount: validation.yieldCount, usedOwnedView: canView });
-  await (options.yieldControl ?? yieldWithWindowTimer)(options.signal);
+  await (options.yieldControl ?? yieldToProcessingLoop)(options.signal);
   throwIfAborted(options.signal);
   return { kind, dimension, count, data };
 }

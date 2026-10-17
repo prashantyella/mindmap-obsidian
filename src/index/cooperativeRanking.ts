@@ -1,6 +1,6 @@
 import { TopKAccumulator } from "./topK";
 import type { ScoredNote } from "./vectorTypes";
-import { throwIfAborted, yieldWithWindowTimer } from "./cooperativeWork";
+import { throwIfAborted, yieldToProcessingLoop } from "./cooperativeWork";
 
 export interface CooperativeRankingOptions {
   blockSize?: number;
@@ -23,7 +23,7 @@ export async function rankCompositeCooperatively(
     throw new Error("invalid cooperative ranking bounds.");
   }
   const now = options.now ?? (() => performance.now());
-  const yieldToEventLoop = options.yieldToEventLoop ?? (() => yieldWithWindowTimer(options.signal));
+  const yieldToEventLoop = options.yieldToEventLoop ?? (() => yieldToProcessingLoop(options.signal));
   const retained = new TopKAccumulator(limit);
   let segmentStarted = now();
   throwIfAborted(options.signal);

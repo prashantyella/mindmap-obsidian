@@ -1,3 +1,5 @@
+import { clearImmediate, setImmediate } from "node:timers";
+
 export interface CooperativeWorkOptions {
   signal?: AbortSignal;
   sliceMs?: number;
@@ -14,8 +16,12 @@ function abortError(signal?: AbortSignal): Error {
   return signal?.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
 }
 
-/** A lifecycle-safe browser-timer yield: abort clears both timer and listener before rejecting. */
-export function yieldWithWindowTimer(signal?: AbortSignal): Promise<void> {
+/**
+ * Yield one Node event-loop turn without relying on Chromium's background-throttled
+ * window timers. This desktop-only processing work is not tied to a UI window.
+ * Abort clears both the pending immediate and listener before rejecting.
+ */
+export function yieldToProcessingLoop(signal?: AbortSignal): Promise<void> {
   throwIfAborted(signal);
   return new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -25,9 +31,9 @@ export function yieldWithWindowTimer(signal?: AbortSignal): Promise<void> {
       signal?.removeEventListener("abort", onAbort);
       callback();
     };
-    const timer = window.setTimeout(() => finish(resolve), 0);
+    const immediate = setImmediate(() => finish(resolve));
     const onAbort = () => {
-      window.clearTimeout(timer);
+      clearImmediate(immediate);
       finish(() => reject(abortError(signal)));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -45,7 +51,7 @@ export async function runCooperativeBlocks(
   const sliceMs = options.sliceMs ?? 4;
   if (!Number.isFinite(sliceMs) || !(sliceMs > 0)) throw new Error("sliceMs must be finite and positive.");
   const now = options.now ?? (() => performance.now());
-  const yieldControl = options.yieldControl ?? yieldWithWindowTimer;
+  const yieldControl = options.yieldControl ?? yieldToProcessingLoop;
   let sliceStarted = now();
   let maxSliceMs = 0;
   let yieldCount = 0;

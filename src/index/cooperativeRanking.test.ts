@@ -25,3 +25,17 @@ void test("cooperative ranking handles exclusions represented by null", async ()
   const result = await rankCompositeCooperatively(5, (index) => index % 2 === 0 ? null : { path: canonicalizePath(`${index}.md`), score: index }, 5);
   assert.deepEqual(result.map((item) => item.path), [canonicalizePath("3.md"), canonicalizePath("1.md")]);
 });
+
+void test("ranking completes exact bounded slices when background window timers never fire", { timeout: 2_000 }, async (context) => {
+  const browserTimer = context.mock.method(window, "setTimeout", () => 77);
+  let clock = 0;
+  const items: ScoredNote[] = Array.from({ length: 100 }, (_, index) => ({
+    path: canonicalizePath(`Note-${index}.md`), score: index % 17,
+  }));
+  const result = await rankCompositeCooperatively(items.length, (index) => {
+    clock += 1;
+    return items[index];
+  }, 8, { blockSize: 4, yieldAfterMs: 4, now: () => clock });
+  assert.deepEqual(result, [...items].sort(compareScored).slice(0, 8));
+  assert.equal(browserTimer.mock.callCount(), 0);
+});

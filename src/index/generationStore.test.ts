@@ -39,6 +39,7 @@ class BorrowedRestoreFs extends FakeIndexFs {
   replacementPath: string | null = null;
   replacementBytes: Uint8Array | null = null;
   mutateNextRead = false;
+  restoreBorrowedRead: (() => void) | null = null;
 
   override async readFileBytes(path: string): Promise<Uint8Array> {
     if (this.mutateNextRead && path === this.replacementPath && this.replacementBytes) {
@@ -47,7 +48,7 @@ class BorrowedRestoreFs extends FakeIndexFs {
       if (!stored) throw new Error("missing borrowed test artifact");
       const original = stored.slice();
       stored.set(this.replacementBytes);
-      window.setTimeout(() => stored.set(original), 0);
+      this.restoreBorrowedRead = () => stored.set(original);
       return stored;
     }
     return super.readFileBytes(path);
@@ -283,7 +284,18 @@ void test("borrowed mutable bytes cannot validate matrix B against manifest chec
   fs.replacementPath = notePath;
   fs.replacementBytes = encodeVectorMatrix({ kind: "note", dimension: DIM, count: 1, data: new Float32Array([1, 0, 0, 0]) });
   fs.mutateNextRead = true;
-  await assert.rejects(() => loadGeneration(fs, "/root", 2025), /manifest checksum/);
+  let restored = false;
+  await assert.rejects(() => loadGeneration(fs, "/root", 2025, {
+    onStage: (measurement) => {
+      // Restore the borrowed buffer after the private snapshot's embedded hash,
+      // before checking its manifest hash, independent of event-loop timing.
+      if (measurement.artifact === "notes.mvx" && measurement.stage === "embedded-hash") {
+        fs.restoreBorrowedRead?.();
+        restored = true;
+      }
+    },
+  }), /manifest checksum/);
+  assert.equal(restored, true);
   assert.equal((await loadGeneration(fs, "/root", 2025)).noteMatrix.count, 1, "restored artifact remains loadable after the failed borrowed snapshot");
 });
 
