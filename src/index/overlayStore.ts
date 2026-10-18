@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { joinRelative } from "../engine/atomicStore";
 import { AtomicBinaryStore } from "./atomicBinaryStore";
 import { normalizeVector } from "./cosineIndex";
+import { throwIfAborted, yieldToProcessingLoop } from "./cooperativeWork";
 import { OVERLAY_METADATA_JSON_MAX_BYTES } from "./budgets";
 import { identityKey } from "./generationMetadata";
 import { MAX_MANIFEST_SHARD_ROW_COUNT } from "./indexManifest";
@@ -18,7 +19,7 @@ import {
   OverlayCodecError,
   type OverlayContainerOperation,
 } from "./overlayCodec";
-import { checksumHex, MAX_MATRIX_TOTAL_BYTES, decodeVectorMatrix, encodeVectorMatrix, type VectorMatrix } from "./vectorCodec";
+import { checksumHex, MAX_DIMENSION, MAX_MATRIX_TOTAL_BYTES, decodeVectorMatrix, encodedMatrixByteLength, encodeVectorMatrix, type VectorMatrix } from "./vectorCodec";
 import type { NoteIdentityV1 } from "../engine/contracts";
 import { parseNoteIdentityV1 } from "../engine/contracts";
 
@@ -69,6 +70,7 @@ export class OverlayMetadataTooLargeError extends OverlayStoreError {
 
 const MAX_OVERLAY_BYTES = MAX_MATRIX_TOTAL_BYTES;
 const OVERLAY_EXTENSION = ".movl";
+const PREFIX_READ_CONCURRENCY = 8;
 /** A file's basename matches this pattern if and only if it is a name `overlayFileName` could have produced -- i.e. it is OWNED by this store. Anything else found under `overlays/` is foreign and is reported/ignored, never deleted, never treated as a fail-closed integrity failure. */
 const OWNED_OVERLAY_FILENAME_PATTERN = /^[0-9a-f]{64}\.movl$/;
 
@@ -289,9 +291,11 @@ export async function readOverlayPrefix(fs: IndexFs, root: string, identity: Not
   return readOverlayPrefixByFileName(fs, root, fileName);
 }
 
-async function readOverlayPrefixByFileName(fs: IndexFs, root: string, fileName: string): Promise<OverlayPrefixRecord | null> {
+async function readOverlayPrefixByFileName(fs: IndexFs, root: string, fileName: string, signal?: AbortSignal): Promise<OverlayPrefixRecord | null> {
+  throwIfAborted(signal);
   const store = binaryStoreFor(fs, root, fileName);
   const headerBytes = await readHeaderOrNull(fs, root, fileName);
+  throwIfAborted(signal);
   if (headerBytes === null) return null;
 
   let header;
@@ -299,6 +303,12 @@ async function readOverlayPrefixByFileName(fs: IndexFs, root: string, fileName: 
     header = decodeOverlayHeader(headerBytes);
   } catch (error) {
     throw new OverlayStoreError(`overlay "${fileName}" has an invalid header: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  // Bound allocations BEFORE reading the body, including for corrupt headers.
+  // Eight valid prefixes need < 300 KiB of encoded buffers at MAX_DIMENSION;
+  // validation scratch fits within the existing 8 MiB metadata allowance.
+  if (header.metadataLength > OVERLAY_METADATA_JSON_MAX_BYTES || header.noteVectorLength > encodedMatrixByteLength(MAX_DIMENSION, 1)) {
+    throw new OverlayStoreError(`overlay "${fileName}" prefix exceeds the metadata or single-note vector byte cap.`);
   }
   const bodyLength = overlayPrefixBodyLength(header);
   let bodyBytes: Uint8Array;
@@ -552,40 +562,68 @@ export interface ListOverlayPrefixesResult {
  * matches this store's own naming pattern (`isOwnedOverlayFileName`)
  * fails validation for any reason (corrupt, truncated, foreign content at
  * an owned path, filename/identity mismatch, checksum mismatch), this
- * throws `OverlayStoreError` immediately rather than silently skipping
+ * throws `OverlayStoreError` after settling in-flight reads rather than silently skipping
  * it -- a corrupt/unreadable OWNED overlay must never let base state
  * silently resurface (if it were a tombstone) or let compaction
  * incorporate stale data (if it were an upsert). A file that does NOT
  * match the naming pattern at all is foreign (never something this store
  * wrote) and is reported in `foreignFiles`, not treated as an error.
  */
-export async function listOverlayPrefixes(fs: IndexFs, root: string): Promise<ListOverlayPrefixesResult> {
+export async function listOverlayPrefixes(fs: IndexFs, root: string, signal?: AbortSignal): Promise<ListOverlayPrefixesResult> {
+  throwIfAborted(signal);
   const overlaysDir = joinRelative(root, "overlays");
   let entries: string[];
   try {
     entries = await fs.readdir(overlaysDir);
   } catch {
+    throwIfAborted(signal);
     return { records: [], foreignFiles: [] };
   }
-  const records: OverlayPrefixRecord[] = [];
+  throwIfAborted(signal);
+  const records: (OverlayPrefixRecord | null)[] = new Array<OverlayPrefixRecord | null>(entries.length).fill(null);
   const foreignFiles: string[] = [];
-  for (const entry of entries) {
-    if (!isOwnedOverlayFileName(entry)) {
-      foreignFiles.push(entry);
-      continue;
+  let nextIndex = 0;
+  let failure: { index: number; error: OverlayStoreError } | undefined;
+  const recordFailure = (index: number, error: unknown) => {
+    if (!failure || index < failure.index) {
+      failure = { index, error: new OverlayStoreError(
+        `owned overlay "${entries[index]}" failed validation and cannot be safely skipped (doing so could resurrect stale base state or let compaction incorporate stale data): ${error instanceof Error ? error.message : String(error)}`,
+      ) };
     }
-    const fileName = `overlays/${entry}`;
-    let record: OverlayPrefixRecord | null;
-    try {
-      record = await readOverlayPrefixByFileName(fs, root, fileName);
-    } catch (error) {
-      throw new OverlayStoreError(
-        `owned overlay "${entry}" failed validation and cannot be safely skipped (doing so could resurrect stale base state or let compaction incorporate stale data): ${error instanceof Error ? error.message : String(error)}`,
-      );
+  };
+  let sliceStarted = performance.now();
+  let pendingYield: Promise<void> | undefined;
+  const worker = async () => {
+    while (nextIndex < entries.length && !failure && !signal?.aborted) {
+      // Share one Node yield across workers so an immediately-resolving adapter
+      // cannot monopolize the renderer with a long chain of microtasks.
+      if (!pendingYield && performance.now() - sliceStarted >= 4) {
+        pendingYield = yieldToProcessingLoop().then(() => {
+          sliceStarted = performance.now();
+          pendingYield = undefined;
+        });
+      }
+      if (pendingYield) await pendingYield;
+      if (failure || signal?.aborted || nextIndex >= entries.length) return;
+      const index = nextIndex++;
+      const entry = entries[index];
+      if (!isOwnedOverlayFileName(entry)) {
+        foreignFiles.push(entry);
+        continue;
+      }
+      try {
+        records[index] = await readOverlayPrefixByFileName(fs, root, `overlays/${entry}`, signal);
+      } catch (error) {
+        recordFailure(index, error);
+      }
     }
-    if (record) records.push(record);
-  }
-  return { records, foreignFiles };
+  };
+  // Only eight promises, regardless of directory size. Each worker settles its
+  // current file before returning; neither failure nor abort leaves I/O running.
+  await Promise.all(Array.from({ length: Math.min(PREFIX_READ_CONCURRENCY, entries.length) }, () => worker()));
+  throwIfAborted(signal);
+  if (failure) throw failure.error;
+  return { records: records.filter((record): record is OverlayPrefixRecord => record !== null), foreignFiles };
 }
 
 export { OverlayCodecError };

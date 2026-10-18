@@ -113,6 +113,42 @@ void test("save then load round-trips the exact value", async () => {
   const store = makeStore(fs);
   await store.save({ count: 1, label: "a" });
   assert.deepEqual(await store.load(), { count: 1, label: "a" });
+  assert.equal(fs.files.get("/data/mindmap/state.json"), JSON.stringify({ schemaVersion: 1, data: { count: 1, label: "a" } }, null, 2));
+});
+
+void test("compact JSON preserves validation, durability, atomic failure cleanup, and pretty-file compatibility", async () => {
+  for (const fault of ["writeFile", "fsync", "readFile", "rename"] as const) {
+    const fs = new FakeFs();
+    const store = new AtomicStore<Doc>({ fs, root: "/data/mindmap", fileName: "state.json", schemaVersion: 1, parse: parseDoc, compactJson: true });
+    const value = { count: 1, label: "legacy" };
+    await makeStore(fs).save(value);
+    assert.deepEqual(await store.load(), value);
+    await store.save(value);
+    const compact = JSON.stringify({ schemaVersion: 1, data: value });
+    assert.equal(fs.files.get("/data/mindmap/state.json"), compact);
+    assert.deepEqual(await makeStore(fs).load(), value);
+    assert.equal(fs.fsyncedPaths.size, 2);
+    assert.ok(fs.fsyncedDirs.has("/data/mindmap"));
+    fs.faultOnce.add(fault);
+    await assert.rejects(store.save({ count: 2, label: "attempted" }));
+    assert.equal(fs.files.get("/data/mindmap/state.json"), compact);
+    assert.equal(fs.files.size, 1);
+    assert.deepEqual(await store.load(), value);
+  }
+});
+
+void test("compact JSON still rejects invalid write-back content before atomic rename", async () => {
+  const fs = new FakeFs();
+  const store = new AtomicStore<Doc>({ fs, root: "/root", fileName: "state.json", schemaVersion: 1, parse: parseDoc, compactJson: true });
+  await store.save({ count: 1, label: "committed" });
+  const writeFile = fs.writeFile.bind(fs);
+  fs.writeFile = async (path, contents) => {
+    await writeFile(path, contents);
+    fs.corruptNextReadOf.add(path);
+  };
+  await assert.rejects(store.save({ count: 2, label: "attempted" }), /Write-back verification failed/);
+  assert.deepEqual(await store.load(), { count: 1, label: "committed" });
+  assert.equal(fs.files.size, 1);
 });
 
 void test("save writes through a temp file and fsyncs it before the atomic rename", async () => {

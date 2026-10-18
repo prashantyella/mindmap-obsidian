@@ -33,6 +33,8 @@ export interface AtomicStoreOptions<T> {
   parse: (value: unknown) => T;
   /** Maximum bytes this store will accept from `fileName` or a temp file. The seam has no size-probe primitive, so this is enforced after `fs.readFile` returns rather than before -- it rejects an oversized document from being parsed or persisted, but does not bound the memory used by the read itself. */
   maxBytes?: number;
+  /** Compact JSON is opt-in; existing stores retain their two-space indentation. */
+  compactJson?: boolean;
 }
 
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
@@ -141,6 +143,7 @@ export class AtomicStore<T> {
   private readonly schemaVersion: number;
   private readonly parseValue: (value: unknown) => T;
   private readonly maxBytes: number;
+  private readonly compactJson: boolean;
   private readonly filePath: string;
   /** Directory portion of `fileName` relative to `root` (`""` when `fileName` has no subdirectory). */
   private readonly fileDir: string;
@@ -156,6 +159,7 @@ export class AtomicStore<T> {
     this.schemaVersion = options.schemaVersion;
     this.parseValue = options.parse;
     this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+    this.compactJson = options.compactJson ?? false;
     this.filePath = joinRelative(this.root, this.fileName);
     const { dir, base } = splitDirAndBase(this.fileName);
     this.fileDir = dir;
@@ -187,7 +191,7 @@ export class AtomicStore<T> {
       throw new EngineError("STORE_SCHEMA_INVALID", `Refusing to save a value that fails its own schema validation.`, { cause: String(error) });
     }
     const envelope: PersistedEnvelope = { schemaVersion: this.schemaVersion, data: verified };
-    const serialized = readBounded(JSON.stringify(envelope, null, 2), this.maxBytes, `Serialized state for "${this.fileName}"`);
+    const serialized = readBounded(JSON.stringify(envelope, null, this.compactJson ? undefined : 2), this.maxBytes, `Serialized state for "${this.fileName}"`);
 
     const tempBaseName = `${this.fileBaseName}${TEMP_PREFIX}${randomToken()}`;
     const tempRelative = this.fileDir === "" ? tempBaseName : `${this.fileDir}/${tempBaseName}`;

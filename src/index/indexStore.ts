@@ -87,11 +87,12 @@ function wrapOverlayError(error: unknown, context: string): IndexStoreError | En
 }
 
 /** Loads every currently-valid overlay's prefix, wrapping a fail-closed owned-file validation failure into an actionable `IndexStoreError` (never silently skipping it). */
-async function loadOverlayPrefixesOrThrow(fs: IndexFs, root: string): Promise<OverlayPrefixRecord[]> {
+async function loadOverlayPrefixesOrThrow(fs: IndexFs, root: string, signal?: AbortSignal): Promise<OverlayPrefixRecord[]> {
   try {
-    const { records } = await listOverlayPrefixes(fs, root);
+    const { records } = await listOverlayPrefixes(fs, root, signal);
     return records;
   } catch (error) {
+    throwIfAborted(signal);
     throw wrapOverlayError(error, "cannot safely proceed: a pending overlay failed validation");
   }
 }
@@ -199,7 +200,7 @@ export async function queryRelated(fs: IndexFs, root: string, options: QueryRela
 }
 
 async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation: LoadedGeneration | null, options: QueryRelatedOptions): Promise<ScoredNote[]> {
-  const overlays = await loadOverlayPrefixesOrThrow(fs, root);
+  const overlays = await loadOverlayPrefixesOrThrow(fs, root, options.signal);
 
   const queryVector = normalizeVector(options.queryVector);
   const candidates = await rankCompositeAsync(generation, overlays, queryVector, options.excludePath, options.limit, options.signal);

@@ -72,6 +72,7 @@ export class JobStore {
       schemaVersion: JOB_STORE_SCHEMA_VERSION,
       parse: parseJobStoreDocumentV1,
       maxBytes: MAX_STORE_SERIALIZED_BYTES,
+      compactJson: true,
     });
   }
 
