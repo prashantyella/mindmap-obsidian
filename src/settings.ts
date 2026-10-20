@@ -82,7 +82,7 @@ export const DEFAULT_SETTINGS: MindmapSettings = {
   minimumWords: 30,
 
   embedBaseUrl: "http://localhost:11434",
-  embedModel: "mxbai-embed-large",
+  embedModel: "embeddinggemma-2:270m",
   embedDimension: 0,
 
   llmBaseUrl: "http://localhost:11434",

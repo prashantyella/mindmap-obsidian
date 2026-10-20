@@ -38,6 +38,9 @@ jobs:
       - name: Run JavaScript tests
         run: npm test
 
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Build plugin
         run: npm run build
 

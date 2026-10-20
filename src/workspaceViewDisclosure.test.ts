@@ -82,9 +82,11 @@ interface TestCandidate {
   path: string;
   title: string;
   folderPath: string;
-  summary: string;
+  summary: string | null;
   heatmap: [];
   liveScore?: number;
+  liveKind?: string;
+  source?: "saved" | "live" | "lookup" | "pinned";
   pinned?: boolean;
 }
 
@@ -114,7 +116,7 @@ function candidate(pathValue: string): TestCandidate {
   return { file: { path: pathValue }, path: pathValue, title: pathValue, folderPath: "", summary: `Summary for ${pathValue}`, heatmap: [], liveScore: pathValue === "One.md" ? 1 : undefined, pinned: pathValue === "One.md" };
 }
 
-function createView(): { view: TestView; list: FakeElement; setActive: (path: string | null) => void; opens: () => number; pins: () => number } {
+function createView(): { view: TestView; list: FakeElement; candidates: TestCandidate[]; setActive: (path: string | null) => void; opens: () => number; pins: () => number } {
   const filename = path.resolve("src/workspaceView.ts");
   const output = ts.transpileModule(fs.readFileSync(filename, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
   const require = createRequire(filename);
@@ -151,7 +153,7 @@ function createView(): { view: TestView; list: FakeElement; setActive: (path: st
   view.renderHeatmap = () => undefined;
   view.stabilizeCandidates = (items) => items;
   view.reconcileRowOrder = () => undefined;
-  return { view, list, setActive: (next) => { activePath = next; }, opens: () => openCount, pins: () => pinCount };
+  return { view, list, candidates, setActive: (next) => { activePath = next; }, opens: () => openCount, pins: () => pinCount };
 }
 
 function bubbleClick(control: FakeElement, row: FakeElement, altKey = false): FakeEvent {
@@ -162,6 +164,43 @@ function bubbleClick(control: FakeElement, row: FakeElement, altKey = false): Fa
 }
 
 function detail(row: FakeElement): FakeElement | null { return row.querySelector(".mindmap-sidebar-detail"); }
+
+void test("missing summaries stay blank for live, saved, lookup and pinned results while badges and real summaries remain", () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "HTMLElement");
+  Object.defineProperty(globalThis, "HTMLElement", { value: FakeElement, configurable: true });
+  try {
+    const { view, list, candidates } = createView();
+    const first = candidates[0];
+    first.summary = null;
+    first.liveScore = .81;
+    for (const source of ["live", "saved", "lookup", "pinned"] as const) {
+      first.source = source;
+      for (const kind of ["core", "overreach", "creative", "fill"]) {
+        first.liveKind = kind;
+        view.render();
+        const row = list.querySelector<FakeElement>('[data-path="One.md"]')!;
+        assert.equal(row.querySelector<FakeElement>(".mindmap-sidebar-summary")!.textContent, "");
+        assert.equal(row.querySelector<FakeElement>(".mindmap-sidebar-score")!.textContent, "81%");
+      }
+    }
+    const row = list.querySelector<FakeElement>('[data-path="One.md"]')!;
+    first.liveScore = undefined; // Pinned-only rows must not get a replacement label either.
+    view.render();
+    assert.equal(row.querySelector<FakeElement>(".mindmap-sidebar-summary")!.textContent, "");
+    first.summary = "A real saved summary.";
+    view.render(true);
+    assert.equal(row.querySelector<FakeElement>(".mindmap-sidebar-summary")!.textContent, first.summary);
+    first.summary = null;
+    view.render(true);
+    assert.equal(row.querySelector<FakeElement>(".mindmap-sidebar-summary")!.textContent, "");
+    assert.equal(list.querySelector('[data-path="One.md"]'), row, "refresh retains the existing row");
+    const second = list.querySelector<FakeElement>('[data-path="Two.md"]')!;
+    assert.equal(second.querySelector<FakeElement>(".mindmap-sidebar-summary")!.textContent, "Summary for Two.md");
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "HTMLElement", previous);
+    else Reflect.deleteProperty(globalThis, "HTMLElement");
+  }
+});
 
 void test("actual render keeps independent disclosures, controls, and per-note choices stable", async () => {
   const globals = { HTMLElement: FakeElement, HTMLButtonElement: FakeButton, HTMLAnchorElement: FakeAnchor } as const;

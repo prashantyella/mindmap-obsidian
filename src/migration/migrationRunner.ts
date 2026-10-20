@@ -14,6 +14,7 @@ import {
   switchCurrentGeneration,
 } from "../index/generationStore";
 import type { NoteRowMetadataV1 } from "../index/generationMetadata";
+import { deleteOverlayIfSnapshotMatches, listOverlayPrefixes, overlayFileName, type OverlayPrefixRecord } from "../index/overlayStore";
 import type { IndexFs } from "../index/indexFs";
 import { MAX_MANIFEST_CHUNK_COUNT, MAX_MANIFEST_SHARD_ROW_COUNT } from "../index/indexManifest";
 import { manifestArtifactFingerprint, runWithIndexMutationLock } from "../index/indexStore";
@@ -312,6 +313,13 @@ export class MigrationRunner {
 
   /** Review item 1: FULL verification, and an EXACT canonical-fingerprint comparison between the current generation's own committed note set (from `verifyGenerationFully`'s `noteMetadata`, never the manifest's counts alone) and `freshEntries` -- a stale, missing, extra, or sourceHash-mismatched row is never silently accepted as "up to date". */
   private async currentGenerationFullyMatchesDesired(freshEntries: readonly MigrationPlanEntryV1[]): Promise<boolean> {
+    // A generation alone cannot prove that its pending overlays are redundant.
+    // Re-embedding replaces the whole committed view, including overlays.
+    try {
+      if ((await listOverlayPrefixes(this.deps.fs, this.deps.dataRoot)).records.length > 0) return false;
+    } catch {
+      return false; // Activation validates again before touching the current pointer.
+    }
     const currentId = await loadCurrentGenerationId(this.deps.fs, this.deps.dataRoot).catch(() => null);
     if (currentId === null) return false;
     let manifest: VectorIndexManifestV1;
@@ -591,6 +599,15 @@ export class MigrationRunner {
   private async reconcileLocked(): Promise<MigrationStatusV1> {
     const current = await this.getRecord();
     if (isTerminalMigrationPhase(current.phase)) {
+      // Applying a different embedding space must close the ordinary-work gate before
+      // startup can dispatch jobs. Build in staging; keep the old generation active
+      // until the replacement verifies and activates atomically. Failed/cancelled
+      // runs still require an explicit retry (no automatic failure loop).
+      if (current.phase === "complete" && (
+        current.desiredEmbeddingModel !== this.deps.embeddingModel || current.desiredDimension !== this.deps.dimension
+      )) {
+        return this.beginFreshRun(current);
+      }
       // Review item 6: a terminal "complete" record whose best-effort cleanup did not yet finish
       // is still resumable -- retried here, NEVER by re-entering activation.
       if (current.phase === "complete" && current.cleanupPending) {
@@ -978,20 +995,26 @@ export class MigrationRunner {
         return { kind: "failed", code: toFailureCode(error) };
       }
 
+      // Also check on an already-switched retry: edits during a crash/cleanup
+      // failure must be re-embedded, not silently deleted with old overlays.
+      let freshItems: ScopeDiscoveryItem[];
+      let overlays: OverlayPrefixRecord[];
+      try {
+        freshItems = await this.discoverItems();
+        overlays = (await listOverlayPrefixes(this.deps.fs, this.deps.dataRoot)).records;
+      } catch (error) {
+        return { kind: "failed", code: toFailureCode(error) };
+      }
+      if (computePlanFingerprint(this.planContext(), toPlanEntries(freshItems)) !== planResult.planFingerprint) {
+        return { kind: "replan", items: freshItems };
+      }
+
       if (currentId !== targetId) {
         // Not yet switched (or a stale run whose own earlier switch attempt never landed) -- the
         // FULL drift check runs HERE, immediately before the switch itself (review item 4). On the
         // idempotent already-switched retry path below (currentId === targetId), re-running this
         // same check would incorrectly flag OUR OWN prior switch as "the base changed" -- it must
         // only ever run when a switch is actually about to happen.
-        let freshItems: ScopeDiscoveryItem[];
-        try {
-          freshItems = await this.discoverItems();
-        } catch (error) {
-          return { kind: "failed", code: toFailureCode(error) };
-        }
-        const freshFingerprint = computePlanFingerprint(this.planContext(), toPlanEntries(freshItems));
-        if (freshFingerprint !== planResult.planFingerprint) return { kind: "replan", items: freshItems };
         if (!(await this.baseGenerationStillMatches(planResult))) return { kind: "replan", items: freshItems };
         if (currentId !== (planResult.baseGenerationId ?? null)) {
           return { kind: "replan", items: freshItems };
@@ -1015,6 +1038,19 @@ export class MigrationRunner {
       }
       if (manifestArtifactFingerprint(manifest) !== builtFingerprint) {
         return { kind: "failed", code: "GENERATION_ARTIFACT_MISMATCH" };
+      }
+      // Every current source was re-embedded into this generation. Remove only
+      // validated, unchanged owned overlays AFTER activation, under the mutation
+      // lock. A partial cleanup keeps migration non-complete; reload retries it
+      // before any ordinary work resumes. Foreign files are never touched.
+      try {
+        for (const overlay of overlays) {
+          if (!await deleteOverlayIfSnapshotMatches(this.deps.fs, this.deps.dataRoot, overlayFileName(overlay.identity), overlay.version, overlay.fingerprint)) {
+            return { kind: "switched-unverified" };
+          }
+        }
+      } catch {
+        return { kind: "switched-unverified" };
       }
       return { kind: "switched" };
     });

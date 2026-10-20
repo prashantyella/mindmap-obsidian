@@ -343,6 +343,7 @@ export class ProductionEngine {
       }
       const relatedConfig = options.relatedSelectionConfig;
       runners["process-note"] = new NoteJobRunner({
+        embeddingConfig: { model: options.embeddingModel, pipelineVersion: options.pipelineVersion },
         sourceReader,
         embedding: createProductionNoteEmbeddingSeam(options.embeddingProvider, options.embeddingModel, options.chunkOptions),
         metadata: createProductionNoteMetadataSeam(options.metadataProvider, options.metadataPipelineConfig),
@@ -352,6 +353,7 @@ export class ProductionEngine {
         deferWrite: (_persisted, identity, savedContent) => this.editingProtection?.isProtected(identity.canonicalPath, savedContent) ?? false,
         selectRelated: relatedConfig ? async (embedded, selfPath) => {
           const candidates = await this.indexStore.queryRelated({
+            embeddingModel: options.embeddingModel!,
             queryVector: embedded.noteVector,
             queryChunkVectors: embedded.chunkVectors,
             excludePath: selfPath,
@@ -451,6 +453,9 @@ export class ProductionEngine {
       embeddingModel: options.embeddingModel ?? "",
       dimension: options.embeddingDimension,
       pipelineVersion: options.pipelineVersion,
+      signal: this.lifecycleAbort.signal,
+      // Bound work per tick without imposing a two-second wait per note.
+      ingestBatchSize: 16,
     });
     this.migrationDriver = new MigrationDriver({
       runner: this.migrationRunner,
@@ -679,11 +684,11 @@ export class ProductionEngine {
    * write capability): create owned subdirectories -> stale-temp cleanup
    * (jobs/schedules) -> stale-staging cleanup (index) -> recover
    * interrupted jobs -> reconcile any in-flight migration ONE step
-   * (`migrationRunner.reconcile()` -- RESUMES an already-active run, never
-   * begins a NEW one: only `startMigration()`/`retryMigration()` do that)
+   * (`migrationRunner.reconcile()` resumes an active run or starts a new
+   * embedding-space migration after an explicit model/dimension change)
    * -> start the ALWAYS-safe `migrationDriver` (its own reconcile loop
-   * no-ops on `"not-started"`/a terminal phase, so starting it here never
-   * begins anything on its own either) -> preflight -> enable the ordinary
+   * no-ops on `"not-started"` and unchanged terminal phases)
+   * -> preflight -> enable the ordinary
    * JobEngine pump/CoreScheduler ONLY when migration is fully verified
    * `"complete"` AND both Ollama embedding/metadata readiness probes are
    * `"ok"` (item 1/2 -- see `tryStartOrdinaryWork`). A fresh install (never-
@@ -726,8 +731,8 @@ export class ProductionEngine {
       await this.safely("MIGRATION_STORE", () => this.migrationStore.cleanupStaleTempFiles().then(() => undefined));
       if (this.disposeRequested) return this.lastPreflightReport ?? this.emptyPreflightReport();
 
-      // Resumes whatever migration state already exists (advances an in-flight run by one step,
-      // no-ops on "not-started"/a terminal phase) -- never starts a brand-new migration on its own.
+      // Resume an existing migration, or re-embed a completed index after an explicit
+      // model/dimension configuration change, before ordinary jobs may start.
       await this.safely("MIGRATION_STORE", () => this.migrationRunner.reconcile().then(() => undefined));
       if (this.disposeRequested) return this.lastPreflightReport ?? this.emptyPreflightReport();
 
@@ -743,8 +748,8 @@ export class ProductionEngine {
       // Item 1: the migration driver is ALWAYS started here (once) -- it is the automatic,
       // lost-wakeup-safe reconcile loop that keeps an ALREADY-active run's own phase machine
       // moving forward with zero further caller intervention, but its `reconcile()` calls are
-      // themselves inert on "not-started"/a terminal phase (see `MigrationRunner.reconcileLocked`'s
-      // own default case) -- it never begins a fresh migration by itself.
+      // inert on "not-started" and unchanged terminal phases; a completed index
+      // with a newly applied model/dimension starts a replacement migration.
       this.migrationDriver.start();
       if (this.disposeRequested) return report;
 
@@ -816,7 +821,13 @@ export class ProductionEngine {
    */
   async startMigration(): Promise<MigrationStatusV1> {
     await this.assertMigrationStartable();
-    const status = await this.migrationRunner.start();
+    let status: MigrationStatusV1;
+    try {
+      status = await this.migrationRunner.start();
+    } catch (error) {
+      if (this.disposeRequested) return this.migrationRunner.getStatus();
+      throw error;
+    }
     this.migrationDriver.notifyProgress();
     // Deterministically settled (never relying solely on the fire-and-forget `subscribe()`
     // listener's own timing) -- a caller awaiting `startMigration()` sees any newly-cleared pump/
@@ -1018,6 +1029,7 @@ export class ProductionEngine {
     const embedded = await this.noteEmbeddingSeam.embed(projection, this.lifecycleAbort.signal);
     const config = this.options.relatedSelectionConfig;
     const candidates = await this.indexStore.queryRelated({
+      embeddingModel: this.options.embeddingModel,
       queryVector: embedded.noteVector,
       queryChunkVectors: embedded.chunkVectors,
       excludePath: canonical,
@@ -1052,7 +1064,7 @@ export class ProductionEngine {
     const embedded = await this.noteEmbeddingSeam.embed(projection, this.lifecycleAbort.signal);
     const boundedLimit = Math.max(1, limit);
     const candidateLimit = Math.max(boundedLimit, this.options.relatedSelectionConfig.candidateLimit);
-    const candidates = await this.indexStore.queryRelated({ queryVector: embedded.noteVector, queryChunkVectors: embedded.chunkVectors, limit: candidateLimit, signal: this.lifecycleAbort.signal });
+    const candidates = await this.indexStore.queryRelated({ embeddingModel: this.options.embeddingModel ?? undefined, queryVector: embedded.noteVector, queryChunkVectors: embedded.chunkVectors, limit: candidateLimit, signal: this.lifecycleAbort.signal });
     return candidates.slice(0, boundedLimit).map((c) => ({ schemaVersion: 1, path: c.path, score: c.score, kind: "lookup" }));
   }
 

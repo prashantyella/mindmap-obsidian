@@ -9,6 +9,23 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.11
+
+### Changed
+- Use background-safe cooperative processing yields for indexing and ranking.
+- Read index-update prefixes with up to eight concurrent readers while retaining exact ranking, corruption checks, cancellation, and bounded memory use.
+- Save the job queue as compact JSON, preserving all job history, schema compatibility, verification, and atomic writes.
+- Default new installations to `embeddinggemma-2:270m`; existing saved model selections remain unchanged.
+- Automatically stage and verify a replacement index when an embedding model or dimension change is applied.
+
+### Fixed
+- Keep the previous index available on disk if re-embedding fails, resume interrupted migration safely, and retire superseded overlays only after verified activation.
+- Replace queued jobs configured for an old embedding model and reject queries from mismatched embedding spaces, including models with matching dimensions.
+- Reject oversized index-update prefix declarations before allocating their bodies.
+- Leave missing sidebar summaries blank instead of showing generated match placeholders.
+
+`minAppVersion` remains `1.7.2`; desktop only. Existing fonts and layout are unchanged. New installations must install the default embedding model in Ollama or select an available model. Changing the embedding model requires re-embedding; ordinary processing waits for the verified replacement index.
+
 ## 0.3.10
 
 ### Changed

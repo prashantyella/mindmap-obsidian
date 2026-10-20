@@ -98,6 +98,8 @@ async function loadOverlayPrefixesOrThrow(fs: IndexFs, root: string, signal?: Ab
 }
 
 export interface QueryRelatedOptions {
+  /** Reject queries from another embedding space even when dimensions happen to match. */
+  embeddingModel?: string;
   /** Raw (not necessarily pre-normalized) note-level query vector; normalized here. */
   queryVector: Float32Array;
   /** Raw chunk vectors for refinement; normalized here. Refinement is skipped entirely (note-level ranking only) when empty. */
@@ -201,6 +203,12 @@ export async function queryRelated(fs: IndexFs, root: string, options: QueryRela
 
 async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation: LoadedGeneration | null, options: QueryRelatedOptions): Promise<ScoredNote[]> {
   const overlays = await loadOverlayPrefixesOrThrow(fs, root, options.signal);
+  if (options.embeddingModel !== undefined && (
+    (generation !== null && generation.manifest.embeddingModel !== options.embeddingModel) ||
+    overlays.some((overlay) => overlay.operation === "upsert" && overlay.embeddingModel !== options.embeddingModel)
+  )) {
+    throw new EngineError("EMBEDDING_MODEL_MISMATCH", "The embedding model does not match the active index. Wait for re-embedding to finish.");
+  }
 
   const queryVector = normalizeVector(options.queryVector);
   const candidates = await rankCompositeAsync(generation, overlays, queryVector, options.excludePath, options.limit, options.signal);

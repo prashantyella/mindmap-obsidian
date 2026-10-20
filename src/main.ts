@@ -94,6 +94,7 @@ import {
 } from "./engine/preflightProbes";
 import type { MigrationStatusV1 } from "./migration/migrationContract";
 import type { PreflightReportV1 } from "./engine/preflight";
+import { resolveKnownEmbeddingDimension } from "./engine/embeddingModelConfig";
 import { AppleBooksSqliteReader, createNodeAppleBooksFsAdapter } from "./reading/appleBooksSqlite";
 import { createNodeSqliteProcess } from "./reading/sqliteProcess";
 
@@ -108,31 +109,6 @@ interface RuntimeContext {
 
 /** Checkpoint 10B: the current TypeScript engine pipeline (chunking/embedding/metadata) version this vault's engine is composed under -- bumped only if this cutover's own pipeline shape changes, never tied to the retired Python pipeline's own versioning. */
 const PRODUCTION_PIPELINE_VERSION = 2;
-
-/**
- * Best-effort, explicitly-documented fallback for a handful of common
- * Ollama embedding models -- `MigrationRunner` requires an explicit,
- * bounded positive integer `dimension` before it will ever start a run
- * (see its own `beginFreshRun` guard). A vault running an unlisted custom
- * embedding model can still override it explicitly via the
- * `embedDimension` plugin setting; absent both, `embeddingDimension`
- * stays `undefined` and migration surfaces a closed
- * `MIGRATION_NOT_STARTABLE` guidance message rather than guessing.
- */
-const KNOWN_OLLAMA_EMBEDDING_DIMENSIONS: Readonly<Record<string, number>> = {
-  "mxbai-embed-large": 1024,
-  "nomic-embed-text": 768,
-  "all-minilm": 384,
-  "bge-m3": 1024,
-  "bge-large": 1024,
-  "snowflake-arctic-embed": 1024,
-};
-
-function resolveKnownEmbeddingDimension(model: string, explicitOverride: number | undefined): number | undefined {
-  if (explicitOverride !== undefined) return explicitOverride;
-  return KNOWN_OLLAMA_EMBEDDING_DIMENSIONS[model];
-}
-
 
 /** Checkpoint 10B LAUNCHAGENT: maps `BackgroundScheduler`'s own closed `BackgroundReconcileStatus` onto the existing coarse `LaunchAgentHealth` UI union -- a purely mechanical rename, never a behavior change to the status-bar surface itself. */
 function mapBackgroundReconcileStatusToHealth(status: import("./scheduling/backgroundScheduler").BackgroundReconcileStatus): LaunchAgentHealth {

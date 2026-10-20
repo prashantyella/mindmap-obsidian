@@ -195,21 +195,6 @@ function sourceLevel(activePath: string, candidatePath: string): number {
   return 1;
 }
 
-function formatScoreDetail(candidate: RelatedCandidate): string | null {
-  if (typeof candidate.liveScore !== "number") {
-    if (candidate.pinned) {
-      return "Pinned connection.";
-    }
-    return null;
-  }
-  const percent = Math.round(candidate.liveScore * 100);
-  if (candidate.source === "lookup") {
-    return `Lookup match (${percent}%).`;
-  }
-  const kind = candidate.liveKind ?? "semantic";
-  return `${candidate.source === "live" ? "Live" : "Saved"} ${kind} match (${percent}%).`;
-}
-
 export class MindmapWorkspaceView extends ItemView {
   private activePath: string | null = null;
   private selectedPath: string | null | undefined = undefined;
@@ -1044,7 +1029,7 @@ export class MindmapWorkspaceView extends ItemView {
     let detail = body.querySelector<HTMLElement>(".mindmap-sidebar-detail");
     if (expanded) {
       if (!detail) { detail = body.createDiv({ cls: "mindmap-sidebar-detail" }); detail.createDiv({ cls: "mindmap-sidebar-summary" }); }
-      detail.querySelector<HTMLElement>(".mindmap-sidebar-summary")!.textContent = candidate.summary ?? formatScoreDetail(candidate) ?? "No summary available yet.";
+      detail.querySelector<HTMLElement>(".mindmap-sidebar-summary")!.textContent = candidate.summary ?? "";
     } else {
       detail?.remove();
     }

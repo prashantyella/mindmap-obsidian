@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildGeneration, loadCurrentGenerationId, switchCurrentGeneration } from "../index/generationStore";
+import { buildGeneration, loadCurrentGenerationId, switchCurrentGeneration, verifyGenerationFully } from "../index/generationStore";
 import { FakeIndexFs } from "../index/fakeIndexFs.test-support";
 import { stableNoteIdentity, canonicalizePath, type NoteIdentityV1 } from "../engine/contracts";
 import { MAX_EMBEDDING_DIMENSION } from "../engine/embeddingLimits";
 import { projectSource } from "../engine/sourceProjection";
 import { BUDGET_DISK_BYTES, computeDiskBytes } from "../index/budgets";
 import { MAX_MANIFEST_SHARD_ROW_COUNT } from "../index/indexManifest";
+import { listOverlayPrefixes, writeUpsertOverlay, overlayFileName } from "../index/overlayStore";
 import type { EmbeddedNote, NoteEmbeddingSeam } from "../jobs/noteJob";
 import type { ScopeDiscoveryItem, ScopeDiscoverySeam } from "../jobs/scopeJob";
 import type { MigrationSourceReader } from "./migrationIngest";
@@ -147,6 +148,99 @@ void test("fresh install: getStatus() synthesizes not-started without persisting
   assert.equal(status.phase, "not-started");
   assert.equal(status.canStart, true);
   assert.equal(await new MigrationStore(fs, dataRoot).load(), null, "getStatus() must not itself persist a not-started record");
+});
+
+void test("completed index: a model/dimension change re-embeds every note, resumes staging and activates once", async () => {
+  const original = makeRunner();
+  seedNotes(original.vault, 3);
+  await original.runner.start();
+  await runToTerminal(original.runner);
+  const oldId = await loadCurrentGenerationId(original.fs, original.dataRoot);
+  const switches = countPointerSwitches(original.fs);
+  let calls = 0;
+  const embedding: NoteEmbeddingSeam = { async embed(projection, signal) {
+    calls++;
+    return fakeEmbedding({ model: "embeddinggemma-2:270m", dimension: 3 }).embed(projection, signal);
+  } };
+  const options = { fs: original.fs, vault: original.vault, embeddingModel: "embeddinggemma-2:270m", dimension: 3, embedding };
+  const next = makeRunner(options);
+  assert.notEqual((await next.runner.reconcile()).phase, "complete");
+  await next.runner.reconcile(); // Stage one entry before simulating a reload.
+  assert.equal(await loadCurrentGenerationId(original.fs, original.dataRoot), oldId);
+  const resumed = makeRunner(options);
+  assert.equal((await runToTerminal(resumed.runner)).phase, "complete");
+  assert.equal(calls, 3, "resume adopts valid staged entries instead of re-embedding them");
+  assert.equal(switches.count(), 1);
+  const id = await loadCurrentGenerationId(original.fs, original.dataRoot);
+  assert.notEqual(id, oldId);
+  const { manifest } = await verifyGenerationFully(original.fs, original.dataRoot, id!);
+  assert.equal(manifest.embeddingModel, "embeddinggemma-2:270m");
+  assert.equal(manifest.dimension, 3);
+  await verifyGenerationFully(original.fs, original.dataRoot, oldId!);
+  assert.equal((await resumed.runner.reconcile()).phase, "complete");
+  assert.equal(calls, 3, "unchanged configuration does not start another run");
+});
+
+for (const cancel of [false, true]) {
+  void test(`completed index: ${cancel ? "cancelled" : "failed"} model switch preserves the prior generation without retry loops`, async () => {
+    const original = makeRunner();
+    seedNotes(original.vault, 1);
+    await original.runner.start();
+    await runToTerminal(original.runner);
+    const oldId = await loadCurrentGenerationId(original.fs, original.dataRoot);
+    const next = makeRunner({ fs: original.fs, vault: original.vault, embeddingModel: "model-b", embedding: fakeEmbedding({ model: "model-b", failIdentities: new Set(original.vault.paths()) }) });
+    await next.runner.reconcile();
+    const result = cancel ? await next.runner.cancel() : await runToTerminal(next.runner);
+    assert.equal(result.phase, cancel ? "cancelled" : "failed");
+    assert.equal(await loadCurrentGenerationId(original.fs, original.dataRoot), oldId);
+    await verifyGenerationFully(original.fs, original.dataRoot, oldId!);
+    assert.equal((await next.runner.reconcile()).runId, result.runId);
+    assert.equal((await next.runner.getStatus()).phase, result.phase);
+  });
+}
+
+void test("completed index: dimension-only changes rebuild even when model and source hashes are unchanged", async () => {
+  const original = makeRunner();
+  seedNotes(original.vault, 1);
+  await original.runner.start();
+  await runToTerminal(original.runner);
+  const next = makeRunner({ fs: original.fs, vault: original.vault, dimension: 3, embedding: fakeEmbedding({ dimension: 3 }) });
+  assert.notEqual((await next.runner.reconcile()).phase, "complete");
+  assert.equal((await runToTerminal(next.runner)).phase, "complete");
+  const id = await loadCurrentGenerationId(original.fs, original.dataRoot);
+  assert.equal((await verifyGenerationFully(original.fs, original.dataRoot, id!)).manifest.dimension, 3);
+});
+
+void test("model switch retires old overlays only after activation and recovers a partial cleanup on reload", async () => {
+  const original = makeRunner();
+  seedNotes(original.vault, 1);
+  await original.runner.start();
+  await runToTerminal(original.runner);
+  const oldId = await loadCurrentGenerationId(original.fs, original.dataRoot);
+  const identity = stableNoteIdentity(canonicalizePath(original.vault.paths()[0]));
+  await writeUpsertOverlay(original.fs, original.dataRoot, {
+    identity, sourceHash: projectSource(identity, original.vault.read(identity.canonicalPath)!).sourceHash,
+    embeddingModel: DEFAULT_MODEL, dimension: DEFAULT_DIMENSION, noteVector: unitVector(DEFAULT_DIMENSION), chunkVectors: [],
+  });
+  original.fs.files.set(`${original.dataRoot}/overlays/foreign.txt`, "untouched");
+  const options = { fs: original.fs, vault: original.vault, embeddingModel: "model-b", embedding: fakeEmbedding({ model: "model-b" }) };
+  const next = makeRunner(options);
+  await next.runner.reconcile();
+  for (let i = 0; i < 10 && (await next.runner.getStatus()).phase !== "activate"; i++) await next.runner.reconcile();
+  assert.equal(await loadCurrentGenerationId(original.fs, original.dataRoot), oldId);
+  assert.equal((await listOverlayPrefixes(original.fs, original.dataRoot)).records.length, 1);
+  original.fs.pathFailPredicate = (p) => p.endsWith(overlayFileName(identity));
+  original.fs.faultOnce.add("unlink");
+  assert.equal((await next.runner.reconcile()).phase, "activate", "cleanup failure cannot open the ordinary-work gate");
+  const target = await loadCurrentGenerationId(original.fs, original.dataRoot);
+  assert.notEqual(target, oldId);
+  assert.equal((await listOverlayPrefixes(original.fs, original.dataRoot)).records.length, 1);
+  const resumed = makeRunner(options);
+  assert.equal((await runToTerminal(resumed.runner)).phase, "complete");
+  assert.equal(await loadCurrentGenerationId(original.fs, original.dataRoot), target, "recovery does not switch again");
+  assert.equal((await listOverlayPrefixes(original.fs, original.dataRoot)).records.length, 0);
+  assert.equal(original.fs.files.get(`${original.dataRoot}/overlays/foreign.txt`), "untouched");
+  await verifyGenerationFully(original.fs, original.dataRoot, oldId!);
 });
 
 void test("full happy path: discover -> plan -> build -> verify -> activate -> complete, staging every note and switching the pointer exactly once", async () => {

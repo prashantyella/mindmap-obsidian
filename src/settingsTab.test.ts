@@ -26,7 +26,7 @@ void test("configured sections use native persistent disclosures with compact Ed
 void test("Local AI is a draft group with one awaited Apply path", () => {
   assert.match(SOURCE, /Changes stay as a draft until applied/);
   assert.match(SOURCE, /await this\.plugin\.saveLocalAiConfig\(draft\)/);
-  assert.match(SOURCE, /Changing it requires an explicit reindex/);
+  assert.match(SOURCE, /Applying a different model automatically re-embeds notes/);
   assert.equal((SOURCE.match(/setButtonText\("Apply"\)/g) ?? []).length, 0, "dynamic Apply label is used exactly in the grouped action");
 });
 
