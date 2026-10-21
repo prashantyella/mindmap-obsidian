@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { setTimeout as nodeSetTimeout, clearTimeout as nodeClearTimeout } from "node:timers";
 
 import {
   computeJobIdempotencyKey,
@@ -141,6 +142,20 @@ export interface JobEngineClock {
 
 const REAL_CLOCK: JobEngineClock = { now: () => Date.now() };
 
+export interface JobRetryTimer {
+  /** Returns an idempotent cancellation function. Desktop Node timers avoid
+   * background throttling of the Obsidian browser window. */
+  schedule(callback: () => void, delayMs: number): () => void;
+}
+
+const REAL_RETRY_TIMER: JobRetryTimer = {
+  schedule(callback, delayMs) {
+    const timer = nodeSetTimeout(callback, delayMs);
+    timer.unref();
+    return () => nodeClearTimeout(timer);
+  },
+};
+
 export type SubmitJobInput =
   | { trigger: JobTrigger; kind: "process-note"; identity: NoteIdentityV1; sourceHash: string; embeddingModel: string; pipelineVersion: number }
   | { trigger: JobTrigger; kind: "reading-sync" | "scope-refresh"; scopeId: string; pipelineVersion: number }
@@ -166,15 +181,14 @@ function buildTarget(input: SubmitJobInput): JobTargetV1 {
  * (`IndexStore.queryRelated`, `JobStore.list`/`getById`) simply never go
  * through this pump at all.
  *
- * Deliberately never calls `setTimeout`/sleeps: `submit()`/a successful
- * phase step "kick" the pump immediately; a job with a future
+ * `submit()`/a successful phase step "kick" the pump immediately; a job with a future
  * `nextAttemptAtMs` (backoff) or blocked by an active provider-wide pause
  * is skipped over in favor of the next ELIGIBLE queued job (fair,
  * deterministic ordering -- a repeatedly failing head-of-queue job accrues
  * backoff and stops occupying the "next to run" slot, so it can never
- * starve unrelated queued work). Driving the pump on a real wall-clock
- * timer (to eventually retry a backed-off job) is an external caller's
- * responsibility in a later checkpoint, not this module's.
+ * starve unrelated queued work). When idle, one cancellable desktop timer
+ * wakes the background pump at the earliest eligible persisted deadline.
+ * Explicit runOnce/drain never start a background timer without start().
  */
 /**
  * Inspectable terminal fault state left behind when the background pump
@@ -219,6 +233,8 @@ export class JobEngine {
   private continuingJobId: string | null = null;
   private continuingWasPreferred = false;
   private lastFinishedWasPreferred = false;
+  private cancelRetryTimer: (() => void) | null = null;
+  private retryTimerRevision = 0;
 
   /** Ephemeral active-note preference; never bypasses pause, backoff, or editing deferral. */
   prioritizeJob(jobId: string | null): void {
@@ -232,6 +248,7 @@ export class JobEngine {
     private readonly runners: Readonly<Partial<Record<JobKind, JobPhaseRunner>>>,
     clock: JobEngineClock = REAL_CLOCK,
     onError?: (fault: JobEngineFault) => void,
+    private readonly retryTimer: JobRetryTimer = REAL_RETRY_TIMER,
   ) {
     this.clock = clock;
     this.onError = onError;
@@ -458,7 +475,7 @@ export class JobEngine {
     return result;
   }
 
-  async pauseProcessing(): Promise<void> { await this.store.setOperatorPause(true, this.nowIso()); await this.emitActivity(); }
+  async pauseProcessing(): Promise<void> { await this.store.setOperatorPause(true, this.nowIso()); this.clearRetryTimer(); await this.emitActivity(); }
   async resumeProcessing(): Promise<void> { await this.store.setOperatorPause(false); this.kick(); await this.emitActivity(); }
 
   async recoverInterruptedJobs(): Promise<number> {
@@ -486,6 +503,7 @@ export class JobEngine {
   /** Stops kicking new work; does not interrupt an in-flight phase-step. Idempotent. */
   stop(): void {
     this.running = false;
+    this.clearRetryTimer();
     if (this.explicitDispatchAccepted) this.explicitDispatchGeneration += 1;
     this.explicitDispatchAccepted = false;
     void this.emitActivity();
@@ -509,11 +527,36 @@ export class JobEngine {
    */
   private kick(): void {
     if (!this.running || this.disposed) return;
+    this.clearRetryTimer();
     this.kickRequested = true;
     if (this.pumping) return;
     this.pumping = this.runExclusive(() => this.pumpLoop()).finally(() => {
       this.pumping = null;
+      if (this.kickRequested) this.kick();
     });
+  }
+
+  private clearRetryTimer(): void {
+    this.retryTimerRevision++;
+    this.cancelRetryTimer?.();
+    this.cancelRetryTimer = null;
+  }
+
+  private scheduleRetry(jobs: readonly PersistedJobV1[], pause: { active: boolean }, now: number): void {
+    this.clearRetryTimer();
+    if (!this.running || this.disposed || this.fault || this.storeOperatorPaused) return;
+    const deadlines = jobs.filter((entry) => entry.status === "queued" && !this.deferredJobIds.has(entry.job.jobId)
+      && !(pause.active && entry.job.kind === "process-note") && entry.nextAttemptAtMs !== undefined && entry.nextAttemptAtMs > now)
+      .map((entry) => entry.nextAttemptAtMs as number);
+    if (deadlines.length === 0) return;
+    const revision = this.retryTimerRevision;
+    const delay = Math.min(2_147_483_647, Math.max(1, Math.min(...deadlines) - this.clock.now()));
+    this.cancelRetryTimer = this.retryTimer.schedule(() => {
+      if (revision !== this.retryTimerRevision || !this.running || this.disposed || this.fault) return;
+      this.cancelRetryTimer = null;
+      // Retry wakeups must not clear editing deferrals (unlike wake()).
+      this.kick();
+    }, delay);
   }
 
   /**
@@ -539,6 +582,7 @@ export class JobEngine {
         const fault: JobEngineFault = { code: toFailureCode(error), atMs: this.clock.now() };
         this.fault = fault;
         this.running = false;
+        this.clearRetryTimer();
         await this.emitActivity();
         this.onError?.(fault);
         return;
@@ -578,6 +622,7 @@ export class JobEngine {
 
   private async runOnceInner(acceptsNewPhase: () => boolean = () => !this.disposed): Promise<JobDispatchOutcome> {
     if (!acceptsNewPhase()) return "idle";
+    this.clearRetryTimer();
     const jobs = await this.store.list();
     const pause = await this.store.getProviderPause();
     this.storeOperatorPaused = (await this.store.getOperatorPause()).active;
@@ -587,7 +632,7 @@ export class JobEngine {
     const preferred = runnable.find((entry) => entry.job.jobId === this.preferredJobId);
     const background = runnable.find((entry) => entry.job.jobId !== this.preferredJobId);
     const eligible = continuing ?? (this.lastFinishedWasPreferred && background ? background : preferred ?? runnable[0]);
-    if (!eligible) return "idle";
+    if (!eligible) { this.scheduleRetry(jobs, pause, now); return "idle"; }
     this.storeOperatorPaused = (await this.store.getOperatorPause()).active;
     if (this.storeOperatorPaused) { await this.emitActivity(); return "idle"; }
     // Discovery above awaits several store reads. Recheck the dispatch gate immediately before
@@ -659,6 +704,7 @@ export class JobEngine {
     if (this.disposed) return;
     this.disposed = true;
     this.running = false;
+    this.clearRetryTimer();
     this.explicitDispatchAccepted = false;
     this.explicitDispatchGeneration += 1;
     this.abortController.abort();

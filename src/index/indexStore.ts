@@ -48,6 +48,7 @@ import { selectTopK } from "./topK";
 import { QueryGenerationCache } from "./queryGenerationCache";
 import { rankCompositeCooperatively } from "./cooperativeRanking";
 import { runCooperativeBlocks, throwIfAborted } from "./cooperativeWork";
+import { effectiveIndexView, nextOverlayRecordedAt } from "./effectiveIndexView";
 
 /**
  * Top-level orchestrator: the merged, searchable "committed view" (base
@@ -111,19 +112,6 @@ export interface QueryRelatedOptions {
   onQueryStage?: (measurement: { stage: "refinement"; wallMs: number; maxSynchronousSliceMs: number; yieldCount: number }) => void;
 }
 
-interface ShadowInfo {
-  /** identityKey -> the overlay record shadowing that identity (upsert OR tombstone). */
-  byKey: Map<string, OverlayPrefixRecord>;
-}
-
-function buildShadowInfo(overlays: readonly OverlayPrefixRecord[]): ShadowInfo {
-  const byKey = new Map<string, OverlayPrefixRecord>();
-  for (const overlay of overlays) {
-    byKey.set(identityKey(overlay.identity), overlay);
-  }
-  return { byKey };
-}
-
 /**
  * Ranks the composite view (base rows excluding shadowed/tombstoned
  * identities, plus overlay upsert note vectors) directly against
@@ -142,19 +130,19 @@ async function rankCompositeAsync(
   excludePath: CanonicalPath | undefined,
   limit: number,
   signal?: AbortSignal,
+  baseRows: readonly NoteRowMetadataV1[] = generation?.noteMetadata ?? [],
 ): Promise<ScoredNote[]> {
   if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_RANKING_LIMIT) throw new IndexStoreError(`limit must be an integer in (0, ${MAX_RANKING_LIMIT}].`);
-  const shadow = buildShadowInfo(overlays);
-  const baseCount = generation?.noteMetadata.length ?? 0;
+  const baseCount = baseRows.length;
   if (generation) {
     if (generation.noteMatrix.data.length !== generation.noteMatrix.count * generation.noteMatrix.dimension) throw new IndexStoreError("base note matrix shape is invalid (data length does not match count * dimension).");
     if (queryVector.length !== generation.noteMatrix.dimension) throw new IndexStoreError(`queryVector dimension (${queryVector.length}) does not match the base generation's dimension (${generation.noteMatrix.dimension}).`);
   }
   return rankCompositeCooperatively(baseCount + overlays.length, (index) => {
     if (index < baseCount && generation) {
-      const row = generation.noteMetadata[index];
-      if (shadow.byKey.has(identityKey(row.identity)) || (excludePath !== undefined && row.identity.canonicalPath === excludePath)) return null;
-      const score = dotProduct(queryVector, generation.noteMatrix.data, 0, index * generation.noteMatrix.dimension, generation.noteMatrix.dimension);
+      const row = baseRows[index];
+      if (excludePath !== undefined && row.identity.canonicalPath === excludePath) return null;
+      const score = dotProduct(queryVector, generation.noteMatrix.data, 0, row.rowIndex * generation.noteMatrix.dimension, generation.noteMatrix.dimension);
       return Number.isFinite(score) ? { path: row.identity.canonicalPath, score } : null;
     }
     const overlay = overlays[index - baseCount];
@@ -202,7 +190,8 @@ export async function queryRelated(fs: IndexFs, root: string, options: QueryRela
 }
 
 async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation: LoadedGeneration | null, options: QueryRelatedOptions): Promise<ScoredNote[]> {
-  const overlays = await loadOverlayPrefixesOrThrow(fs, root, options.signal);
+  const view = effectiveIndexView(generation?.noteMetadata ?? [], await loadOverlayPrefixesOrThrow(fs, root, options.signal));
+  const overlays = view.overlays;
   if (options.embeddingModel !== undefined && (
     (generation !== null && generation.manifest.embeddingModel !== options.embeddingModel) ||
     overlays.some((overlay) => overlay.operation === "upsert" && overlay.embeddingModel !== options.embeddingModel)
@@ -211,13 +200,13 @@ async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation:
   }
 
   const queryVector = normalizeVector(options.queryVector);
-  const candidates = await rankCompositeAsync(generation, overlays, queryVector, options.excludePath, options.limit, options.signal);
+  const candidates = await rankCompositeAsync(generation, overlays, queryVector, options.excludePath, options.limit, options.signal, view.base);
   if (candidates.length === 0) return [];
 
   const queryChunkVectors = options.queryChunkVectors.map((v) => normalizeVector(v));
   if (queryChunkVectors.length === 0) return candidates;
 
-  const noteRowByPath = new Map((generation?.noteMetadata ?? []).map((row) => [row.identity.canonicalPath, row]));
+  const noteRowByPath = new Map(view.base.map((row) => [row.identity.canonicalPath, row]));
   const overlayUpsertByPath = new Map(overlays.filter((o) => o.operation === "upsert").map((o) => [o.identity.canonicalPath, o]));
 
   const shardIdByCandidatePath = new Map<CanonicalPath, string>();
@@ -241,6 +230,9 @@ async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation:
     const full = await readOverlayFull(fs, root, identity).catch((error: unknown) => {
       throw wrapOverlayError(error, `cannot refine candidate "${path}": its overlay failed validation`);
     });
+    if (!full || full.fingerprint !== overlayUpsertByPath.get(path)?.fingerprint) {
+      throw new EngineError("REBUILD_SUPERSEDED", "Overlay changed during index refinement.");
+    }
     if (!full || !full.chunkMatrix || full.chunkMatrix.count === 0) continue;
     const refinementStarted = performance.now();
     const result = await maxChunkScoreCooperatively(queryChunkVectors, full.chunkMatrix, 0, full.chunkMatrix.count, options.signal);
@@ -284,32 +276,21 @@ async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation:
  * (never present, or tombstoned) -- never a fabricated record.
  */
 export async function getIndexedRecord(fs: IndexFs, root: string, identity: NoteIdentityV1): Promise<IndexRecordV1 | null> {
-  const overlays = await loadOverlayPrefixesOrThrow(fs, root);
-  const key = identityKey(identity);
-  const overlay = overlays.find((o) => identityKey(o.identity) === key);
-  if (overlay) {
-    if (overlay.operation !== "upsert" || overlay.sourceHash === undefined || overlay.embeddingModel === undefined || overlay.chunkCount === undefined) {
-      return null;
-    }
-    return { schemaVersion: 1, identity: overlay.identity, sourceHash: overlay.sourceHash, embeddingModel: overlay.embeddingModel, chunkCount: overlay.chunkCount, ...(overlay.relatedVersion !== undefined ? { relatedVersion: overlay.relatedVersion } : {}) };
-  }
   const generationId = await loadCurrentGenerationId(fs, root);
-  if (generationId === null) return null;
-  const generation = await loadGeneration(fs, root, generationId);
-  const row = generation.noteMetadata.find((r) => identityKey(r.identity) === key);
-  return row ?? null;
+  const generation = generationId === null ? null : await loadGeneration(fs, root, generationId);
+  return getIndexedRecordWithGeneration(fs, root, identity, generation);
 }
 
 async function getIndexedRecordWithGeneration(fs: IndexFs, root: string, identity: NoteIdentityV1, generation: LoadedGeneration | null): Promise<IndexRecordV1 | null> {
-  const overlays = await loadOverlayPrefixesOrThrow(fs, root);
+  const view = effectiveIndexView(generation?.noteMetadata ?? [], await loadOverlayPrefixesOrThrow(fs, root));
   const key = identityKey(identity);
-  const overlay = overlays.find((o) => identityKey(o.identity) === key);
+  const overlay = view.overlays.find((o) => identityKey(o.identity) === key);
   if (overlay) {
     if (overlay.operation !== "upsert" || overlay.sourceHash === undefined || overlay.embeddingModel === undefined || overlay.chunkCount === undefined) return null;
     return { schemaVersion: 1, identity: overlay.identity, sourceHash: overlay.sourceHash, embeddingModel: overlay.embeddingModel, chunkCount: overlay.chunkCount, ...(overlay.relatedVersion !== undefined ? { relatedVersion: overlay.relatedVersion } : {}) };
   }
   if (generation === null) return null;
-  const row = generation.noteMetadata.find((r) => identityKey(r.identity) === key);
+  const row = view.base.find((r) => identityKey(r.identity) === key);
   return row ?? null;
 }
 
@@ -348,13 +329,12 @@ export async function snapshotIndexedCatalog(fs: IndexFs, root: string, signal?:
     }
   }
   const overlays = await loadOverlayPrefixesOrThrow(fs, root);
-  const shadow = buildShadowInfo(overlays);
+  const view = effectiveIndexView(baseRecords, overlays);
   const result: IndexedCatalogRecord[] = [];
-  for (const row of baseRecords) {
-    if (shadow.byKey.has(identityKey(row.identity))) continue; // shadowed by a later overlay (tombstone or upsert) -- handled below, or removed
+  for (const row of view.base) {
     result.push({ identity: row.identity, sourceHash: row.sourceHash, ...(row.relatedVersion !== undefined ? { relatedVersion: row.relatedVersion } : {}) });
   }
-  for (const overlay of overlays) {
+  for (const overlay of view.overlays) {
     if (overlay.operation !== "upsert" || overlay.sourceHash === undefined) continue;
     result.push({ identity: overlay.identity, sourceHash: overlay.sourceHash, ...(overlay.relatedVersion !== undefined ? { relatedVersion: overlay.relatedVersion } : {}) });
   }
@@ -436,16 +416,15 @@ function assertPendingOverlayBudget(overlays: readonly OverlayPrefixRecord[], id
 
 /** The EFFECTIVE merged-view note/chunk counts (base rows minus shadows/tombstones, plus overlay upserts) -- what would actually be built if `compact()` ran right now. Distinct from, and in addition to, the pending-overlay-FILE budget above: that bounds how many overlay FILES can accumulate; this bounds the CORPUS those files (once compacted) would produce, which is what `MAX_MANIFEST_NOTE_COUNT`/`MAX_MANIFEST_CHUNK_COUNT` actually govern. */
 function computeEffectiveCounts(generation: LoadedGeneration | null, overlays: readonly OverlayPrefixRecord[]): { noteCount: number; chunkCount: number; effectiveChunkCountByKey: Map<string, number> } {
-  const shadow = buildShadowInfo(overlays);
+  const view = effectiveIndexView(generation?.noteMetadata ?? [], overlays);
   const effectiveChunkCountByKey = new Map<string, number>();
   if (generation) {
-    for (const row of generation.noteMetadata) {
+    for (const row of view.base) {
       const key = identityKey(row.identity);
-      if (shadow.byKey.has(key)) continue; // shadowed by an upsert (counted below) or removed by a tombstone
       effectiveChunkCountByKey.set(key, row.chunkCount);
     }
   }
-  for (const overlay of overlays) {
+  for (const overlay of view.overlays) {
     if (overlay.operation !== "upsert") continue;
     effectiveChunkCountByKey.set(identityKey(overlay.identity), overlay.chunkCount ?? 0);
   }
@@ -467,13 +446,10 @@ function computeEffectiveCounts(generation: LoadedGeneration | null, overlays: r
  */
 function assertEffectiveCorpusBudget(generation: LoadedGeneration | null, overlays: readonly OverlayPrefixRecord[], identity: NoteIdentityV1, newChunkCount: number): void {
   const key = identityKey(identity);
-  const { noteCount, chunkCount, effectiveChunkCountByKey } = computeEffectiveCounts(generation, overlays);
-  const wasPresent = effectiveChunkCountByKey.has(key);
-  const oldChunkCount = effectiveChunkCountByKey.get(key) ?? 0;
-  const projectedNoteCount = noteCount + (wasPresent ? 0 : 1);
-  const projectedChunkCount = chunkCount - oldChunkCount + newChunkCount;
+  const projected: OverlayPrefixRecord = { identity, operation: "upsert", chunkCount: newChunkCount, recordedAt: nextOverlayRecordedAt(overlays), version: 1, mutationId: "projection", fingerprint: "", containerLength: 0 };
+  const { noteCount: projectedNoteCount, chunkCount: projectedChunkCount } = computeEffectiveCounts(generation, [...overlays.filter((entry) => identityKey(entry.identity) !== key), projected]);
   if (projectedNoteCount > MAX_MANIFEST_NOTE_COUNT) {
-    throw new IndexStoreError(`cannot upsert "${key}": the effective merged corpus already has ${noteCount} notes (max ${MAX_MANIFEST_NOTE_COUNT}); this is a new identity, not a replacement.`);
+    throw new IndexStoreError(`cannot upsert "${key}": the effective merged corpus would have ${projectedNoteCount} notes (max ${MAX_MANIFEST_NOTE_COUNT}).`);
   }
   if (projectedChunkCount > MAX_MANIFEST_CHUNK_COUNT) {
     throw new IndexStoreError(`cannot upsert "${key}": the effective merged corpus's chunk count would reach ${projectedChunkCount} (max ${MAX_MANIFEST_CHUNK_COUNT}).`);
@@ -640,7 +616,7 @@ export async function planCompaction(fs: IndexFs, root: string): Promise<Compact
     embeddingModel = anyUpsert.embeddingModel;
   }
 
-  const shadow = buildShadowInfo(overlaysSnapshot);
+  const view = effectiveIndexView(generation?.noteMetadata ?? [], overlaysSnapshot);
   const notes: GenerationInputNote[] = [];
 
   // Streaming source, base side: at most ONE base shard's decoded chunk matrix is ever
@@ -669,9 +645,7 @@ export async function planCompaction(fs: IndexFs, root: string): Promise<Compact
   }
 
   if (generation) {
-    for (const row of generation.noteMetadata) {
-      const key = identityKey(row.identity);
-      if (shadow.byKey.has(key)) continue; // shadowed by an upsert (added below) or removed by a tombstone
+    for (const row of view.base) {
       notes.push({
         identity: row.identity,
         sourceHash: row.sourceHash,
@@ -689,7 +663,7 @@ export async function planCompaction(fs: IndexFs, root: string): Promise<Compact
   // Streaming source, overlay side: each overlay's full container (including its chunk
   // payload) is read only when `buildGeneration` actually calls this note's
   // `loadChunkVectors()` -- never eagerly, never more than one at a time.
-  for (const overlay of overlaysSnapshot) {
+  for (const overlay of view.overlays) {
     if (overlay.operation !== "upsert" || !overlay.noteVector) continue;
     const overlayIdentity = overlay.identity;
     const overlayChunkCount = overlay.chunkCount ?? 0;
@@ -705,7 +679,10 @@ export async function planCompaction(fs: IndexFs, root: string): Promise<Compact
         } catch (error) {
           throw wrapOverlayError(error, `compact failed: overlay for "${identityKey(overlayIdentity)}" failed to read in full`);
         }
-        if (!full?.chunkMatrix) return [];
+        if (!full || full.fingerprint !== overlay.fingerprint) {
+          throw new EngineError("REBUILD_SUPERSEDED", "Overlay changed during generation build.");
+        }
+        if (!full.chunkMatrix) return [];
         // subarray, not slice: this decoded chunkMatrix is freshly read for this one overlay
         // and consumed synchronously (normalized+copied into the new shard) before this
         // function is ever called again -- a view costs nothing extra here either.
@@ -738,10 +715,7 @@ export async function planCompaction(fs: IndexFs, root: string): Promise<Compact
  * unreferenced -- never partially activated.
  */
 export async function finalizeCompaction(fs: IndexFs, root: string, newGenerationId: number, plan: CompactionPlan, signal?: AbortSignal): Promise<void> {
-  await switchCurrentGeneration(fs, root, newGenerationId, { signal });
-  for (const overlay of plan.overlaysSnapshot) {
-    await deleteOverlayIfSnapshotMatches(fs, root, overlayFileName(overlay.identity), overlay.version, overlay.fingerprint);
-  }
+  await finalizeCompactionFromSnapshot(fs, root, newGenerationId, describeCompactionSnapshot(plan).overlays, signal);
 }
 
 /** One overlay's bounded, content-free identity in a persisted `CompactionSnapshotDescriptorV1` -- its deterministic filename (never the identity object itself, which could carry an arbitrarily long path), the version it was at when the snapshot was taken, and its content fingerprint (see `OverlayPrefixRecord.fingerprint`) -- version alone is not durable identity across a compaction cycle, since an identity's version counter resets to 1 once its prior overlay is deleted. */
@@ -867,8 +841,17 @@ export function compactionSnapshotMatchesGeneration(descriptor: CompactionSnapsh
  */
 export async function finalizeCompactionFromSnapshot(fs: IndexFs, root: string, newGenerationId: number, overlays: readonly CompactionSnapshotOverlayEntry[], signal?: AbortSignal): Promise<void> {
   await switchCurrentGeneration(fs, root, newGenerationId, { signal });
-  for (const overlay of overlays) {
-    await deleteOverlayIfSnapshotMatches(fs, root, overlay.fileName, overlay.version, overlay.fingerprint);
+  const snapshot = new Map(overlays.map((entry) => [entry.fileName, entry]));
+  // Only the persisted snapshot authorizes deletion. Current prefixes supply
+  // chronological cleanup order, never extra targets: retire superseded aliases
+  // before their winners so interrupted cleanup cannot resurrect an old alias.
+  const current = await loadOverlayPrefixesOrThrow(fs, root);
+  current.sort((a, b) => a.recordedAt.localeCompare(b.recordedAt));
+  for (const overlay of current) {
+    const fileName = overlayFileName(overlay.identity);
+    const expected = snapshot.get(fileName);
+    if (!expected || expected.version !== overlay.version || expected.fingerprint !== overlay.fingerprint) continue;
+    await deleteOverlayIfSnapshotMatches(fs, root, fileName, expected.version, expected.fingerprint);
   }
 }
 
@@ -1047,7 +1030,7 @@ export class IndexStore {
       assertEffectiveCorpusBudget(generation, overlays, input.identity, input.chunkVectors.length);
       assertResourceBudget(generation, overlays, input.identity, { operation: "upsert", chunkCount: input.chunkVectors.length });
       try {
-        await writeUpsertOverlay(this.fs, this.root, input);
+        await writeUpsertOverlay(this.fs, this.root, { ...input, now: () => new Date(nextOverlayRecordedAt(overlays)) });
       } catch (error) {
         throw wrapOverlayError(error, "upsertNote failed");
       }
@@ -1061,7 +1044,7 @@ export class IndexStore {
       assertPendingOverlayBudget(overlays, identity, 0);
       assertResourceBudget(generation, overlays, identity, { operation: "tombstone" });
       try {
-        await writeTombstoneOverlay(this.fs, this.root, { identity });
+        await writeTombstoneOverlay(this.fs, this.root, { identity, now: () => new Date(nextOverlayRecordedAt(overlays)) });
       } catch (error) {
         throw wrapOverlayError(error, "deleteNote failed");
       }
