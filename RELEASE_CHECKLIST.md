@@ -1,4 +1,21 @@
-# Release checklist: 0.3.12
+# Release checklist: 0.3.13
+
+Status: preparing the approved PR #35 for publication. No live-vault repair is included in this release operation.
+
+## 0.3.13 scope and acceptance
+
+- Preserve optional connection freshness through generation serialization, verification, compaction, and restart adoption; unknown markers remain unknown.
+- Prevent matching queued/active refreshes from appearing as newly pending work.
+- Strengthen unit/integration coverage, typed pending-scan fixtures, portable discovery, and non-optional release gates.
+- [x] Source candidate `6de3fbd3fec9acda10f10df0bfcc25bb885ce014` passed CI `39545491078`: 2,363 unit/regression tests plus two integration tests passed; four optional unit benchmarks skipped.
+- [x] Replayed a copied 944-note pre-rebuild index: all freshness markers preserved, zero unnecessarily pending notes, repeated compaction preserved the catalog. Live vault unchanged.
+- [x] Synchronize manifest/package/lockfile/compatibility map to 0.3.13 and document affected-index recovery limits.
+- [ ] Pass final versioned candidate checks and CI.
+- [ ] Merge PR #35, tag the tested commit, publish, and verify all three release assets and attestations.
+
+The 0.3.12 Obsidian clean-initialization/cold-reopen smoke and plugin-disabled Force Reload limitation are recorded below. This patch has no UI changes; no new foreground/background performance parity or live recovery claim is made.
+
+## 0.3.12 publication record
 
 Status: published as [0.3.12](https://github.com/prashantyella/mindmap-obsidian/releases/tag/0.3.12) on 2026-10-21 UTC after the automated gates and isolated-vault checks below. The host Force Reload limitation is recorded explicitly.
 

@@ -4,6 +4,13 @@ All notable changes to this project should be documented in this file.
 
 ## Unreleased
 
+### Release process
+- Update this changelog for every user-visible plugin release.
+- Keep `manifest.json` and `versions.json` in sync.
+- Document compatibility-impacting changes explicitly.
+
+## 0.3.13
+
 ### Fixed
 - Preserve connection-processing freshness metadata through index generations, repeated compaction, and restart adoption, preventing unchanged notes from being unnecessarily reprocessed after a rebuild.
 - Do not count matching queued or active refreshes as newly pending when only connection freshness is stale.
@@ -12,10 +19,7 @@ All notable changes to this project should be documented in this file.
 - Exercise metadata preservation, pending-state decisions, and zero redundant job creation in the on-disk release gate.
 - Make the default test command run unit and integration suites; reject empty/skipped/TODO integration gates, use portable discovery, and separate queue/retry/lifecycle fixtures.
 
-### Release process
-- Update this changelog for every user-visible plugin release.
-- Keep `manifest.json` and `versions.json` in sync.
-- Document compatibility-impacting changes explicitly.
+This release prevents future freshness loss; it does not guess or automatically restore markers already lost by older builds. Affected indexes require validated backup restoration or processing. No font/layout changes or embedding-model migration. Desktop only; `minAppVersion` remains `1.7.2`.
 
 ## 0.3.12
 

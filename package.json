@@ -1,6 +1,6 @@
 {
   "name": "mindmap-ai",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "private": true,
   "description": "Standalone Obsidian plugin repo for the Mindmap TypeScript-powered workflow.",
   "license": "MIT",
