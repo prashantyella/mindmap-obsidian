@@ -114,6 +114,25 @@ function buildBulkRoot(): { root: PersistedJobV1; batch: BulkBatchV1 } {
   return { root: { schemaVersion: 1, job, status: "queued", attempt: 0, cancelRequested: false }, batch: { schemaVersion: 1, batchId, rootJobId: job.jobId, trigger: "manual", scopeId: "all", status: "active", createdAt: job.createdAt, updatedAt: job.updatedAt, items: [] } };
 }
 
+void test("queue writes compact JSON and reloads/recovers legacy pretty JSON without migration", async () => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const job = buildPersisted({ status: "active" });
+  await store.appendJob(job);
+  const path = "/root/jobs/queue.json";
+  const compact = fs.files.get(path)!;
+  const envelope = JSON.parse(compact) as unknown;
+  assert.equal(compact, JSON.stringify(envelope));
+  const beforeRestart = await store.list();
+  fs.files.set(path, JSON.stringify(envelope, null, 2));
+  const restarted = new JobStore(fs, "/root");
+  assert.deepEqual(await restarted.list(), beforeRestart);
+  assert.equal(await restarted.recoverInterruptedJobs(), 1);
+  const recovered = fs.files.get(path)!;
+  assert.equal(recovered, JSON.stringify(JSON.parse(recovered)));
+  assert.equal((await new JobStore(fs, "/root").list())[0].status, "queued");
+});
+
 void test("createBulkBatch atomically links its scheduled occurrence to its ledger root", async () => {
   const store = new JobStore(new FakeFs(), "/root");
   const { root, batch } = buildBulkRoot();

@@ -229,6 +229,40 @@ async function submitNoteJob(h: Harness, sourceHash: string) {
   return h.engine.submit({ trigger: "manual", kind: "process-note", identity: identity(), sourceHash, embeddingModel: "test-model", pipelineVersion: 1 });
 }
 
+for (const phase of ["discover", "extract-metadata", "write-note", "write-overlay"] as const) {
+  void test(`model switch replaces a persisted ${phase} job before embedding, metadata or writes`, async () => {
+    const h = buildHarness();
+    const submitted = await submitNoteJob(h, sourceHashOf(RAW_CONTENT));
+    const replacements: Parameters<NoteJobDeps["replacement"]["enqueueReplacement"]>[0][] = [];
+    let failReplacement = true;
+    const runner = new NoteJobRunner({
+      embeddingConfig: { model: "embeddinggemma-2:270m", pipelineVersion: 2 },
+      sourceReader: h.sourceReader, embedding: h.embedding, metadata: h.metadata,
+      noteWriter: h.noteWriter, indexStore: h.index,
+      replacement: { enqueueReplacement: async (input) => {
+        if (failReplacement) throw new Error("queue temporarily unavailable");
+        replacements.push(input);
+      } },
+    });
+    const persisted = { ...submitted, job: { ...submitted.job, phase, batchId: "bulk", batchItemId: "item" } };
+    const signal = new AbortController().signal;
+    assert.equal((await runner.step(persisted, signal)).type, "retry");
+    failReplacement = false;
+    assert.equal((await runner.step(persisted, signal)).type, "obsolete");
+    assert.equal((await runner.step(persisted, signal)).type, "obsolete");
+    assert.equal(replacements.length, 1);
+    assert.equal(replacements[0].embeddingModel, "embeddinggemma-2:270m");
+    assert.equal(replacements[0].pipelineVersion, 2);
+    assert.equal(replacements[0].batchId, "bulk");
+    assert.equal(replacements[0].batchItemId, "item");
+    assert.equal(replacements[0].trigger, "manual");
+    assert.equal(h.metadata.calls, 0);
+    assert.equal(h.embedding.calls, 0);
+    assert.equal(h.vault.modifyCount, 0);
+    assert.equal(h.index.calls.length, 0);
+  });
+}
+
 void test("happy path: note job runs discover->embed->extract-metadata->confirm-source->write-note->write-overlay->complete, writing the note once and upserting the overlay once", async () => {
   const h = buildHarness();
   const job = await submitNoteJob(h, sourceHashOf(RAW_CONTENT));

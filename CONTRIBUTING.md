@@ -40,11 +40,13 @@ npm run validate
 
 Before tagging a release:
 
-1. Update `manifest.json` version fields as needed.
+1. Keep the version in `manifest.json`, `package.json`, and `package-lock.json` synchronized.
 2. Update `versions.json` so `manifest.version` maps to `manifest.minAppVersion`.
-3. Add a `CHANGELOG.md` entry.
-4. Run `npm run release:prepare`.
-5. Confirm the release includes `main.js`, `manifest.json`, `styles.css`, and `mindmap-python.zip`.
+3. Add a `CHANGELOG.md` entry and review the current `RELEASE_CHECKLIST.md`.
+4. Run `npm run check`, then `npm run release:prepare`.
+5. Confirm `release/` contains exactly `main.js`, `manifest.json`, and `styles.css`.
+6. Complete the documented live acceptance checks and verify CI before merging or tagging.
+7. Tag the approved release commit with the exact manifest version. Pushing that tag publishes release assets automatically; preparing assets alone does not publish them.
 
 ## Pull requests
 

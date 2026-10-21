@@ -101,6 +101,16 @@ void test("queryRelated ranks base notes exactly like a full note-level ranking 
   assert.ok(!results.some((r) => r.path === "Note-0.md"));
 });
 
+void test("queryRelated refuses a different model even at the same vector dimension", async () => {
+  const fs = new FakeIndexFs();
+  const notes = [makeNote("A.md", 0, seededRandom(2))];
+  await seedBaseGeneration(fs, notes, 1);
+  const store = new IndexStore(fs, "/root");
+  await assert.rejects(store.queryRelated({ embeddingModel: "different-model", queryVector: notes[0].vector, queryChunkVectors: [], limit: 8 }),
+    (error: unknown) => error instanceof EngineError && error.code === "EMBEDDING_MODEL_MISMATCH");
+  assert.equal((await store.queryRelated({ embeddingModel: MODEL, queryVector: notes[0].vector, queryChunkVectors: [], limit: 8 })).length, 1);
+});
+
 void test("warm query and getRecord reuse the fingerprint-verified base generation", async () => {
   const fs = new FakeIndexFs();
   const random = seededRandom(2026);

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Vault } from "obsidian";
 
 import { FakeIndexFs } from "../index/fakeIndexFs.test-support";
-import { buildGeneration, switchCurrentGeneration } from "../index/generationStore";
+import { buildGeneration, switchCurrentGeneration, loadCurrentGenerationId } from "../index/generationStore";
 import type { IntervalRegistrar } from "../scheduling/coreScheduler";
 import { isEngineError } from "./errors";
 import { MigrationStore } from "../migration/migrationStore";
@@ -152,6 +152,28 @@ void test("ProductionEngine.start() never starts the job pump/scheduler when pro
   const engine = new ProductionEngine(baseOptions({ registrar }));
   await engine.start();
   assert.equal(registrar.registerCount, 1, "only MigrationDriver's own interval may register -- CoreScheduler must never start with no providers configured and migration not-started");
+  await engine.dispose();
+});
+
+void test("model switch closes the startup job/scheduler gate until the new generation activates", async () => {
+  const fs = new FakeIndexFs();
+  await buildGeneration(fs, "/data", { generationId: 1, embeddingModel: "old-model", dimension: 4, notes: [] }, {});
+  await switchCurrentGeneration(fs, "/data", 1);
+  await new MigrationStore(fs, "/data").setPhase("complete", "COMPLETE", { discoveredCount: 0, processedCount: 0, failedCount: 0 }, new Date(0).toISOString(), {
+    runId: "old-run", desiredEmbeddingModel: "old-model", desiredDimension: 4, desiredPipelineVersion: 1,
+  });
+  const engine = new ProductionEngine(baseOptions({ fs, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(3), embeddingModel: "new-model", embeddingDimension: 3 }));
+  await engine.start();
+  await engine.migrationDriver.whenSettled();
+  assert.equal(engine.getOrdinaryWorkStatus().pumpStarted, false);
+  assert.equal(engine.getOrdinaryWorkStatus().schedulerStarted, false);
+  assert.equal(await loadCurrentGenerationId(fs, "/data"), 1);
+  for (let i = 0; i < 10 && (await engine.getMigrationStatus()).phase !== "complete"; i++) await engine.migrationRunner.reconcile();
+  await engine.recheckReadiness();
+  assert.equal((await engine.getMigrationStatus()).phase, "complete");
+  assert.notEqual(await loadCurrentGenerationId(fs, "/data"), 1);
+  assert.equal(engine.getOrdinaryWorkStatus().pumpStarted, true);
+  assert.equal(engine.getOrdinaryWorkStatus().schedulerStarted, true);
   await engine.dispose();
 });
 

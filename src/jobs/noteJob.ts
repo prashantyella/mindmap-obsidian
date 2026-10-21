@@ -85,6 +85,8 @@ export interface NoteReplacementSeam {
 }
 
 export interface NoteJobDeps {
+  /** Production configuration, used to replace jobs persisted under an old model before any phase writes. */
+  embeddingConfig?: { model: string; pipelineVersion: number };
   sourceReader: NoteSourceReader;
   embedding: NoteEmbeddingSeam;
   metadata: NoteMetadataSeam;
@@ -225,6 +227,13 @@ export class NoteJobRunner implements JobPhaseRunner {
     const pipelineVersion = persisted.job.pipelineVersion;
 
     try {
+      const configured = this.deps.embeddingConfig;
+      if (configured && (embeddingModel !== configured.model || pipelineVersion !== configured.pipelineVersion)) {
+        const fresh = await this.ensureFreshProjection(jobId, identity, expectedSourceHash, configured.model, configured.pipelineVersion, signal);
+        if (!fresh.ok) return fresh.outcome;
+        const retry = await this.tryEnqueueReplacement(jobId, fresh.projection.identity, fresh.projection.sourceHash, configured.model, configured.pipelineVersion);
+        return retry ?? { type: "obsolete", failureCode: "SOURCE_STALE" };
+      }
       switch (persisted.job.phase) {
         case "discover":
           return await this.stepDiscover(jobId, identity, expectedSourceHash, embeddingModel, pipelineVersion, signal);

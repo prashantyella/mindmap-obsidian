@@ -21,7 +21,7 @@ Mindmap is desktop-only and uses Ollama for note processing. Apple Books import 
 2. Install the default models, or choose models you already use:
 
 ```bash
-ollama pull mxbai-embed-large
+ollama pull embeddinggemma-2:270m
 ollama pull llama3.1:8b
 ```
 
@@ -58,7 +58,7 @@ The separate **Internet research** toggle is off unless you enable it with conse
 
 Open **Advanced and troubleshooting → Check setup** for actionable checks. Confirm Ollama is running, both models are available, and your included folders are saved. Use **Copy diagnostics** when reporting a problem.
 
-If an upgrade requires a migration, follow the status menu's guidance. **Retry migration** resumes interrupted progress. After changing the embedding model, use **Run Mindmap full rebuild (all notes)**; changing the setting alone does not rebuild the index.
+If an upgrade requires a migration, follow the status menu's guidance. **Retry migration** resumes interrupted progress. Applying a different embedding model or dimension automatically re-embeds notes into a staged index. The prior generation remains on disk until the replacement is verified and activated; ordinary processing waits so embedding spaces cannot mix. A failure leaves the prior generation intact and offers a retry. **Run Mindmap full rebuild (all notes)** compacts existing vectors; it does not change embedding models.
 
 ## Technical details
 

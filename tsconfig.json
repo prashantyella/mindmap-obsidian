@@ -10,5 +10,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "scripts/**/*.mts", "scripts/**/*.mjs"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "scripts/**/*.mts", "scripts/**/*.mjs"]
 }

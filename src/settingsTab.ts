@@ -88,7 +88,7 @@ export class MindmapSettingTab extends PluginSettingTab {
         draft.llmBaseUrl = value;
         this.markProviderDirty();
       }));
-    this.providerText(body, "Embedding model", "Creates the semantic index. Changing it requires an explicit reindex.", draft.embedModel, "mxbai-embed-large", (value) => { draft.embedModel = value; });
+    this.providerText(body, "Embedding model", "Creates the semantic index. Applying a different model automatically re-embeds notes before activating the new index.", draft.embedModel, "embeddinggemma-2:270m", (value) => { draft.embedModel = value; });
     this.providerText(body, "Summaries and tags model", "Creates local summaries, tags, and concepts.", draft.llmModel, "llama3.1:8b", (value) => { draft.llmModel = value; });
 
     const actions = new Setting(body).setName("Apply Local AI settings").setDesc(this.viewState.providerMessage || "Changes stay as a draft until applied.");
@@ -107,16 +107,18 @@ export class MindmapSettingTab extends PluginSettingTab {
       .setDisabled(this.viewState.providerStatus === "saving" || !this.viewState.providerDirty)
       .onClick(async () => {
         const previousModel = this.plugin.settings.embedModel;
+        const previousDimension = this.plugin.settings.embedDimension;
         const applying = applyProviderDraft(this.viewState, async (draft) => { await this.plugin.saveLocalAiConfig(draft); });
         this.updateProviderApplyControls();
         const applied = await applying;
         if (applied && !this.viewState.providerDirty) {
           const ready = this.plugin.getOverviewState().ready;
-          this.viewState.providerMessage = !ready
+          const embeddingChanged = previousModel !== this.plugin.settings.embedModel || previousDimension !== this.plugin.settings.embedDimension;
+          this.viewState.providerMessage = embeddingChanged
+            ? "Local AI configuration saved. The new embedding index activates after re-embedding and verification finish. Check the status menu for progress or retry guidance."
+            : !ready
             ? "Configuration saved, but Local AI is not ready. Test the draft or check setup for details."
-            : previousModel === this.plugin.settings.embedModel
-              ? "Local AI configuration saved and ready."
-              : "Local AI configuration saved and ready. Rebuild the index when you are ready to use the new embedding model.";
+            : "Local AI configuration saved and ready.";
           this.renderReadiness();
         }
         this.updateProviderApplyControls();

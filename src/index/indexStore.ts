@@ -87,16 +87,19 @@ function wrapOverlayError(error: unknown, context: string): IndexStoreError | En
 }
 
 /** Loads every currently-valid overlay's prefix, wrapping a fail-closed owned-file validation failure into an actionable `IndexStoreError` (never silently skipping it). */
-async function loadOverlayPrefixesOrThrow(fs: IndexFs, root: string): Promise<OverlayPrefixRecord[]> {
+async function loadOverlayPrefixesOrThrow(fs: IndexFs, root: string, signal?: AbortSignal): Promise<OverlayPrefixRecord[]> {
   try {
-    const { records } = await listOverlayPrefixes(fs, root);
+    const { records } = await listOverlayPrefixes(fs, root, signal);
     return records;
   } catch (error) {
+    throwIfAborted(signal);
     throw wrapOverlayError(error, "cannot safely proceed: a pending overlay failed validation");
   }
 }
 
 export interface QueryRelatedOptions {
+  /** Reject queries from another embedding space even when dimensions happen to match. */
+  embeddingModel?: string;
   /** Raw (not necessarily pre-normalized) note-level query vector; normalized here. */
   queryVector: Float32Array;
   /** Raw chunk vectors for refinement; normalized here. Refinement is skipped entirely (note-level ranking only) when empty. */
@@ -199,7 +202,13 @@ export async function queryRelated(fs: IndexFs, root: string, options: QueryRela
 }
 
 async function queryRelatedWithGeneration(fs: IndexFs, root: string, generation: LoadedGeneration | null, options: QueryRelatedOptions): Promise<ScoredNote[]> {
-  const overlays = await loadOverlayPrefixesOrThrow(fs, root);
+  const overlays = await loadOverlayPrefixesOrThrow(fs, root, options.signal);
+  if (options.embeddingModel !== undefined && (
+    (generation !== null && generation.manifest.embeddingModel !== options.embeddingModel) ||
+    overlays.some((overlay) => overlay.operation === "upsert" && overlay.embeddingModel !== options.embeddingModel)
+  )) {
+    throw new EngineError("EMBEDDING_MODEL_MISMATCH", "The embedding model does not match the active index. Wait for re-embedding to finish.");
+  }
 
   const queryVector = normalizeVector(options.queryVector);
   const candidates = await rankCompositeAsync(generation, overlays, queryVector, options.excludePath, options.limit, options.signal);

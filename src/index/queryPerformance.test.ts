@@ -52,6 +52,19 @@ void test("deterministic full-query fixture preserves exact order and warm base 
   assert.equal(storage.readFileCalls.filter((file) => file.endsWith("notes.mvx")).length, baseReads);
 });
 
+void test("cold and warm related-note queries decode shards even when background window timers never fire", { timeout: 2_000 }, async (context) => {
+  const storage = new FakeIndexFs();
+  await buildGeneration(storage, "/root", { generationId: 1, embeddingModel: MODEL, dimension: 16, notes: notes(64, 16, 2) });
+  await switchCurrentGeneration(storage, "/root", 1);
+  const options = { queryVector: unitVector(16, 0), queryChunkVectors: [unitVector(16, 0)], limit: 20 };
+  const expected = await new IndexStore(storage, "/root").queryRelated(options);
+  const browserTimer = context.mock.method(window, "setTimeout", () => 77);
+  const store = new IndexStore(storage, "/root");
+  assert.deepEqual(await store.queryRelated(options), expected);
+  assert.deepEqual(await store.queryRelated(options), expected);
+  assert.equal(browserTimer.mock.callCount(), 0);
+});
+
 void test("opt-in 1k/10k full-query benchmark", { skip: process.env.MINDMAP_RUN_QUERY_BENCHMARK !== "1" }, async () => {
   for (const noteCount of [1_000, 10_000]) {
     const dimension = 1_024;
