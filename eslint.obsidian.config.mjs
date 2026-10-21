@@ -15,7 +15,7 @@ export default defineConfig([
   // object below, including obsidianmd.configs.recommended's own file
   // globs -- a `files`+`ignores` pair on just the local block below would
   // only narrow that one block, not the plugin's own recommended configs.
-  { ignores: ["src/**/*.test.ts"] },
+  { ignores: ["src/**/*.test.ts", "src/**/*.test-support.ts", "src/**/*.integration.ts"] },
   ...obsidianmd.configs.recommended,
   {
     files: ["src/**/*.ts"],

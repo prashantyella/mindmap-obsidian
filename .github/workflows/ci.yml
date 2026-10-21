@@ -35,7 +35,7 @@ jobs:
         run: npm run typecheck
 
       - name: Run JavaScript/TypeScript tests
-        run: npm test
+        run: npm run test:unit
 
       - name: Mandatory lifecycle regression gate
         run: npm run test:release

@@ -257,6 +257,9 @@ export class RebuildJobRunner implements JobPhaseRunner {
     // own build's exact artifact fingerprint, that no BYTE-level corruption occurred since then.
     const mismatch = this.checkSnapshotAndArtifact(priorReceipt.snapshot, priorReceipt.builtManifestFingerprint, manifest, noteMetadata);
     if (mismatch) return mismatch;
+    if (await this.legacyBuildLostFreshness(priorReceipt.snapshot, manifest, noteMetadata)) {
+      return { type: "superseded", failureCode: "REBUILD_SUPERSEDED" };
+    }
     const receipt: RebuildReceipt = { ...priorReceipt, verified: true };
     return { type: "advance", nextPhase: "activate-generation", receipt };
   }
@@ -274,6 +277,23 @@ export class RebuildJobRunner implements JobPhaseRunner {
       return { type: "retry", failureCode: "GENERATION_ARTIFACT_MISMATCH" };
     }
     return undefined;
+  }
+
+  /** Older receipts used the same schema but omitted freshness from their
+   * semantic fingerprint. If the exact build inputs still exist, do not adopt
+   * their lossy output on upgrade. Changed inputs and already-activated targets
+   * stay under the normal snapshot/conditional-cleanup rules; never guess a
+   * missing marker or introduce a receipt field older releases cannot parse. */
+  private async legacyBuildLostFreshness(
+    snapshot: RebuildSnapshotV1,
+    manifest: Parameters<typeof compactionSnapshotMatchesGeneration>[1],
+    metadata: Parameters<typeof compactionSnapshotMatchesGeneration>[2],
+  ): Promise<boolean> {
+    if (!metadata.some(row => row.relatedVersion === undefined)) return false;
+    const current = describeCompactionSnapshot(await planCompaction(this.deps.fs, this.deps.root));
+    if (current.baseGenerationId !== snapshot.baseGenerationId || current.baseFingerprint !== snapshot.baseFingerprint
+      || JSON.stringify(current.overlays) !== JSON.stringify(snapshot.overlays)) return false;
+    return !compactionSnapshotMatchesGeneration(current, manifest, metadata);
   }
 
   /**
@@ -349,6 +369,9 @@ export class RebuildJobRunner implements JobPhaseRunner {
       }
       const mismatch = this.checkSnapshotAndArtifact(snapshot, builtManifestFingerprint, manifest, noteMetadata);
       if (mismatch) return mismatch;
+      if (await this.legacyBuildLostFreshness(snapshot, manifest, noteMetadata)) {
+        return { type: "superseded", failureCode: "REBUILD_SUPERSEDED" };
+      }
 
       try {
         // Switches current.json, then deletes exactly the overlays `snapshot` was taken from --

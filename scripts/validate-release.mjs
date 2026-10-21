@@ -281,7 +281,7 @@ const ciWorkflow = fs.readFileSync(".github/workflows/ci.yml", "utf8");
 if (!/on:[\s\S]*pull_request/.test(ciWorkflow)) {
   throw new Error("CI workflow must trigger on pull_request.");
 }
-for (const step of ["npm ci", "npm run lint", "npm run lint:obsidian", "npm run typecheck", "npm test", "npm run build", "npm run validate"]) {
+for (const step of ["npm ci", "npm run lint", "npm run lint:obsidian", "npm run typecheck", "npm run test:unit", "npm run test:release", "npm run build", "npm run validate"]) {
   if (!ciWorkflow.includes(step)) {
     throw new Error(`CI workflow must run: ${step}`);
   }

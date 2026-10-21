@@ -649,6 +649,7 @@ export async function planCompaction(fs: IndexFs, root: string): Promise<Compact
       notes.push({
         identity: row.identity,
         sourceHash: row.sourceHash,
+        ...(row.relatedVersion !== undefined ? { relatedVersion: row.relatedVersion } : {}),
         // subarray, not slice: the base note matrix stays resident for the whole compact()
         // call regardless, so a view into it costs nothing extra -- a slice here would
         // instead eagerly duplicate the ENTIRE unshadowed base note matrix up front, well
@@ -670,6 +671,7 @@ export async function planCompaction(fs: IndexFs, root: string): Promise<Compact
     notes.push({
       identity: overlayIdentity,
       sourceHash: overlay.sourceHash as string,
+      ...(overlay.relatedVersion !== undefined ? { relatedVersion: overlay.relatedVersion } : {}),
       vector: overlay.noteVector,
       chunkCount: overlayChunkCount,
       loadChunkVectors: async () => {
@@ -733,12 +735,12 @@ export interface CompactionSnapshotOverlayEntry {
  * BASE generation this plan was built against (`baseGenerationId`/
  * `baseFingerprint`, `null` for an initial build -- final-closure
  * requirement 3), and a single `fingerprint` hash summarizing the
- * (identity, sourceHash, chunkCount) SET the resulting generation's notes
+ * (identity, sourceHash, chunkCount, optional relatedVersion) SET the resulting generation's notes
  * would contain.
  *
  * This `fingerprint` is a SEMANTIC fingerprint, not a byte-exact artifact
  * checksum: it never reads or hashes any actual vector bytes (final-
- * closure requirement 5), only identity/sourceHash/chunkCount -- two
+ * closure requirement 5), only identity/sourceHash/chunkCount/relatedVersion -- two
  * builds that embed the same source text differently (a non-deterministic
  * provider, or a bug) would still match on this fingerprint. It exists to
  * detect "this generation was built from a materially different overlay
@@ -759,7 +761,7 @@ export interface CompactionSnapshotDescriptorV1 {
   fingerprint: string;
 }
 
-function compactionFingerprint(entries: readonly { key: string; sourceHash: string; chunkCount: number }[], dimension: number, embeddingModel: string): string {
+function compactionFingerprint(entries: readonly { key: string; sourceHash: string; chunkCount: number; relatedVersion?: number }[], dimension: number, embeddingModel: string): string {
   const sorted = [...entries].sort((a, b) => a.key.localeCompare(b.key));
   return createHash("sha256").update(JSON.stringify({ dimension, embeddingModel, entries: sorted })).digest("hex");
 }
@@ -770,7 +772,7 @@ function compactionFingerprint(entries: readonly { key: string; sourceHash: stri
  * bytes (`noteMatrixChecksum`, `noteMetadataChecksum`, and each chunk
  * shard's `checksum`/`offsetChecksum`, in deterministic shard-id order),
  * plus its shape (dimension/model/counts). Unlike `compactionFingerprint`
- * (semantic: identity/sourceHash/chunkCount only), two generations only
+ * (semantic: identity/sourceHash/chunkCount/relatedVersion), two generations only
  * match this fingerprint if their vector bytes are ACTUALLY identical --
  * this is the byte-exact half of Checkpoint 7 final-closure requirement 5.
  */
@@ -792,7 +794,7 @@ export function manifestArtifactFingerprint(manifest: VectorIndexManifestV1): st
 
 /** Builds the bounded, content-free snapshot descriptor for `plan` -- see `CompactionSnapshotDescriptorV1`. */
 export function describeCompactionSnapshot(plan: CompactionPlan): CompactionSnapshotDescriptorV1 {
-  const entries = plan.notes.map((note) => ({ key: identityKey(note.identity), sourceHash: note.sourceHash, chunkCount: note.chunkCount }));
+  const entries = plan.notes.map((note) => ({ key: identityKey(note.identity), sourceHash: note.sourceHash, chunkCount: note.chunkCount, ...(note.relatedVersion !== undefined ? { relatedVersion: note.relatedVersion } : {}) }));
   const overlays = [...plan.overlaysSnapshot]
     .map((overlay) => ({ fileName: overlayFileName(overlay.identity), version: overlay.version, fingerprint: overlay.fingerprint }))
     .sort((a, b) => a.fileName.localeCompare(b.fileName));
@@ -809,7 +811,7 @@ export function describeCompactionSnapshot(plan: CompactionPlan): CompactionSnap
 /**
  * `true` iff a generation actually loaded from disk (`manifest` +
  * `noteMetadata`, from `verifyGenerationFully`/`loadGeneration`) contains
- * the SAME (identity, sourceHash, chunkCount) SET `descriptor` was built
+ * the SAME (identity, sourceHash, chunkCount, optional relatedVersion) SET `descriptor` was built
  * from, at the same dimension/model -- a SEMANTIC match, never a claim
  * that the actual vector bytes are identical (see
  * `CompactionSnapshotDescriptorV1`'s own doc comment, final-closure
@@ -824,7 +826,7 @@ export function describeCompactionSnapshot(plan: CompactionPlan): CompactionSnap
  */
 export function compactionSnapshotMatchesGeneration(descriptor: CompactionSnapshotDescriptorV1, manifest: VectorIndexManifestV1, noteMetadata: readonly NoteRowMetadataV1[]): boolean {
   if (manifest.dimension !== descriptor.dimension || manifest.embeddingModel !== descriptor.embeddingModel) return false;
-  const entries = noteMetadata.map((row) => ({ key: identityKey(row.identity), sourceHash: row.sourceHash, chunkCount: row.chunkCount }));
+  const entries = noteMetadata.map((row) => ({ key: identityKey(row.identity), sourceHash: row.sourceHash, chunkCount: row.chunkCount, ...(row.relatedVersion !== undefined ? { relatedVersion: row.relatedVersion } : {}) }));
   return compactionFingerprint(entries, manifest.dimension, manifest.embeddingModel) === descriptor.fingerprint;
 }
 

@@ -4,6 +4,14 @@ All notable changes to this project should be documented in this file.
 
 ## Unreleased
 
+### Fixed
+- Preserve connection-processing freshness metadata through index generations, repeated compaction, and restart adoption, preventing unchanged notes from being unnecessarily reprocessed after a rebuild.
+- Do not count matching queued or active refreshes as newly pending when only connection freshness is stale.
+
+### Tests
+- Exercise metadata preservation, pending-state decisions, and zero redundant job creation in the on-disk release gate.
+- Make the default test command run unit and integration suites; reject empty/skipped/TODO integration gates, use portable discovery, and separate queue/retry/lifecycle fixtures.
+
 ### Release process
 - Update this changelog for every user-visible plugin release.
 - Keep `manifest.json` and `versions.json` in sync.
