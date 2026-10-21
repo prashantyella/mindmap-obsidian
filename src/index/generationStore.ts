@@ -242,6 +242,8 @@ export async function switchCurrentGeneration(fs: IndexFs, root: string, generat
 export interface GenerationInputNote {
   identity: NoteIdentityV1;
   sourceHash: string;
+  /** Preserve processing freshness; absence means unknown, never implicitly current. */
+  relatedVersion?: number;
   /** Raw (not necessarily pre-normalized) note embedding; normalized here. Note vectors are always fully resident (bounded by `MAX_MANIFEST_NOTE_COUNT`), so this is eager, unlike chunk vectors. */
   vector: Float32Array;
   /** Must equal exactly how many vectors `loadChunkVectors()` resolves to -- known upfront (for shard planning) without ever calling the loader. */
@@ -448,6 +450,9 @@ export async function buildGeneration(fs: IndexFs, root: string, input: BuildGen
   const noteMatrixData = new Float32Array(sortedNotes.length * input.dimension);
   const noteMetadata: NoteRowMetadataV1[] = [];
   sortedNotes.forEach((note, rowIndex) => {
+    if (note.relatedVersion !== undefined && (!Number.isInteger(note.relatedVersion) || note.relatedVersion < 0)) {
+      throw new GenerationStoreError("relatedVersion must be a non-negative integer when present.");
+    }
     if (note.vector.length !== input.dimension) {
       throw new GenerationStoreError(`note "${identityKey(note.identity)}" vector has dimension ${note.vector.length}, expected ${input.dimension}.`);
     }
@@ -465,6 +470,7 @@ export async function buildGeneration(fs: IndexFs, root: string, input: BuildGen
       sourceHash: note.sourceHash,
       embeddingModel: input.embeddingModel,
       chunkCount: note.chunkCount,
+      ...(note.relatedVersion !== undefined ? { relatedVersion: note.relatedVersion } : {}),
       rowIndex,
       ...(shardId !== undefined ? { shardId } : {}),
     });

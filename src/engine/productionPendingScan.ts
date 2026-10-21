@@ -1,10 +1,25 @@
 import { isTerminalJobStatus } from "../jobs/jobTypes";
 import { emptyMetrics, emptySummary, DebouncedRefreshController, type PendingSnapshot } from "../pendingScan";
-import { PRODUCTION_SCOPE_ALL, PRODUCTION_SCOPE_CURRENT, type ProductionEngine } from "./productionEngine";
+import { PRODUCTION_SCOPE_ALL, PRODUCTION_SCOPE_CURRENT } from "./productionEngine";
 import type { NoteIdentityV1 } from "./contracts";
+import type { IndexedCatalogRecord } from "../index/indexStore";
+import type { JobStatus } from "../jobs/jobTypes";
 
 const MAX_PENDING_ITEMS = 5;
 const DEFAULT_DEBOUNCE_MS = 500;
+
+/** Narrow read-only contract: fixtures must explicitly model freshness instead
+ * of casting partial objects to an entire ProductionEngine. */
+export interface PendingScanEngine {
+  readonly relatedVersion: number | undefined;
+  getPendingCandidates(scope: string): Promise<{ identity: NoteIdentityV1; sourceHash: string }[]>;
+  getPendingCandidatesForPaths?(scope: string, paths: readonly string[]): Promise<{ identity: NoteIdentityV1; sourceHash: string }[] | null>;
+  indexStore: { getRevision?(): number; snapshotCatalog(): Promise<IndexedCatalogRecord[] | null> };
+  jobStore: { list(): Promise<readonly {
+    status: JobStatus;
+    job: { kind: string; target: { kind: "note"; identity: NoteIdentityV1 } | { kind: "scope" | "global" }; sourceHash?: string };
+  }[]> };
+}
 
 export interface ProductionPendingServiceDeps {
   log(message: string): void;
@@ -44,12 +59,12 @@ export class ProductionPendingScanService {
   private queuedRefresh = false;
   private dirtyPaths = new Set<string>();
   private discovered = new Map<string, Map<string, { identity: NoteIdentityV1; sourceHash: string }>>();
-  private catalogCache: Awaited<ReturnType<ProductionEngine["indexStore"]["snapshotCatalog"]>> | undefined;
+  private catalogCache: Awaited<ReturnType<PendingScanEngine["indexStore"]["snapshotCatalog"]>> | undefined;
   private catalogRevision: number | null = null;
   private fullRefreshRequested = false;
 
   constructor(
-    private readonly getEngine: () => ProductionEngine | null,
+    private readonly getEngine: () => PendingScanEngine | null,
     private readonly deps: ProductionPendingServiceDeps,
   ) {
     this.debouncer = new DebouncedRefreshController(
@@ -124,14 +139,15 @@ export class ProductionPendingScanService {
       this.dirtyPaths.clear();
       const paths = scanPaths;
       const revisionBefore = typeof engine.indexStore.getRevision === "function" ? engine.indexStore.getRevision() : 0;
-      let targeted = !wasFullRefresh && paths.length > 0 && this.discovered.size > 0 && typeof engine.getPendingCandidatesForPaths === "function";
+      const discoverTargeted = engine.getPendingCandidatesForPaths?.bind(engine);
+      let targeted = !wasFullRefresh && paths.length > 0 && this.discovered.size > 0 && discoverTargeted !== undefined;
       let currentDiscovered: { identity: NoteIdentityV1; sourceHash: string }[];
       let allDiscovered: { identity: NoteIdentityV1; sourceHash: string }[];
-      let jobs: Awaited<ReturnType<ProductionEngine["jobStore"]["list"]>>;
-      if (targeted) {
+      let jobs: Awaited<ReturnType<PendingScanEngine["jobStore"]["list"]>>;
+      if (targeted && discoverTargeted) {
         const [currentResult, allResult, jobsResult] = await Promise.all([
-          engine.getPendingCandidatesForPaths(PRODUCTION_SCOPE_CURRENT, paths),
-          engine.getPendingCandidatesForPaths(PRODUCTION_SCOPE_ALL, paths),
+          discoverTargeted(PRODUCTION_SCOPE_CURRENT, paths),
+          discoverTargeted(PRODUCTION_SCOPE_ALL, paths),
           engine.jobStore.list(),
         ]);
         jobs = jobsResult;
@@ -187,12 +203,14 @@ export class ProductionPendingScanService {
 
       const expectedRelatedVersion = engine.relatedVersion;
       const isPending = (canonicalPath: string, sourceHash: string): boolean => {
+        // A matching in-flight refresh already owns this work, including when
+        // only the connection algorithm version (not the source) is stale.
+        if (queuedHashByPath.get(canonicalPath) === sourceHash) return false;
         const indexed = indexedByPath.get(canonicalPath);
         if (indexed && indexed.sourceHash === sourceHash) {
           if (expectedRelatedVersion !== undefined && (indexed.relatedVersion ?? 0) < expectedRelatedVersion) return true;
           return false;
         }
-        if (queuedHashByPath.get(canonicalPath) === sourceHash) return false;
         return true;
       };
 
@@ -239,7 +257,7 @@ export class ProductionPendingScanService {
 }
 
 export function createProductionPendingScanService(
-  getEngine: () => ProductionEngine | null,
+  getEngine: () => PendingScanEngine | null,
   log: (message: string) => void,
   onUpdated?: () => void,
 ): ProductionPendingScanService {

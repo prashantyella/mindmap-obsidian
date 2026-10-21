@@ -13,6 +13,9 @@ import { JobEngine, type JobPhaseRunner } from "./jobs/jobEngine";
 import { JobStore } from "./jobs/jobStore";
 import { RebuildJobRunner } from "./jobs/rebuildJob";
 import { deriveEngineActivity } from "./jobs/jobActivity";
+import { buildCatalogPredicate, PRODUCTION_RELATED_VERSION } from "./engine/productionEngine";
+import { createProductionPendingScanService } from "./engine/productionPendingScan";
+import { ScopeJobRunner } from "./jobs/scopeJob";
 
 // Synthetic metadata/vectors only. Exercise production persistence and scheduling
 // without a personal vault, network, model server, fake clock, or manual drain().
@@ -81,7 +84,8 @@ for (const upgraded of [false, true]) {
       // Low-level writes deliberately recreate the historical mixed producer state.
       for (let i = 0; i < count; i++) {
         await writeUpsertOverlay(fs, root, { identity: stableNoteIdentity(notePath(i)), sourceHash: newHash,
-          embeddingModel: "synthetic", dimension: 4, noteVector: vector, chunkVectors: [vector] });
+          embeddingModel: "synthetic", dimension: 4, noteVector: vector, chunkVectors: [vector],
+          ...(upgraded ? { relatedVersion: PRODUCTION_RELATED_VERSION } : {}) });
       }
       const store = new JobStore(fs, root);
       const realRunner = new RebuildJobRunner({ fs, root });
@@ -136,12 +140,48 @@ for (const upgraded of [false, true]) {
       assert.equal(verified.noteMetadata.length, count);
       assert.equal(new Set(verified.noteMetadata.map(row => row.identity.canonicalPath)).size, count);
       assert.ok(verified.noteMetadata.every(row => row.sourceHash === newHash));
+      assert.ok(verified.noteMetadata.every(row => row.relatedVersion === (upgraded ? PRODUCTION_RELATED_VERSION : undefined)));
       assert.equal((await readdir(join(root, "overlays"))).length, 0);
       const index = new IndexStore(finalFs, root);
       const matches = await index.queryRelated({ queryVector: vector, queryChunkVectors: [vector], limit: 8 });
       assert.equal(matches.length, 8);
       assert.ok(matches.every(match => match.score === 1));
       assert.equal((await activity(finalStore)).state, "idle");
+      // The user-visible invariant: a successful rebuild must not schedule all
+      // unchanged notes again. Verify both the pending UI and real scope runner.
+      const discovered = Array.from({ length: count }, (_, i) => ({ identity: stableNoteIdentity(notePath(i)), sourceHash: newHash, embeddingModel: "synthetic" }));
+      const pending = createProductionPendingScanService(() => ({ relatedVersion: PRODUCTION_RELATED_VERSION,
+        getPendingCandidates: async () => discovered, indexStore: index, jobStore: finalStore }), () => undefined);
+      try {
+        await pending.warm();
+        assert.equal(pending.getSnapshot().available, true);
+        assert.equal(pending.getSnapshot().all.total, upgraded ? 0 : count, "embedding-only initialization must not invent completed connection processing");
+      } finally { pending.dispose(); }
+      const catalogBefore = await index.snapshotCatalog();
+      await index.compact(generationId + 1);
+      const reopenedIndex = new IndexStore(new NodeOwnedFs(root), root);
+      assert.deepEqual(await reopenedIndex.snapshotCatalog(), catalogBefore, "a second compaction must preserve every processing marker");
+      if (upgraded) {
+        const scope = new ScopeJobRunner({
+          discovery: { discover: async () => discovered },
+          import: { import: async () => { throw new Error("scope refresh must not import"); } },
+          catalogSnapshot: { prepareLookup: async () => buildCatalogPredicate(await reopenedIndex.snapshotCatalog(), PRODUCTION_RELATED_VERSION) },
+          enqueue: { enqueueProcessNote: async (item, pipelineVersion, _signal, batchId) => {
+            assert.ok(batchId);
+            await scopeEngine.submitBulkChild(batchId, { trigger: "scheduled", kind: "process-note", ...item, pipelineVersion });
+          } },
+        });
+        const scopeEngine: JobEngine = new JobEngine(finalStore, { "scope-refresh": scope });
+        engines.push(scopeEngine);
+        const refresh = await scopeEngine.submit({ kind: "scope-refresh", trigger: "scheduled", scopeId: "all", pipelineVersion: 2 });
+        scopeEngine.start();
+        await waitFor(async () => (await finalStore.getById(refresh.job.jobId))?.status === "completed");
+        await scopeEngine.whenSettled();
+        assert.equal((await finalStore.list()).filter(entry => entry.job.kind === "process-note").length, 0, "no embedding or metadata jobs may be created for unchanged fresh notes");
+        const matchesCatalog = buildCatalogPredicate(await reopenedIndex.snapshotCatalog(), PRODUCTION_RELATED_VERSION);
+        assert.equal(matchesCatalog(discovered[0].identity, "d".repeat(64)), false, "genuine edits remain eligible");
+        assert.equal(buildCatalogPredicate(await reopenedIndex.snapshotCatalog(), PRODUCTION_RELATED_VERSION + 1)(discovered[0].identity, newHash), false, "future algorithm upgrades remain eligible");
+      }
       if (upgraded) {
         assert.deepEqual(await artifacts(join(root, "generations/gen-1")), previous);
         await verifyGenerationFully(finalFs, root, 1);

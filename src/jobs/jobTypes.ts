@@ -292,7 +292,7 @@ export type JobReceiptV1 =
        * `true` (whether by a fresh `buildGeneration` or by adopting an
        * already-matching existing directory). Distinct from
        * `snapshot.fingerprint`, which is only ever a SEMANTIC match
-       * (identity/sourceHash/chunkCount, never actual vector bytes) --
+       * (identity/sourceHash/chunkCount/optional relatedVersion, never actual vector bytes) --
        * this field is what `verify-generation`/`activate-generation` use
        * to confirm the artifact reloaded at that later phase is
        * BYTE-IDENTICAL to what this job itself committed to, catching

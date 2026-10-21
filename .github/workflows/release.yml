@@ -36,7 +36,7 @@ jobs:
         run: npm run lint:obsidian
 
       - name: Run JavaScript tests
-        run: npm test
+        run: npm run test:unit
 
       - name: Typecheck
         run: npm run typecheck
