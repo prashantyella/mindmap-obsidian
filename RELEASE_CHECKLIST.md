@@ -1,6 +1,6 @@
 # Release checklist: 0.3.12
 
-Status: candidate validation in progress; not yet published.
+Status: published as [0.3.12](https://github.com/prashantyella/mindmap-obsidian/releases/tag/0.3.12) on 2026-10-21 UTC after the automated gates and isolated-vault checks below. The host Force Reload limitation is recorded explicitly.
 
 ## 0.3.12 scope and acceptance
 
@@ -14,8 +14,17 @@ Status: candidate validation in progress; not yet published.
 - [x] Pass local lint, Obsidian lint, typecheck, unit tests, lifecycle tests, build, and release validation: 2,287 passed, four optional benchmarks skipped; no lifecycle skips.
 - [x] Verify the local recovery build in the existing vault: stuck job completed, 944 unique indexed notes, no pending jobs; previous generation retained and verified.
 - [x] Verify clean installation, index initialization, and cold reopen in an isolated Obsidian 1.13.7 vault: one synthetic note embedded, generation 1 verified/activated, saved model/scope preserved, plugin ready after reopening.
-- [ ] Commit candidate, open PR, and pass CI on the exact candidate.
-- [ ] Merge, tag 0.3.12, pass release workflow, and verify published assets and attestations.
+- [x] Commit candidate `6dbe3db09f903742f71630591f8804c4d1f39a30`, open PR #34, and pass CI run `39536143236` on that exact candidate.
+- [x] Merge as `ca6444117137a2f6ba371cb3b1a25aae80ecbc2d` (identical candidate tree), tag 0.3.12, and pass release workflow `39536369341`.
+- [x] Download all three published assets, compare byte-for-byte with the tested package, and verify each attestation against the repository, tag, merge commit, release workflow, and GitHub-hosted runner policy.
+
+Published asset SHA-256 checksums:
+
+| Asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `main.js` | 696491 | `da4fe7123fbb8377233e8f382771330ec84989e6efbe3997736d92dcf8ea548a` |
+| `manifest.json` | 329 | `e95357e15e64332dd16e945ff43fca8a6d9e63a5db4c57c5e3165d995c01dfff` |
+| `styles.css` | 21240 | `c2cf12f2140e24bd7d7a3db8a64290c098a82b81a9754ab8babe4c42b450829f` |
 
 The existing-vault recovery check used the same runtime source before the version bump. The isolated-vault smoke check uses the 0.3.12 bundle. Neither check establishes equal foreground/background performance or completes the broader outstanding 0.3.11 soak tests below.
 
