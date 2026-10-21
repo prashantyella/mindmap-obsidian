@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildStatusBarPresentation, type StatusBarMenuState } from "./statusBarState";
+import { buildStatusBarMenuItems, buildStatusBarPresentation, type StatusBarMenuState } from "./statusBarState";
 import { NO_ACTIVE_NOTE } from "./individualNote";
 
 function state(overrides: Partial<StatusBarMenuState> = {}): StatusBarMenuState {
@@ -41,6 +41,31 @@ void test("CP5: preparing=true → label 'Mindmap · preparing'", () => {
   const s = state({ activity: { state: "running", queuedCount: 0, activeCount: 1, processNoteCount: 0, bulkBlocked: true, batch: { status: "active", preparing: true, processed: 0, total: 935, failed: 0, enqueuedCount: undefined } } });
   const p = buildStatusBarPresentation(s);
   assert.equal(p.label, "Mindmap · preparing");
+});
+
+void test("a backed-off rebuild displays retry deadline/failure instead of preparing and does not spin", () => {
+  const activity = { state: "running" as const, queuedCount: 1, activeCount: 0, processNoteCount: 0, bulkBlocked: true,
+    current: { kind: "rebuild-index" as const, phase: "build-generation", attempt: 8, nextAttemptAtMs: Date.UTC(2026, 9, 21), failureCode: "UNKNOWN_TRANSIENT" },
+    batch: { status: "active" as const, preparing: true, processed: 0, total: 0, failed: 0 } };
+  const s = state({ activity });
+  const presentation = buildStatusBarPresentation(s);
+  assert.equal(presentation.label, "Mindmap · waiting to retry");
+  assert.equal(presentation.animateIcon, false);
+  assert.match(presentation.title, /build-generation.*retry scheduled 2026-10-21T00:00:00.000Z, phase attempt 8, UNKNOWN_TRANSIENT/);
+  assert.match(buildStatusBarMenuItems(s).find((item) => item.title.startsWith("Engine:"))!.title, /waiting to retry.*UNKNOWN_TRANSIENT/);
+  for (const pausedState of ["paused", "operator-paused", "faulted"] as const) {
+    assert.equal(buildStatusBarPresentation(state({ activity: { ...activity, state: pausedState } })).label, pausedState === "faulted" ? "Mindmap · fault" : "Mindmap · paused");
+  }
+});
+
+void test("active rebuild phases and terminal identity conflicts appear in existing status text", () => {
+  for (const [phase, label] of [["build-generation", "rebuilding index"], ["verify-generation", "verifying index"], ["activate-generation", "activating index"]]) {
+    const presentation = buildStatusBarPresentation(state({ activity: { state: "running", queuedCount: 0, activeCount: 1, processNoteCount: 0, bulkBlocked: true, current: { kind: "rebuild-index", phase, attempt: 1 }, batch: { status: "active", preparing: true, processed: 0, total: 0, failed: 0 } } }));
+    assert.equal(presentation.label, `Mindmap · ${label}`);
+  }
+  const presentation = buildStatusBarPresentation(state({ activity: { state: "idle", queuedCount: 0, activeCount: 0, processNoteCount: 0, bulkBlocked: false, latestFailureBatch: { status: "failed", failed: 0, phase: "build-generation", failureCode: "INDEX_IDENTITY_CONFLICT" } } }));
+  assert.equal(presentation.label, "Mindmap · root failed");
+  assert.match(presentation.title, /build-generation, INDEX_IDENTITY_CONFLICT/);
 });
 
 void test("CP5: preparing=true with total=undefined → label 'Mindmap · preparing'", () => {

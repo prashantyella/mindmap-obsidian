@@ -1,4 +1,37 @@
-# Release checklist: 0.3.11
+# Release checklist: 0.3.12
+
+Status: candidate validation in progress; not yet published.
+
+## 0.3.12 scope and acceptance
+
+- Recover duplicate logical paths in mixed annotation/path index records.
+- Resume persisted retries automatically without window events, respecting editing protection and pause/unload.
+- Preserve verified generations and concurrent updates during interrupted cleanup.
+- Report rebuild/retry state truthfully using existing status surfaces; no font or layout changes.
+- Enforce the on-disk lifecycle gate in CI and release preparation.
+
+- [x] Synchronize manifest/package/lockfile/compatibility map to 0.3.12 and document changes.
+- [x] Pass local lint, Obsidian lint, typecheck, unit tests, lifecycle tests, build, and release validation: 2,287 passed, four optional benchmarks skipped; no lifecycle skips.
+- [x] Verify the local recovery build in the existing vault: stuck job completed, 944 unique indexed notes, no pending jobs; previous generation retained and verified.
+- [x] Verify clean installation, index initialization, and cold reopen in an isolated Obsidian 1.13.7 vault: one synthetic note embedded, generation 1 verified/activated, saved model/scope preserved, plugin ready after reopening.
+- [ ] Commit candidate, open PR, and pass CI on the exact candidate.
+- [ ] Merge, tag 0.3.12, pass release workflow, and verify published assets and attestations.
+
+The existing-vault recovery check used the same runtime source before the version bump. The isolated-vault smoke check uses the 0.3.12 bundle. Neither check establishes equal foreground/background performance or completes the broader outstanding 0.3.11 soak tests below.
+
+Smoke-test limitation (2026-10-20 local): the native Force Reload command left the test window blank. The same behavior reproduced with every community plugin disabled; closing and reopening the vault worked with 0.3.12 enabled. Treat Force Reload as an unresolved host/environment limitation, not a passed reload check or an established Mindmap regression. Clean initialization, persisted-index reopening, and the automated restart/retry gates passed. Synthetic test data stayed outside the repository; no personal notes were used in this smoke test.
+
+## Mandatory gates for subsequent releases
+
+These requirements were added after 0.3.11; they do not retroactively validate that release.
+
+- Pass `npm run check`: unit regressions plus the on-disk lifecycle gate (`npm run test:release`).
+- The lifecycle gate must cover fresh initialization, a synthetic 944-note mixed-identity upgrade, persisted retry/restart without window activity, interrupted cleanup, verified activation, and preservation of the previous generation.
+- Keep retry/pause/unload, identity conflicts, concurrent updates, and truthful status regressions in the default unit suite. Do not skip these as optional benchmarks.
+- CI runs the lifecycle gate explicitly. `npm run release:prepare` reruns it before packaging; the release workflow cannot attest/upload/publish assets if it fails.
+- Obsidian foreground/background, editing, and visual acceptance checks remain required separately: the Node integration gate is not an Electron/UI test.
+
+## 0.3.11 publication record
 
 Status: published as [0.3.11](https://github.com/prashantyella/mindmap-obsidian/releases/tag/0.3.11), following release-owner authorization on 2026-10-20 after the outstanding live checks were disclosed. Automated validation passed. The unchecked live checks below remain follow-up work and are not represented as completed.
 

@@ -218,6 +218,25 @@ function batchDisplaySummary(batch: NonNullable<EngineActivitySnapshot["batch"]>
   return batch.preparing || batch.total === undefined ? "preparing" : `${batch.processed}/${batch.total}`;
 }
 
+function engineWorkSummary(activity: EngineActivitySnapshot): string {
+  const current = activity.current;
+  if (current?.nextAttemptAtMs !== undefined) return "waiting to retry";
+  if (current?.kind === "rebuild-index") {
+    return current.phase === "build-generation" ? "rebuilding index"
+      : current.phase === "verify-generation" ? "verifying index"
+      : current.phase === "activate-generation" ? "activating index"
+      : "preparing index rebuild";
+  }
+  return activity.batch ? batchDisplaySummary(activity.batch) : `${activity.queuedCount} queued`;
+}
+
+function engineRetryDetail(activity: EngineActivitySnapshot): string {
+  const current = activity.current;
+  return current?.nextAttemptAtMs !== undefined
+    ? `, retry scheduled ${new Date(current.nextAttemptAtMs).toISOString()}, phase attempt ${current.attempt}${current.failureCode ? `, ${current.failureCode}` : ""}`
+    : current?.failureCode ? `, last failure ${current.failureCode}` : "";
+}
+
 export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBarPresentation {
   const activity = state.activity;
   const schedulerActionable = state.schedulerHealth !== null && ACTIONABLE_HEALTH.has(state.schedulerHealth);
@@ -226,7 +245,8 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
   const webResearchActionable = state.webResearchActivity === "error" || Boolean(state.webResearchError) || automaticPaused;
   const researchBusy = ["deriving", "searching", "writing"].includes(state.webResearchActivity);
   const waitingForEditing = Boolean(activity?.waitingForEditingCount);
-  const busy = state.running || (activity?.state === "running" && !waitingForEditing) || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy;
+  const waitingToRetry = activity?.activeCount === 0 && activity.current?.nextAttemptAtMs !== undefined;
+  const busy = state.running || (activity?.state === "running" && !waitingForEditing && !waitingToRetry) || state.readingActivity === "syncing" || state.readingActivity === "processing" || researchBusy;
   const readingBusy = state.readingMode === "reading" && (state.readingActivity === "syncing" || state.readingActivity === "processing");
   const activeEngineWork = Boolean(activity?.batch) || Boolean(activity && (activity.queuedCount > 0 || activity.activeCount > 0));
   const visibleLatestFailure = Boolean(activity?.latestFailureBatch) && !readingBusy && !researchBusy && !activeEngineWork && activity?.state !== "faulted" && activity?.state !== "paused";
@@ -242,7 +262,7 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
       : `Reading · ${state.readingPending}`
     : researchBusy
     ? `Research · ${state.webResearchActivity}`
-    : activity?.batch ? `Mindmap · ${batchDisplaySummary(activity.batch)}`
+    : activity && (activity.batch || activity.current?.nextAttemptAtMs !== undefined || activity.current?.kind === "rebuild-index") ? `Mindmap · ${engineWorkSummary(activity)}`
     : activity && activity.queuedCount > 0 ? `Mindmap · ${activity.queuedCount} queued`
     : visibleLatestFailure && activity?.latestFailureBatch ? `Mindmap · ${batchFailureSummary(activity.latestFailureBatch)}`
     : state.running
@@ -264,11 +284,13 @@ export function buildStatusBarPresentation(state: StatusBarMenuState): StatusBar
           ? `${state.currentPending} pending note${state.currentPending === 1 ? "" : "s"}`
           : "ready";
   const status = activity?.state === "faulted" ? "fault" : activity?.state === "operator-paused" ? "paused" : activity?.state === "paused" ? "provider paused" : activity?.waitingForEditingCount ? "Waiting until you finish editing" : visibleLatestFailure && activity?.latestFailureBatch ? batchFailureSummary(activity.latestFailureBatch) : state.running ? state.runStatus ?? "running" : attention;
-  const engineDetail = activity ? `${activity.current?.phase ?? "idle"}${activity.current?.path ? `, ${activity.current.path}` : ""}, ${activity.queuedCount} queued${visibleLatestFailure && activity.latestFailureBatch ? `, ${batchFailureSummary(activity.latestFailureBatch)}` : ""}` : "";
+  const failureDetail = visibleLatestFailure && activity?.latestFailureBatch
+    ? `, ${batchFailureSummary(activity.latestFailureBatch)}${activity.latestFailureBatch.failureCode ? `, ${activity.latestFailureBatch.phase}, ${activity.latestFailureBatch.failureCode}` : ""}` : "";
+  const engineDetail = activity ? `${activity.current?.phase ?? "idle"}${activity.current?.path ? `, ${activity.current.path}` : ""}, ${activity.queuedCount} queued${engineRetryDetail(activity)}${failureDetail}` : "";
   const ariaLabel = engineAlert
     ? `Mindmap engine ${status}. ${engineDetail}. Activate to open the Mindmap menu.`
     : engineBusy
-      ? `Mindmap engine ${activity?.batch ? batchDisplaySummary(activity.batch) : `${activity?.queuedCount ?? 0} queued`}. ${engineDetail}. Activate to open the Mindmap menu.`
+      ? `Mindmap engine ${activity ? engineWorkSummary(activity) : "queued"}. ${engineDetail}. Activate to open the Mindmap menu.`
     : readingActionable
     ? `Mindmap Reading Mode: ${state.readingError ?? state.readingActivity}. ${state.readingPending} eligible notes pending. Activate to open the Mindmap menu.`
     : webResearchActionable
@@ -380,7 +402,7 @@ export function buildStatusBarMenuItems(state: StatusBarMenuState): StatusBarMen
     ...(state.activity?.operatorPause ? [{ title: "Resume processing", icon: "play" as IconName, action: "resumeProcessing" as const }] : state.activity && state.activity.state !== "idle" ? [{ title: "Pause processing", icon: "pause" as IconName, action: "pauseProcessing" as const }] : []),
     ...(state.activity?.waitingForEditingCount ? [{ title: "Waiting until you finish editing", icon: "pencil" as IconName, disabled: true }] : []),
     ...(state.activity && (state.activity.state !== "idle" || visibleLatestFailure) ? [{
-      title: `Engine: ${state.activity.current?.phase ?? state.activity.state}${state.activity.current?.path ? ` · ${state.activity.current.path}` : ""} · ${state.activity.batch ? batchDisplaySummary(state.activity.batch) : `${state.activity.queuedCount} queued`}${visibleLatestFailure && state.activity.latestFailureBatch ? ` · ${batchFailureSummary(state.activity.latestFailureBatch)}` : ""}`,
+      title: `Engine: ${state.activity.current?.phase ?? state.activity.state}${state.activity.current?.path ? ` · ${state.activity.current.path}` : ""} · ${engineWorkSummary(state.activity)}${engineRetryDetail(state.activity)}${visibleLatestFailure && state.activity.latestFailureBatch ? ` · ${batchFailureSummary(state.activity.latestFailureBatch)}${state.activity.latestFailureBatch.failureCode ? ` · ${state.activity.latestFailureBatch.failureCode}` : ""}` : ""}`,
       icon: "info" as IconName,
       disabled: true,
     }] : []),

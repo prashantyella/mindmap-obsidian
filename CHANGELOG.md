@@ -9,6 +9,19 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.12
+
+### Fixed
+- Recover index rebuilds stuck in "preparing" when an Apple Books annotation and a file-path record refer to the same note.
+- Resume queued retries automatically, including after restart and while browser timers are inactive, without bypassing editing protection or pause controls.
+- Keep index queries, lookups, and rebuilds consistent, and preserve newer updates during interrupted cleanup.
+- Show actual rebuild phases and retry details instead of an indefinite "preparing" status.
+
+### Release safeguards
+- Require on-disk lifecycle regression tests in CI and before release packaging, including fresh initialization and a synthetic 944-note upgrade/restart recovery.
+
+`minAppVersion` remains `1.7.2`; desktop only. Fonts, layout, saved settings, and note-writing behavior are unchanged. No model change or full re-embedding is required.
+
 ## 0.3.11
 
 ### Changed

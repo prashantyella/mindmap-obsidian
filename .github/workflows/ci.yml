@@ -37,6 +37,9 @@ jobs:
       - name: Run JavaScript/TypeScript tests
         run: npm test
 
+      - name: Mandatory lifecycle regression gate
+        run: npm run test:release
+
       - name: Build plugin
         run: npm run build
 

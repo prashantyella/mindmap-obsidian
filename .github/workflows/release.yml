@@ -47,7 +47,7 @@ jobs:
       - name: Validate release
         run: npm run validate
 
-      - name: Prepare release assets
+      - name: Mandatory lifecycle regression gate and prepare release assets
         run: npm run release:prepare
 
       - name: Attest release assets

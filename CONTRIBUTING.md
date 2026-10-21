@@ -44,6 +44,7 @@ Before tagging a release:
 2. Update `versions.json` so `manifest.version` maps to `manifest.minAppVersion`.
 3. Add a `CHANGELOG.md` entry and review the current `RELEASE_CHECKLIST.md`.
 4. Run `npm run check`, then `npm run release:prepare`.
+   Both enforce `npm run test:release`, an isolated on-disk lifecycle regression gate using synthetic data and production queue/index components. No vault or Ollama server is needed. CI runs it explicitly; release preparation must pass it before packaging. This does not replace the live Obsidian acceptance checks.
 5. Confirm `release/` contains exactly `main.js`, `manifest.json`, and `styles.css`.
 6. Complete the documented live acceptance checks and verify CI before merging or tagging.
 7. Tag the approved release commit with the exact manifest version. Pushing that tag publishes release assets automatically; preparing assets alone does not publish them.
