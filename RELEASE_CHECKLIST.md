@@ -1,6 +1,6 @@
 # Release checklist: 0.3.13
 
-Status: preparing the approved PR #35 for publication. No live-vault repair is included in this release operation.
+Status: published as [0.3.13](https://github.com/prashantyella/mindmap-obsidian/releases/tag/0.3.13) on 2026-10-21 UTC. No live-vault repair was performed during this release operation.
 
 ## 0.3.13 scope and acceptance
 
@@ -10,8 +10,17 @@ Status: preparing the approved PR #35 for publication. No live-vault repair is i
 - [x] Source candidate `6de3fbd3fec9acda10f10df0bfcc25bb885ce014` passed CI `39545491078`: 2,363 unit/regression tests plus two integration tests passed; four optional unit benchmarks skipped.
 - [x] Replayed a copied 944-note pre-rebuild index: all freshness markers preserved, zero unnecessarily pending notes, repeated compaction preserved the catalog. Live vault unchanged.
 - [x] Synchronize manifest/package/lockfile/compatibility map to 0.3.13 and document affected-index recovery limits.
-- [ ] Pass final versioned candidate checks and CI.
-- [ ] Merge PR #35, tag the tested commit, publish, and verify all three release assets and attestations.
+- [x] Final versioned candidate `d1c4675f9991f45daa7d57c3fe960ae4e92ee0bf` passed local checks/packaging and CI `39612040877`: 2,365 tests passed, four optional unit benchmarks skipped, zero integration skips.
+- [x] Merge PR #35 as `b33b906fdb65055d96fef031374e6cc57a66d823` (tree identical to the tested candidate), tag 0.3.13, and pass release workflow `39612645735` on that tag.
+- [x] Download exactly three published assets, compare them byte-for-byte with the tested package, and verify all attestations against the repository, tag, merge commit, release workflow, and GitHub-hosted runner policy.
+
+Published asset SHA-256 checksums:
+
+| Asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `main.js` | 697452 | `354ec062ee162b6dedc41950d6c5744e56e650558d1012d1f7ec043b5da1edcc` |
+| `manifest.json` | 329 | `f8ac96ebab604737c206863e28a3c9fdff758ca69ac76cafbcc830298ea0d118` |
+| `styles.css` | 21240 | `c2cf12f2140e24bd7d7a3db8a64290c098a82b81a9754ab8babe4c42b450829f` |
 
 The 0.3.12 Obsidian clean-initialization/cold-reopen smoke and plugin-disabled Force Reload limitation are recorded below. This patch has no UI changes; no new foreground/background performance parity or live recovery claim is made.
 
