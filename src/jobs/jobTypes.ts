@@ -1144,3 +1144,30 @@ export function assertValidSuccessorShape(old: PersistedJobV1, successor: Persis
 
 export { JOB_KIND_PHASES, JOB_KIND_TARGET_KIND, JOB_TRIGGER_KINDS };
 export type { JobKind, JobPhase, QueueJobV1 };
+
+/**
+ * The single per-job-kind irreversible-commit phase: strictly BEFORE this
+ * phase, a queued cancellation request stops the job with zero writes; AT
+ * or after it, `JobEngine` no longer honors `cancelRequested` for the rest
+ * of that job's run -- the phase runs to completion instead, since undoing
+ * it would mean either rewriting user note bytes (process-note) or rolling
+ * back an already-verified generation pointer switch (rebuild/migrate),
+ * neither of which this design ever does. Kinds absent from this map have
+ * no modeled irreversible phase yet: cancellation is honored at every
+ * phase boundary for them.
+ */
+const IRREVERSIBLE_COMMIT_PHASE: Partial<Record<JobKind, JobPhase>> = {
+  "process-note": "write-note",
+  "rebuild-index": "activate-generation",
+  "migrate-index": "activate-generation",
+};
+
+function phaseIndex(kind: JobKind, phase: JobPhase): number {
+  return JOB_KIND_PHASES[kind].indexOf(phase);
+}
+
+export function isAtOrPastIrreversiblePhase(kind: JobKind, phase: JobPhase): boolean {
+  const irreversible = IRREVERSIBLE_COMMIT_PHASE[kind];
+  if (irreversible === undefined) return false;
+  return phaseIndex(kind, phase) >= phaseIndex(kind, irreversible);
+}

@@ -9,6 +9,18 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.14
+
+### Fixed
+- Resume bulk note discovery/enqueue after plugin shutdown instead of cancelling the batch, without duplicating notes already queued.
+- Cancel queued, pre-write children when their bulk job fails or is cancelled, including stranded work recovered on startup; preserve committed note writes so indexing can finish safely.
+- Show the work currently running when an unrelated bulk batch is waiting, while continuing to prevent overlapping bulk runs.
+
+### Tests
+- Cover interrupted enqueue and cold restart, atomic child cancellation, preservation of committed work and operator pause, and accurate activity reporting.
+
+Desktop only; `minAppVersion` remains `1.7.2`. Saved settings and queue schema remain compatible. No embedding-model migration is required.
+
 ## 0.3.13
 
 ### Fixed

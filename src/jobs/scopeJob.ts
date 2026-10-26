@@ -165,6 +165,7 @@ export class ScopeJobRunner implements JobPhaseRunner {
     if ((persisted.job.kind !== "reading-sync" && persisted.job.kind !== "scope-refresh") || persisted.job.target.kind !== "scope") {
       throw new EngineError("JOB_SHAPE_INVALID", 'ScopeJobRunner only handles "reading-sync"/"scope-refresh" jobs with a scope target.', {});
     }
+    if (signal.aborted) return { type: "deferred" };
     const scopeId = persisted.job.target.scopeId;
     const priorReceipt = scopeReceiptOf(persisted);
     try {
@@ -182,6 +183,7 @@ export class ScopeJobRunner implements JobPhaseRunner {
           throw new EngineError("JOB_TRANSITION_INVALID", `ScopeJobRunner cannot execute phase "${persisted.job.phase}".`, {});
       }
     } catch (error) {
+      if (signal.aborted) return { type: "deferred" };
       if (isEngineError(error)) throw error;
       return { type: "retry", failureCode: toFailureCode(error) };
     }
@@ -235,7 +237,7 @@ export class ScopeJobRunner implements JobPhaseRunner {
     let enqueuedCount = 0;
     for (const item of items) {
       if (signal.aborted) {
-        return { type: "cancelled" };
+        return { type: "deferred" };
       }
       if (isAlreadyIndexed(item.identity, item.sourceHash)) continue;
       await this.deps.enqueue.enqueueProcessNote(item, pipelineVersion, signal, batchId);
