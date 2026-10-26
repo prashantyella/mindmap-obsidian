@@ -299,7 +299,7 @@ void test("(requirement 8) the enqueue loop checks the abort signal BETWEEN ever
     cancelRequested: false,
   };
   const outcome = await runner.step(persisted, controller.signal);
-  assert.equal(outcome.type, "cancelled", "a dispose()-triggered abort must report as a genuine cancellation, never an UNKNOWN_TRANSIENT retry/backoff");
+  assert.equal(outcome.type, "deferred", "shutdown must preserve the batch for restart without a failure or cancellation");
   assert.equal(enqueue.calls.length, 1, "only the item enqueued before the abort was observed -- the loop must not continue past it");
 });
 
@@ -548,4 +548,40 @@ void test("catalogSnapshot: predicate returns false for all (fresh index) → al
   if (final?.receipt?.kind === "scope") {
     assert.equal(final.receipt.enqueuedCount, 2);
   }
+});
+
+void test("shutdown during bulk enqueue resumes the same batch after a cold restart without duplicates", async (t) => {
+  const fs = new FakeFs();
+  const store = new JobStore(fs, "/root");
+  const discovery = new FakeDiscovery();
+  discovery.result = items("Scope/A.md", "Scope/B.md", "Scope/C.md");
+  let engine: JobEngine;
+  let interrupt = true;
+  const runner = new ScopeJobRunner({ discovery, import: new FakeImport(), enqueue: {
+    enqueueProcessNote: async (item, pipelineVersion, _signal, batchId) => {
+      await engine.submitBulkChild(batchId!, { trigger: "manual", kind: "process-note", identity: item.identity, sourceHash: item.sourceHash, embeddingModel: item.embeddingModel, pipelineVersion });
+      if (interrupt) engine.dispose();
+    },
+  } });
+  engine = new JobEngine(store, { "scope-refresh": runner });
+  const firstEngine = engine;
+  t.after(() => firstEngine.dispose());
+  const root = await engine.submit({ trigger: "manual", kind: "scope-refresh", scopeId: "all", pipelineVersion: 1 });
+  await engine.runOnce();
+  await engine.runOnce();
+  assert.equal((await store.getById(root.job.jobId))?.status, "queued");
+  assert.equal((await store.getBulkBatches())[0].status, "active");
+  assert.equal((await store.getBulkBatches())[0].items.length, 1);
+  const cold = new JobStore(fs, "/root");
+  interrupt = false;
+  engine = new JobEngine(cold, { "scope-refresh": runner });
+  t.after(() => engine.dispose());
+  await engine.recoverInterruptedJobs();
+  await engine.runOnce();
+  assert.equal((await cold.getById(root.job.jobId))?.status, "completed");
+  const batch = (await cold.getBulkBatches())[0];
+  assert.equal(batch.batchId, root.job.batchId);
+  assert.equal(batch.status, "active");
+  assert.equal(batch.items.length, 3);
+  assert.equal((await cold.list()).filter((entry) => entry.job.kind === "process-note").length, 3);
 });

@@ -5,6 +5,7 @@ import {
   assertScheduledOccurrenceId,
   assertValidSuccessorShape,
   isTerminalJobStatus,
+  isAtOrPastIrreversiblePhase,
   MAX_PERSISTED_JOBS,
   MAX_SCHEDULED_OCCURRENCES,
   MAX_STORE_SERIALIZED_BYTES,
@@ -221,9 +222,21 @@ export class JobStore {
     return latestTerminal === undefined ? active : [...active, latestTerminal];
   }
 
-  private syncBatches(doc: JobStoreDocumentV1, jobs: PersistedJobV1[]): BulkBatchV1[] {
+  private syncBatches(doc: JobStoreDocumentV1, sourceJobs: PersistedJobV1[]): Pick<JobStoreDocumentV1, "jobs" | "bulkBatches"> {
+    const batchesById = new Map(doc.bulkBatches.map((batch) => [batch.batchId, batch]));
+    const rootsByBatch = new Map(sourceJobs.filter((entry) => entry.job.batchId !== undefined && entry.job.batchItemId === undefined).map((entry) => [entry.job.batchId!, entry]));
+    const jobsByRootId = new Map(sourceJobs.map((entry) => [entry.job.jobId, entry]));
+    const jobs = sourceJobs.map((entry) => {
+      if (entry.job.batchId === undefined || entry.job.batchItemId === undefined || isTerminalJobStatus(entry.status)) return entry;
+      const batch = batchesById.get(entry.job.batchId);
+      const root = batch ? jobsByRootId.get(batch.rootJobId) : rootsByBatch.get(entry.job.batchId);
+      const stopped = batch?.status === "cancelled" || batch?.status === "failed" || root?.status === "cancelled" || root?.status === "failed";
+      // Finish an in-flight/committed note safely; cancel work that has not reached a write.
+      if (!stopped || entry.status === "active" || isAtOrPastIrreversiblePhase(entry.job.kind, entry.job.phase)) return entry;
+      return { ...entry, status: "cancelled" as const, cancelRequested: true, nextAttemptAtMs: undefined };
+    });
     const jobsById = new Map(jobs.map((entry) => [entry.job.jobId, entry]));
-    return this.pruneBatches(doc.bulkBatches.map((batch) => {
+    const bulkBatches = this.pruneBatches(doc.bulkBatches.map((batch) => {
       const root = jobsById.get(batch.rootJobId);
       const items = batch.items.map((item) => {
         const child = jobsById.get(item.jobId);
@@ -238,6 +251,7 @@ export class JobStore {
       const status = root.status === "cancelled" ? "cancelled" : root.status === "failed" ? "failed" : items.some((item) => item.status === "failed" || item.status === "cancelled") ? "completed-with-failures" : "completed";
       return { ...batch, discoveredTotal, items, status, updatedAt: root.job.updatedAt > batch.updatedAt ? root.job.updatedAt : batch.updatedAt };
     }));
+    return { jobs, bulkBatches };
   }
 
   private repointBatch(doc: JobStoreDocumentV1, batchId: string, oldItemId: string | undefined, newJobId: string): BulkBatchV1[] {
@@ -532,7 +546,7 @@ export class JobStore {
       }
       const jobs = [...doc.jobs];
       jobs[index] = next;
-      return { doc: { ...doc, jobs, bulkBatches: this.syncBatches(doc, jobs) }, resultOf: (verified) => verified.jobs.find((entry) => entry.job.jobId === jobId)! };
+      return { doc: { ...doc, ...this.syncBatches(doc, jobs) }, resultOf: (verified) => verified.jobs.find((entry) => entry.job.jobId === jobId)! };
     });
   }
 
@@ -602,8 +616,8 @@ export class JobStore {
           successor: verified.jobs.find((entry) => entry.job.jobId === existingId)!,
           coalesced: true,
         });
-        const bulkBatches = oldCurrent.job.batchId === undefined ? this.syncBatches(doc, jobs) : this.syncBatches({ ...doc, bulkBatches: this.repointBatch(doc, oldCurrent.job.batchId, oldCurrent.job.batchItemId, existingId) }, jobs);
-        return { doc: { ...doc, jobs, bulkBatches }, resultOf };
+        const batchState = oldCurrent.job.batchId === undefined ? this.syncBatches(doc, jobs) : this.syncBatches({ ...doc, bulkBatches: this.repointBatch(doc, oldCurrent.job.batchId, oldCurrent.job.batchItemId, existingId) }, jobs);
+        return { doc: { ...doc, ...batchState }, resultOf };
       }
       if (jobs.some((entry) => entry.job.jobId === successor.job.jobId)) {
         throw new EngineError("JOB_SHAPE_INVALID", `Duplicate jobId "${successor.job.jobId}".`, {});
@@ -622,8 +636,8 @@ export class JobStore {
         successor: verified.jobs.find((entry) => entry.job.jobId === newSuccessorId)!,
         coalesced: false,
       });
-      const bulkBatches = oldCurrent.job.batchId === undefined ? this.syncBatches(doc, jobs) : this.syncBatches({ ...doc, bulkBatches: this.repointBatch(doc, oldCurrent.job.batchId, oldCurrent.job.batchItemId, newSuccessorId) }, jobs);
-      return { doc: { ...doc, jobs, scheduledOccurrences, bulkBatches }, resultOf };
+      const batchState = oldCurrent.job.batchId === undefined ? this.syncBatches(doc, jobs) : this.syncBatches({ ...doc, bulkBatches: this.repointBatch(doc, oldCurrent.job.batchId, oldCurrent.job.batchItemId, newSuccessorId) }, jobs);
+      return { doc: { ...doc, scheduledOccurrences, ...batchState }, resultOf };
     });
   }
 
@@ -638,7 +652,9 @@ export class JobStore {
    * `"queued"` is always safe (every phase's own work is idempotent -- see
    * `noteJob.ts`/`rebuildJob.ts`), so this never double-counts an
    * already-committed phase. Idempotent across repeated startups: a second
-   * call finds no `"active"` jobs left and changes nothing.
+   * call finds no `"active"` jobs left and changes nothing. Recovery also
+   * cancels pre-write children stranded under failed/cancelled legacy batches;
+   * committed notes retain their phase and receipts so index writes can finish.
    */
   recoverInterruptedJobs(): Promise<number> {
     return this.mutate((doc) => {
@@ -648,7 +664,7 @@ export class JobStore {
         recovered += 1;
         return { ...entry, status: "queued" as const };
       });
-      return { doc: { ...doc, jobs, bulkBatches: this.syncBatches(doc, jobs) }, resultOf: () => recovered };
+      return { doc: { ...doc, ...this.syncBatches(doc, jobs) }, resultOf: () => recovered };
     });
   }
 }

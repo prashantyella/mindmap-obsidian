@@ -1,4 +1,36 @@
-# Release checklist: 0.3.13
+# Release checklist: 0.3.14
+
+Status: candidate prepared; not published. Runtime candidate `85a09a4b1084009835f828dc611616c6164d8943` passed CI run `40267964200`; final documentation CI is tracked in PR #36.
+
+## 0.3.14 scope and acceptance
+
+- Resume shutdown-interrupted bulk enqueue and avoid duplicate children on restart.
+- Cancel uncommitted queued children of failed/cancelled bulk roots atomically; repair stranded legacy children while preserving committed work and operator pause.
+- Report unrelated running work accurately while preserving bulk-run exclusion.
+
+- [x] Synchronize manifest/package/lockfile/compatibility map to 0.3.14 and document user-visible changes.
+- [x] Pass local lint, Obsidian lint, typecheck, unit tests, lifecycle gates, build, and release validation on the versioned candidate: 2,368 unit/regression tests and two integration tests passed; four optional unit benchmarks skipped, zero integration skips. Existing Obsidian lint warnings remain; no lint errors.
+- [x] Pass `npm run release:prepare`, including both mandatory integration tests again, and prepare exactly `main.js`, `manifest.json`, and `styles.css`; all three match `dist/` byte-for-byte.
+- [x] Complete focused live functional acceptance in an isolated synthetic vault on Obsidian 1.13.7 using the packaged 0.3.14 assets; record the limits below.
+- [ ] Pass CI on the final candidate before merging or tagging.
+- [ ] Merge the approved candidate, tag 0.3.14, and pass the release workflow.
+- [ ] Download all published assets, compare them with the tested package, and verify attestations against the repository, tag, merge commit, workflow, and GitHub-hosted runner policy.
+
+Live functional acceptance (2026-10-26 UTC): the installed plugin files matched the release package byte-for-byte. With real `embeddinggemma-2:270m` and `llama3.1:8b` models, Start migration initialized generation 1 and processed a synthetic 50-word garden note. The scope root and note job completed; generated properties preserved the note body. An editor change adding "Editor acceptance marker." survived the subsequent completed note job. With the test window minimized during this check, the persisted queue reached three completed jobs and zero pending jobs. After View → Force Reload, the accessibility state showed the marker, the sidebar's expected empty state for a one-note vault, and Ready with zero pending; the saved model, scope, and completed queue were verified on disk.
+
+Limits: initial UI access timed out, and screen captures were stale or inconsistent with the accessibility state. This is functional acceptance using accessibility and persisted-state evidence, not pixel-perfect visual verification. No prolonged foreground/background performance comparison or cold close/reopen was performed. CSS is unchanged from 0.3.13; broader historical soak-test limitations remain recorded below.
+
+Private benchmark reports and personal-vault data are excluded. No live-vault repair is part of this release.
+
+Candidate asset SHA-256 checksums:
+
+| Asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `main.js` | 698093 | `0d089203e3bf0178c2894443321d6f5d70838e856b6d1b3b819a70bf4c703213` |
+| `manifest.json` | 329 | `ed0851b5525832fd3f9f3f6bf865dc385c0871f6052d3eaa3c254701e208a16d` |
+| `styles.css` | 21240 | `c2cf12f2140e24bd7d7a3db8a64290c098a82b81a9754ab8babe4c42b450829f` |
+
+## 0.3.13 publication record
 
 Status: published as [0.3.13](https://github.com/prashantyella/mindmap-obsidian/releases/tag/0.3.13) on 2026-10-21 UTC. No live-vault repair was performed during this release operation.
 

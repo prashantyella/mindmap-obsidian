@@ -1165,3 +1165,50 @@ void test("(last-acceptance 2) acknowledgeScheduledOccurrence is a single write 
   }
   assert.equal(fs.renameCallCount, afterSubmit + 1, "every repeated ack of an already-acknowledged occurrence performs zero further writes");
 });
+
+for (const status of ["cancelled", "failed"] as const) {
+  void test(`a ${status} bulk root atomically cancels uncommitted children and preserves committed work`, async () => {
+    const fs = new FakeFs();
+    const store = new JobStore(fs, "/root");
+    const { root, batch } = buildBulkRoot();
+    await store.createBulkBatch(batch, root);
+    const children = (["discover", "extract-metadata", "write-note", "write-overlay"] as const).map((phase, i) => {
+      const child = buildPersisted({ path: `Notes/child-${i}.md`, phase });
+      return { ...child, job: { ...child.job, batchId: batch.batchId, batchItemId: i.toString(16).padStart(64, "0") } };
+    });
+    for (const child of children) await store.appendOrAdoptBatchChild(batch.batchId, child);
+    const unrelated = buildPersisted({ path: "Notes/unrelated.md" });
+    await store.appendJob(unrelated);
+    const before = fs.files.get("/root/jobs/queue.json");
+    fs.faults.add("writeFile");
+    await assert.rejects(store.updateJob(root.job.jobId, (current) => ({ ...current, status, ...(status === "failed" ? { lastFailureCode: "JOB_SHAPE_INVALID", lastFailureClass: "terminal" as const } : {}) })));
+    assert.equal(fs.files.get("/root/jobs/queue.json"), before);
+    assert.equal((await store.getById(children[0].job.jobId))?.status, "queued");
+    fs.faults.clear();
+    await store.updateJob(root.job.jobId, (current) => ({ ...current, status, ...(status === "failed" ? { lastFailureCode: "JOB_SHAPE_INVALID", lastFailureClass: "terminal" as const } : {}) }));
+    const cold = new JobStore(fs, "/root");
+    assert.deepEqual(await Promise.all(children.map(async (child) => (await cold.getById(child.job.jobId))?.status)), ["cancelled", "cancelled", "queued", "queued"]);
+    assert.equal((await cold.getById(unrelated.job.jobId))?.status, "queued");
+    assert.equal((await cold.getBulkBatches())[0].status, status);
+  });
+}
+
+void test("startup repairs legacy cancelled batches before resume and preserves operator pause", async () => {
+  const fs = new FakeFs();
+  const { root, batch } = buildBulkRoot();
+  const child = buildPersisted({ path: "Notes/stranded.md", status: "active", phase: "extract-metadata", attempt: 3 });
+  child.job = { ...child.job, batchId: batch.batchId, batchItemId: "a".repeat(64) };
+  const committed = buildPersisted({ path: "Notes/committed.md", status: "active", phase: "write-overlay", receipt: { kind: "note", noteCommitted: true, noteContentHash: "c".repeat(64), overlayCommitted: false } });
+  committed.job = { ...committed.job, batchId: batch.batchId, batchItemId: "b".repeat(64) };
+  const pause = { active: true, pausedAt: "2026-10-24T01:00:00.000Z" };
+  fs.files.set("/root/jobs/queue.json", JSON.stringify({ schemaVersion: 1, data: { schemaVersion: 1, jobs: [{ ...root, status: "cancelled" }, child, committed], providerPause: { active: false }, scheduledOccurrences: [], operatorPause: pause, bulkBatches: [{ ...batch, status: "cancelled", items: [child, committed].map((entry) => ({ jobId: entry.job.jobId, batchItemId: entry.job.batchItemId, status: entry.status })) }] } }));
+  const store = new JobStore(fs, "/root");
+  assert.equal(await store.recoverInterruptedJobs(), 2);
+  assert.equal((await store.getById(child.job.jobId))?.status, "cancelled");
+  assert.equal((await store.getById(committed.job.jobId))?.status, "queued");
+  assert.deepEqual((await store.getById(committed.job.jobId))?.receipt, committed.receipt);
+  const cold = new JobStore(fs, "/root");
+  assert.equal(await cold.recoverInterruptedJobs(), 0);
+  assert.deepEqual(await cold.list(), await store.list());
+  assert.deepEqual(await cold.getOperatorPause(), pause);
+});

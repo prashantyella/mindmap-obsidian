@@ -874,7 +874,13 @@ function buildHarnessWithDefer(deferFn: (persisted: import("./jobTypes").Persist
   const fs = new FakeFs();
   const store = new JobStore(fs, "/root");
   const clock = new FakeClock();
-  const engine = new JobEngine(store, { "process-note": runner }, clock);
+  const engine = new JobEngine(store, {
+    "process-note": runner,
+    // These tests enqueue the child directly; its root must finish successfully.
+    "scope-refresh": { step: async (job) => job.job.phase === "discover"
+      ? { type: "advance", nextPhase: "enqueue", receipt: { kind: "scope", discovered: true, discoveredCount: 1, discoveryFingerprint: "f".repeat(64) } }
+      : { type: "complete", receipt: { kind: "scope", discovered: true, discoveredCount: 1, discoveryFingerprint: "f".repeat(64), enqueuedCount: 1 } } },
+  }, clock);
   return { vault, sourceReader, embedding, metadata, index, noteWriter, runner, replacement, fs, store, engine, clock };
 }
 

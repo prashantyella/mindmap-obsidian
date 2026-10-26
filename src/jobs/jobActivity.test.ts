@@ -130,3 +130,13 @@ void test("CP4: active batch with missing root throws JOB_STORE_CORRUPT", () => 
   const batch = makeBatch({ discoveredTotal: 10, items: [], scopeId: "all" });
   assert.throws(() => deriveEngineActivity([], [batch as never], NO_PAUSE, { active: false }, true, false, undefined), (err: unknown) => err instanceof EngineError && err.code === "JOB_STORE_CORRUPT");
 });
+
+void test("a waiting batch does not mask unrelated work currently running", () => {
+  const root = makeScopeRootJob({ status: "queued", phase: "discover" });
+  const current = { ...root, job: { ...root.job, jobId: "other-job", batchId: "old-batch", kind: "process-note", phase: "write-overlay" }, status: "active" };
+  const snapshot = deriveEngineActivity([current as never, root as never], [makeBatch({}) as never], NO_PAUSE, NO_PAUSE, true, false, undefined);
+  assert.equal(snapshot.current?.phase, "write-overlay");
+  assert.equal(snapshot.batch, undefined);
+  assert.equal(snapshot.bulkBlocked, true);
+  assert.equal(snapshot.state, "running");
+});
