@@ -1,6 +1,6 @@
 # Release checklist: 0.3.14
 
-Status: candidate prepared; not published. Runtime candidate `85a09a4b1084009835f828dc611616c6164d8943` passed CI run `40267964200`; final documentation CI is tracked in PR #36.
+Status: published as [0.3.14](https://github.com/prashantyella/mindmap-obsidian/releases/tag/0.3.14) on 2026-10-26 UTC. Runtime candidate `85a09a4b1084009835f828dc611616c6164d8943` passed CI run `40267964200`.
 
 ## 0.3.14 scope and acceptance
 
@@ -12,9 +12,9 @@ Status: candidate prepared; not published. Runtime candidate `85a09a4b1084009835
 - [x] Pass local lint, Obsidian lint, typecheck, unit tests, lifecycle gates, build, and release validation on the versioned candidate: 2,368 unit/regression tests and two integration tests passed; four optional unit benchmarks skipped, zero integration skips. Existing Obsidian lint warnings remain; no lint errors.
 - [x] Pass `npm run release:prepare`, including both mandatory integration tests again, and prepare exactly `main.js`, `manifest.json`, and `styles.css`; all three match `dist/` byte-for-byte.
 - [x] Complete focused live functional acceptance in an isolated synthetic vault on Obsidian 1.13.7 using the packaged 0.3.14 assets; record the limits below.
-- [ ] Pass CI on the final candidate before merging or tagging.
-- [ ] Merge the approved candidate, tag 0.3.14, and pass the release workflow.
-- [ ] Download all published assets, compare them with the tested package, and verify attestations against the repository, tag, merge commit, workflow, and GitHub-hosted runner policy.
+- [x] Final candidate `0de8421d7c356e5ac0c2b290dd514091fbc1491d` passed CI run `40268846335` before merge and tagging.
+- [x] Merge PR #36 as `e9394b59f58215edcf2453d601a6642a8d4bcfbb` (tree identical to the tested candidate), tag 0.3.14, and pass release workflow `40269076190`.
+- [x] Download exactly three published assets, compare them byte-for-byte with the tested package, and verify each attestation against the repository, tag, merge commit, release workflow, and GitHub-hosted runner policy.
 
 Live functional acceptance (2026-10-26 UTC): the installed plugin files matched the release package byte-for-byte. With real `embeddinggemma-2:270m` and `llama3.1:8b` models, Start migration initialized generation 1 and processed a synthetic 50-word garden note. The scope root and note job completed; generated properties preserved the note body. An editor change adding "Editor acceptance marker." survived the subsequent completed note job. With the test window minimized during this check, the persisted queue reached three completed jobs and zero pending jobs. After View → Force Reload, the accessibility state showed the marker, the sidebar's expected empty state for a one-note vault, and Ready with zero pending; the saved model, scope, and completed queue were verified on disk.
 
@@ -22,7 +22,7 @@ Limits: initial UI access timed out, and screen captures were stale or inconsist
 
 Private benchmark reports and personal-vault data are excluded. No live-vault repair is part of this release.
 
-Candidate asset SHA-256 checksums:
+Published asset SHA-256 checksums:
 
 | Asset | Bytes | SHA-256 |
 | --- | ---: | --- |
