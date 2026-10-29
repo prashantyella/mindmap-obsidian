@@ -15,6 +15,14 @@ export interface MindmapSettings {
   launchAgentWeeklyMinute: number;
   liveSemanticLookupEnabled: boolean;
   liveSemanticEnsureActiveNoteIndexed: boolean;
+  /**
+   * `true` (default) lets the active-note sidebar path queue a full
+   * process-note job (embedding + local LLM summaries/tags + note write) as
+   * soon as a note becomes eligible. `false` keeps real-time work to the
+   * embedding only: the note is indexed for live connections immediately,
+   * and the LLM metadata pass is left to scheduled or manual runs.
+   */
+  realtimeMetadataExtraction: boolean;
   pinnedConnections: Record<string, string[]>;
 
   /** Checkpoint 11: scope selection now lives entirely in plugin settings -- never a Python config.json. */
@@ -63,6 +71,15 @@ export interface MindmapSettings {
   legacyConfigMigrated: boolean;
 }
 
+/** Inclusive bounds for `relatedLimit`, the number of connections the sidebar and the Mindmap section show per note. */
+export const MIN_RELATED_LIMIT = 1;
+export const MAX_RELATED_LIMIT = 20;
+
+export function normalizeRelatedLimit(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_SETTINGS.relatedLimit;
+  return Math.min(MAX_RELATED_LIMIT, Math.max(MIN_RELATED_LIMIT, Math.round(value)));
+}
+
 export const DEFAULT_SETTINGS: MindmapSettings = {
   readingMode: "standard",
   webResearchMode: "off",
@@ -75,6 +92,7 @@ export const DEFAULT_SETTINGS: MindmapSettings = {
   launchAgentWeeklyMinute: 0,
   liveSemanticLookupEnabled: true,
   liveSemanticEnsureActiveNoteIndexed: true,
+  realtimeMetadataExtraction: true,
   pinnedConnections: {},
 
   scopeCurrentPaths: [],

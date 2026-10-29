@@ -64,7 +64,7 @@ import {
   normalizeSchedulerInterval,
   type SchedulerConfig,
 } from "./scheduler";
-import { DEFAULT_SETTINGS, type MindmapSettings, type SchedulerMode } from "./settings";
+import { DEFAULT_SETTINGS, normalizeRelatedLimit, type MindmapSettings, type SchedulerMode } from "./settings";
 import { cloneSettings, restoreEngineSettingsInPlace, SettingsApplyError, SettingsEffectQueue, withEngineSettings } from "./settingsEffects";
 import { prepareReplaceableEngine, replaceEngineSafely, type EngineReplacementResult } from "./engineReplacement";
 import { testLocalAiDraft as probeLocalAiDraft } from "./localAiDraftTest";
@@ -342,6 +342,7 @@ export default class MindmapPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const savedData = (await this.loadData()) as Partial<MindmapSettings> | null | undefined;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedData ?? {});
+    this.settings.relatedLimit = normalizeRelatedLimit(this.settings.relatedLimit);
     this.settings.readingMode = this.settings.readingMode === "reading" ? "reading" : "standard";
     this.settings.webResearchMode = this.settings.webResearchMode === "manual" || this.settings.webResearchMode === "automatic-reading" ? this.settings.webResearchMode : "off";
     this.webResearchActivity = this.settings.webResearchMode === "off" ? "off" : "ready";
@@ -1994,6 +1995,7 @@ export default class MindmapPlugin extends Plugin {
       },
       metadataProvider,
       metadataPipelineConfig,
+      realtimeMetadataExtraction: settings.realtimeMetadataExtraction,
       scopeFolders: settings.scopeAllPaths,
       currentScopeFolders: settings.scopeCurrentPaths,
       minimumWords: settings.minimumWords,

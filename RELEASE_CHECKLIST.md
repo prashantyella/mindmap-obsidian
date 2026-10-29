@@ -1,4 +1,21 @@
-# Release checklist: 0.3.14
+# Release checklist: 0.3.15
+
+Status: candidate, not yet published.
+
+## 0.3.15 scope and acceptance
+
+- Add the **Real-time summaries and tags** toggle: off keeps the active note embedded and indexed immediately while the local LLM metadata pass waits for scheduled or manual runs.
+- Add **Connections shown** (1 to 20) for sidebar and Mindmap-section connections; clamp persisted values on load.
+- Scroll only the sidebar connection list; keep search and heatmap fixed.
+
+- [x] Synchronize manifest/package/lockfile/compatibility map to 0.3.15 and document user-visible changes.
+- [x] Pass local lint (Obsidian), typecheck, unit tests, lifecycle gates, build, and release validation on the versioned candidate.
+- [x] Verify an upgrade over a persisted complete migration with unchanged model/dimension/pipeline reuses the index with zero re-embedding (regression test), and confirm on a live 931-note vault that the installed candidate started from the existing generation.
+- [ ] Final candidate passes CI before merge and tagging.
+- [ ] Merge the PR, tag 0.3.15, and pass the release workflow.
+- [ ] Download the three published assets, compare byte-for-byte with the tested package, and verify attestations.
+
+## 0.3.14 publication record
 
 Status: published as [0.3.14](https://github.com/prashantyella/mindmap-obsidian/releases/tag/0.3.14) on 2026-10-26 UTC. Runtime candidate `85a09a4b1084009835f828dc611616c6164d8943` passed CI run `40267964200`.
 

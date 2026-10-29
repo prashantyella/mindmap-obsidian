@@ -7,7 +7,7 @@ import { IndexStore, type IndexedCatalogRecord } from "../index/indexStore";
 import { JobEngine, type JobEngineFault, type JobPhaseRunner } from "../jobs/jobEngine";
 import type { EngineActivitySnapshot } from "../jobs/jobActivity";
 import { JobStore } from "../jobs/jobStore";
-import { NoteJobRunner, type NoteSourceReader } from "../jobs/noteJob";
+import { NoteJobRunner, type EmbeddedNote, type NoteSourceReader } from "../jobs/noteJob";
 import { canonicalizePath, stableNoteIdentity, type JobTrigger } from "./contracts";
 import { projectSource } from "./sourceProjection";
 import { RebuildJobRunner } from "../jobs/rebuildJob";
@@ -38,7 +38,7 @@ import { createCachedLiveEmbeddingSeam, type CachedLiveEmbeddingSeam } from "./l
 import { assessActiveNote } from "../individualNote";
 import { LIVE_QUERY_EMBEDDING_CACHE_MAX_BYTES } from "../index/budgets";
 import { selectRelatedCandidates, type RelatedCandidateScore } from "./relatedSelector";
-import type { CanonicalPath, RelatedCandidateKind } from "./contracts";
+import type { CanonicalPath, NoteIdentityV1, RelatedCandidateKind, SourceProjectionV1 } from "./contracts";
 import { NoteWriter } from "./noteWriter";
 import { MigrationRunner, MIGRATION_SCOPE_ID } from "../migration/migrationRunner";
 import { MigrationStore } from "../migration/migrationStore";
@@ -198,6 +198,18 @@ export interface ProductionEngineOptions {
   /** `null` when a local metadata provider is not configured. */
   metadataProvider: MetadataInferenceProvider | null;
   metadataPipelineConfig: MetadataPipelineConfig | null;
+  /**
+   * Default `true`. When `false`, the real-time active-note paths
+   * (`queryLiveRelated` with `ensureIndex`, `prioritizeActiveNote`) never
+   * submit a `"process-note"` job -- the phase that runs the local LLM --
+   * and instead index the note's EMBEDDING only, directly into the
+   * `IndexStore` without a `relatedVersion`. The committed record keeps
+   * live connections fresh immediately, while the missing `relatedVersion`
+   * leaves the note pending for the next scheduled/manual run, which
+   * performs the full metadata pass. Scheduled and manual runs are never
+   * affected by this flag.
+   */
+  realtimeMetadataExtraction?: boolean;
   /** `ScopeSelection.allPaths` -- the FULL configured scope. Backs the `"all"` scope registry entry AND migration discovery (which has always covered the full configured scope, independent of the `"current"`/`"all"` job-triggered ids -- see `PRODUCTION_SCOPE_REGISTRY_ENTRIES`). */
   scopeFolders: readonly string[];
   /** `ScopeSelection.currentPaths` -- the smaller day-to-day working set. Backs ONLY the `"current"` scope registry entry; never used for migration or the `"all"`/`"reading"` entries. */
@@ -928,7 +940,37 @@ export class ProductionEngine {
     const record = await this.indexStore.getRecord(resolved.identity, signal);
     if (signal.aborted || this.disposeRequested) return;
     if (record?.sourceHash === projection.sourceHash && (record.relatedVersion ?? 0) >= (this.relatedVersion ?? 0)) return;
+    if (!this.realtimeMetadataEnabled()) {
+      // Embedding-only: the LLM metadata pass waits for a scheduled/manual run.
+      if (record?.sourceHash !== projection.sourceHash) await this.indexEmbeddingOnly(resolved.identity, projection, signal);
+      return;
+    }
     await this.jobEngine.submit({ trigger: "scheduled", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion }, { prefer: () => !signal.aborted && !this.disposeRequested });
+  }
+
+  private realtimeMetadataEnabled(): boolean {
+    return this.options.realtimeMetadataExtraction !== false;
+  }
+
+  /**
+   * Real-time embedding-only indexing (see `realtimeMetadataExtraction`):
+   * embeds through the SAME strict `noteEmbeddingSeam` the job runner uses
+   * and commits the vectors WITHOUT a `relatedVersion`, so pending scans and
+   * scope discovery still count the note as awaiting its full metadata pass.
+   * Runs only once ordinary work is ready (migration complete, providers
+   * ok) -- the same gate every job-path overlay write is behind. Best-effort:
+   * returns `null` on any failure and never throws.
+   */
+  private async indexEmbeddingOnly(identity: NoteIdentityV1, projection: SourceProjectionV1, signal: AbortSignal): Promise<EmbeddedNote | null> {
+    if (!this.pumpStarted || this.disposeRequested || signal.aborted || !this.noteEmbeddingSeam || !this.options.embeddingModel) return null;
+    try {
+      const embedded = await this.noteEmbeddingSeam.embed(projection, signal);
+      if (signal.aborted || this.disposeRequested) return null;
+      await this.indexStoreUpsert({ identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, dimension: embedded.dimension, noteVector: embedded.noteVector, chunkVectors: embedded.chunkVectors });
+      return embedded;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1005,20 +1047,25 @@ export class ProductionEngine {
     }
     const projection = projectSource(resolved.identity, resolved.rawContent);
     const record = await this.indexStore.getRecord(resolved.identity, this.lifecycleAbort.signal);
-    const indexed = record !== null;
-    const stale = !indexed || record.sourceHash !== projection.sourceHash;
-
-    const eligible = ensureIndex && stale && assessActiveNote(canonical, resolved.rawContent, {
+    const eligible = ensureIndex && (record === null || record.sourceHash !== projection.sourceHash) && assessActiveNote(canonical, resolved.rawContent, {
       allScopeFolders: [...this.options.scopeFolders],
       minimumWords: this.options.minimumWords,
       configDir: this.options.configDir,
       runtimeFolder: this.options.runtimeFolder,
     }).eligible;
+    let indexed = record !== null;
+    let stale = !indexed || record!.sourceHash !== projection.sourceHash;
+    let embedded: EmbeddedNote | null = null;
     if (eligible && this.registeredRunners["process-note"]) {
-      try {
-        await this.jobEngine.submit({ trigger: "scheduled", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion });
-      } catch {
-        // Best-effort background persistence must not hide valid ranked connections.
+      if (this.realtimeMetadataEnabled()) {
+        try {
+          await this.jobEngine.submit({ trigger: "scheduled", kind: "process-note", identity: resolved.identity, sourceHash: projection.sourceHash, embeddingModel: this.options.embeddingModel, pipelineVersion: this.options.pipelineVersion });
+        } catch {
+          // Best-effort background persistence must not hide valid ranked connections.
+        }
+      } else {
+        embedded = await this.indexEmbeddingOnly(resolved.identity, projection, this.lifecycleAbort.signal);
+        if (embedded) { indexed = true; stale = false; }
       }
     }
 
@@ -1026,7 +1073,7 @@ export class ProductionEngine {
       return { path: canonical, sourceHash: projection.sourceHash, indexed, stale, related: [] };
     }
 
-    const embedded = await this.noteEmbeddingSeam.embed(projection, this.lifecycleAbort.signal);
+    embedded ??= await this.noteEmbeddingSeam.embed(projection, this.lifecycleAbort.signal);
     const config = this.options.relatedSelectionConfig;
     const candidates = await this.indexStore.queryRelated({
       embeddingModel: this.options.embeddingModel,

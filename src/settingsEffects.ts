@@ -27,6 +27,7 @@ export const ENGINE_KEYS = [
   "chunkTargetTokens", "chunkOverlapTokens",
   "relatedLimit", "relatedOverreach", "relatedCreative",
   "relatedCreativeMin", "relatedCreativeMax", "relatedCandidateLimit", "relatedMinScore",
+  "realtimeMetadataExtraction",
   "appleAnnotationDbPath", "appleLibraryDbPath",
 ] as const satisfies readonly (keyof MindmapSettings)[];
 
