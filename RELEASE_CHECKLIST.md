@@ -1,6 +1,6 @@
 # Release checklist: 0.3.15
 
-Status: candidate, not yet published.
+Status: published as [0.3.15](https://github.com/prashantyella/mindmap-obsidian/releases/tag/0.3.15) on 2026-10-28 UTC. Candidate `a8ec3a2371d14972cf583fe54b07afe6938f756e` passed CI run `40803766565`.
 
 ## 0.3.15 scope and acceptance
 
@@ -11,9 +11,19 @@ Status: candidate, not yet published.
 - [x] Synchronize manifest/package/lockfile/compatibility map to 0.3.15 and document user-visible changes.
 - [x] Pass local lint (Obsidian), typecheck, unit tests, lifecycle gates, build, and release validation on the versioned candidate.
 - [x] Verify an upgrade over a persisted complete migration with unchanged model/dimension/pipeline reuses the index with zero re-embedding (regression test), and confirm on a live 931-note vault that the installed candidate started from the existing generation.
-- [ ] Final candidate passes CI before merge and tagging.
-- [ ] Merge the PR, tag 0.3.15, and pass the release workflow.
-- [ ] Download the three published assets, compare byte-for-byte with the tested package, and verify attestations.
+- [x] Final candidate `a8ec3a2371d14972cf583fe54b07afe6938f756e` passed CI run `40803766565` and CodeRabbit before merge and tagging.
+- [x] Merge PR #37 as `b5ccaf73305b8e868163d929661bb259d5a228d6` (tree identical to the tested candidate), tag 0.3.15, and pass release workflow `40805698920`.
+- [x] Download exactly three published assets, compare them byte-for-byte with the tested package, and verify each attestation against the repository, tag, merge commit, release workflow, and GitHub-hosted runner policy.
+
+Live acceptance (2026-10-28 UTC): the identical bundle was installed into a 931-note personal vault over a persisted complete migration (`embeddinggemma-2:270m`, 768 dimensions, pipeline version 2, generation 4). Startup reused the existing index with no re-embedding. Limits: no isolated synthetic-vault acceptance run and no visual verification of the new Automation controls were performed for this release; iCloud Drive briefly reverted the first install copy, which is an installation-environment issue, not a plugin defect.
+
+Published asset SHA-256 checksums:
+
+| Asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `main.js` | 700603 | `5fa6f660425e66b0ca26cbc3b5983e9f4c58d9945d0f32d9d7b4ffa9ec6ecf1b` |
+| `manifest.json` | 329 | `9a614489509a84fa7555f8af692385a347aa9620e744b176a3888c64b675bd0d` |
+| `styles.css` | 21701 | `ac5ce52499637d4c0b1d642ec2b47bd4d0b16f6fb3affba74d65e623692b3412` |
 
 ## 0.3.14 publication record
 
