@@ -37,6 +37,13 @@ void test("Automation uses the approved labels and one HH:MM field per schedule"
   assert.match(SOURCE, /parseTimeOfDay\(value\)/);
 });
 
+void test("Automation exposes the real-time summaries toggle and a bounded connections count", () => {
+  const automation = SOURCE.slice(SOURCE.indexOf("private renderAutomation("), SOURCE.indexOf("private renderIntegrations("));
+  assert.match(automation, /setName\("Real-time summaries and tags"\)[\s\S]*setValue\(this\.plugin\.settings\.realtimeMetadataExtraction\)/);
+  assert.match(automation, /setName\("Connections shown"\)[\s\S]*parsed < MIN_RELATED_LIMIT \|\| parsed > MAX_RELATED_LIMIT/);
+  assert.match(automation, /this\.plugin\.settings\.relatedLimit = normalizeRelatedLimit\(parsed\)/);
+});
+
 void test("integrations use authoritative on/off toggles with a subordinate enabled research mode", () => {
   assert.match(SOURCE, /setName\("Apple Books import"\)[\s\S]*setValue\(reading\)/);
   assert.match(SOURCE, /setName\("Internet research"\)[\s\S]*setValue\(research\.mode !== "off"\)/);

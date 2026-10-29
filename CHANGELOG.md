@@ -9,6 +9,20 @@ All notable changes to this project should be documented in this file.
 - Keep `manifest.json` and `versions.json` in sync.
 - Document compatibility-impacting changes explicitly.
 
+## 0.3.15
+
+### Added
+- **Real-time summaries and tags** toggle under Automation. Off keeps live connections real-time (the active note is embedded and indexed immediately) while the local language model pass for summaries, tags, and concepts waits for the next scheduled or manual run.
+- **Connections shown** setting (1 to 20, default 8) for the number of connections per note in the sidebar and Mindmap section.
+
+### Changed
+- The sidebar scrolls only its connection list; search and heatmap stay fixed and the outer view no longer adds a second scrollbar with longer lists.
+
+### Tests
+- Cover the embedding-only real-time path, index reuse across an upgrade with unchanged model/dimension/pipeline, settings bounds, and the Automation controls.
+
+Desktop only; `minAppVersion` remains `1.7.2`. Saved settings and queue schema remain compatible; the new setting defaults to the previous behavior. No embedding-model migration is required.
+
 ## 0.3.14
 
 ### Fixed

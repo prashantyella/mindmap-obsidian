@@ -765,6 +765,67 @@ void test("ProductionEngine.queryLiveRelated (10B SIDEBAR) submits the exact pro
   await engine.dispose();
 });
 
+void test("realtimeMetadataExtraction=false: queryLiveRelated indexes the embedding only (no process-note job, no relatedVersion) once ordinary work is ready, and prioritizeActiveNote never submits an LLM job", async () => {
+  const { vault, files } = sidebarFixture();
+  const fs = new FakeIndexFs();
+  const dataRoot = "/data";
+  // Seed a generation that already matches the vault so migration plans straight to complete,
+  // then edit the active note afterwards so the real-time path sees it as stale.
+  const basis = new Float32Array([1, 0, 0, 0]);
+  const seeded = Object.entries(files).map(([filePath, content]) => {
+    const identity = stableNoteIdentity(canonicalizePath(filePath));
+    return { identity, sourceHash: projectSource(identity, content).sourceHash, relatedVersion: PRODUCTION_RELATED_VERSION, vector: basis, chunkCount: 1, loadChunkVectors: async () => [basis] };
+  });
+  await buildGeneration(fs, dataRoot, { generationId: 1, embeddingModel: "nomic-embed-text", dimension: 4, notes: seeded }, {});
+  await switchCurrentGeneration(fs, dataRoot, 1);
+  const engine = new ProductionEngine(baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, minimumWords: 1, realtimeMetadataExtraction: false, ...readyProviders(), embeddingDimension: 4, embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);
+  await engine.start();
+  assert.equal((await engine.startMigration()).phase, "complete");
+  await engine.pauseProcessing();
+  files["Notes/active.md"] = "Active note body text, edited after indexing.";
+  const result = await engine.queryLiveRelated("Notes/active.md", true);
+  assert.deepEqual(await engine.jobStore.list(), [], "the real-time path must not queue the LLM metadata phase");
+  assert.equal(result.indexed, true, "the embedding is committed immediately");
+  assert.equal(result.stale, false);
+  const record = await engine.indexStore.getRecord(stableNoteIdentity(canonicalizePath("Notes/active.md")), new AbortController().signal);
+  assert.ok(record);
+  assert.equal(record.sourceHash, result.sourceHash);
+  assert.equal(record.relatedVersion, undefined, "no relatedVersion keeps the note pending for the scheduled metadata pass");
+  await engine.prioritizeActiveNote("Notes/active.md", new AbortController().signal);
+  assert.deepEqual(await engine.jobStore.list(), []);
+  await engine.dispose();
+});
+
+void test("upgrade preserves the index: a new engine over a persisted complete migration with unchanged model/dimension/pipelineVersion starts ordinary work without re-planning or re-embedding, even with realtimeMetadataExtraction toggled off", async () => {
+  const { vault, files } = sidebarFixture();
+  const fs = new FakeIndexFs();
+  const dataRoot = "/data";
+  const basis = new Float32Array([1, 0, 0, 0]);
+  const seeded = Object.entries(files).map(([filePath, content]) => {
+    const identity = stableNoteIdentity(canonicalizePath(filePath));
+    return { identity, sourceHash: projectSource(identity, content).sourceHash, relatedVersion: PRODUCTION_RELATED_VERSION, vector: basis, chunkCount: 1, loadChunkVectors: async () => [basis] };
+  });
+  await buildGeneration(fs, dataRoot, { generationId: 1, embeddingModel: "nomic-embed-text", dimension: 4, notes: seeded }, {});
+  await switchCurrentGeneration(fs, dataRoot, 1);
+  const options = (): ProductionEngineOptions => baseOptions({ fs, dataRoot, vault, vaultFileClasses: undefined, minimumWords: 1, ...readyProviders(), embeddingDimension: 4, embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions;
+  const first = new ProductionEngine(options());
+  await first.start();
+  assert.equal((await first.startMigration()).phase, "complete");
+  const before = await first.getMigrationStatus();
+  await first.dispose();
+
+  let embedCalls = 0;
+  const countingProvider: import("./embeddingProvider").EmbeddingProvider = { embedBatch: async (request) => { embedCalls += request.items.length; return fixedVectorEmbeddingProvider(4).embedBatch(request); } };
+  const upgraded = new ProductionEngine({ ...options(), realtimeMetadataExtraction: false, embeddingProvider: countingProvider });
+  await upgraded.start();
+  assert.deepEqual(await upgraded.getMigrationStatus(), before, "a matching persisted migration must be reused verbatim, never restarted");
+  assert.equal(await loadCurrentGenerationId(fs, dataRoot), 1, "the existing generation stays current");
+  assert.equal(upgraded.getOrdinaryWorkStatus().pumpStarted, true, "ordinary work starts straight from the persisted index");
+  assert.equal(embedCalls, 0, "no note is re-embedded on startup");
+  assert.deepEqual(await upgraded.jobStore.list(), []);
+  await upgraded.dispose();
+});
+
 void test("automatic sidebar refresh coalesces repeated requests and respects an operator pause", async () => {
   const { vault } = sidebarFixture();
   const engine = new ProductionEngine(baseOptions({ fs: new FakeIndexFs(), vault, vaultFileClasses: undefined, minimumWords: 1, ...readyProviders(), embeddingProvider: fixedVectorEmbeddingProvider(4) as never }) as ProductionEngineOptions);

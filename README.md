@@ -37,7 +37,7 @@ Open the Mindmap sidebar to explore connections or search across indexed notes. 
 
 Summaries are expanded by default. Use a note's collapse button to toggle its summary, or Alt/Option-click it to expand or collapse all visible summaries.
 
-Use the status menu to pause or resume processing. Under **Automation**, choose manual runs, periodic processing while Obsidian is open, or scheduled processing on macOS.
+Use the status menu to pause or resume processing. Under **Automation**, choose manual runs, periodic processing while Obsidian is open, or scheduled processing on macOS. Turn off **Real-time summaries and tags** to keep the local language model out of your writing sessions: the active note is still embedded for live connections right away, and summaries, tags, and concepts are added on the next scheduled or manual run. **Connections shown** sets how many connections (1 to 20) appear per note.
 
 Summaries, tags, concepts, and related-note links are stored in note properties. To keep them out of the reading area, choose **Obsidian Settings → Editor → Properties in document → Hidden**. This hides the properties without deleting them.
 

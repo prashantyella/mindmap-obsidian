@@ -137,6 +137,14 @@
   font-size: var(--font-ui-small);
 }
 
+/* The sidebar scrolls its connection list only: search and heatmap stay put, and
+   the outer view never grows a second scrollbar when up to 20 connections render. */
+.mindmap-view:has(> .mindmap-sidebar) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .mindmap-view-shell {
   max-width: 1120px;
   margin: 0 auto;
@@ -525,8 +533,16 @@
 
 .mindmap-sidebar-list {
   flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: 12px;
+  scrollbar-gutter: stable;
   padding: 0;
+}
+
+.mindmap-sidebar-list > .mindmap-sidebar-card {
+  scroll-margin-block: 12px;
 }
 
 .mindmap-sidebar-card {

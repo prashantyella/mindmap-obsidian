@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { cloneSettings, classifySettingsChanges, restoreEngineSettingsInPlace, SettingsEffectQueue, withEngineSettings } from "./settingsEffects";
-import { DEFAULT_SETTINGS, type MindmapSettings } from "./settings";
+import { DEFAULT_SETTINGS, MAX_RELATED_LIMIT, MIN_RELATED_LIMIT, normalizeRelatedLimit, type MindmapSettings } from "./settings";
 
 function settings(): MindmapSettings {
   return cloneSettings(DEFAULT_SETTINGS);
@@ -265,4 +265,16 @@ void test("durable rollback failure stays typed and a later persist-only save re
   assert.equal(starts, 1);
   assert.equal(persisted[persisted.length - 1]?.embedModel, initial.embedModel);
   assert.equal(live.embedModel, initial.embedModel);
+});
+
+void test("normalizeRelatedLimit clamps to 1..20 and falls back to the default for non-numbers", () => {
+  assert.equal(normalizeRelatedLimit(0), MIN_RELATED_LIMIT);
+  assert.equal(normalizeRelatedLimit(25), MAX_RELATED_LIMIT);
+  assert.equal(normalizeRelatedLimit(12.4), 12);
+  assert.equal(normalizeRelatedLimit(Number.NaN), DEFAULT_SETTINGS.relatedLimit);
+});
+
+void test("realtimeMetadataExtraction is an engine setting", () => {
+  const next = { ...DEFAULT_SETTINGS, realtimeMetadataExtraction: false };
+  assert.equal(classifySettingsChanges(DEFAULT_SETTINGS, next).reconfigureEngine, true);
 });

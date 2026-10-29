@@ -5,7 +5,7 @@ import { MIN_SCHEDULER_INTERVAL_MINUTES } from "./scheduler";
 import { buildScheduleVisibility, formatTimeOfDay, isSchedulerRecoveryActionable, parseTimeOfDay } from "./scheduleVisibility";
 import type MindmapPlugin from "./main";
 import { ScopeManager } from "./scopeManager";
-import { DEFAULT_SETTINGS } from "./settings";
+import { DEFAULT_SETTINGS, MAX_RELATED_LIMIT, MIN_RELATED_LIMIT, normalizeRelatedLimit } from "./settings";
 import { applyProviderDraft, CommittedValue, SettingsViewState, updateProviderApplyUi, type SettingsSection } from "./settingsViewState";
 
 // The declarative settings-search API requires Obsidian 1.13.0; this plugin
@@ -189,6 +189,35 @@ export class MindmapSettingTab extends PluginSettingTab {
         });
       });
     }
+    new Setting(body).setName("Real-time summaries and tags").setDesc(this.plugin.settings.realtimeMetadataExtraction
+      ? "The local language model runs as soon as a saved note is eligible. Turn off if it slows your Mac."
+      : "Off. Notes are embedded for live connections immediately; summaries, tags, and concepts wait for the next scheduled or manual run.")
+      .addToggle((toggle) => toggle.setValue(this.plugin.settings.realtimeMetadataExtraction).onChange(async (value) => {
+        const previous = this.plugin.settings.realtimeMetadataExtraction;
+        this.plugin.settings.realtimeMetadataExtraction = value;
+        try { await this.plugin.saveSettings(); this.display(); } catch (error) {
+          this.plugin.settings.realtimeMetadataExtraction = previous;
+          toggle.setValue(previous);
+          new Notice(error instanceof Error ? error.message : "Real-time summaries could not be saved.", 8000);
+        }
+      }));
+    new Setting(body).setName("Connections shown").setDesc(`Connections per note in the sidebar and Mindmap section, ${MIN_RELATED_LIMIT} to ${MAX_RELATED_LIMIT}.`).addText((text) => {
+      text.setValue(String(this.plugin.settings.relatedLimit));
+      bindCommitOnBlurOrEnter(text.inputEl, text.getValue(), async (value) => {
+        const parsed = Number.parseInt(value.trim(), 10);
+        if (!Number.isFinite(parsed) || parsed < MIN_RELATED_LIMIT || parsed > MAX_RELATED_LIMIT) {
+          new Notice(`Enter ${MIN_RELATED_LIMIT} to ${MAX_RELATED_LIMIT} connections.`, 6000);
+          return false;
+        }
+        const previous = this.plugin.settings.relatedLimit;
+        this.plugin.settings.relatedLimit = normalizeRelatedLimit(parsed);
+        try { await this.plugin.saveSettings(); return true; } catch (error) {
+          this.plugin.settings.relatedLimit = previous;
+          new Notice(error instanceof Error ? error.message : "Connections shown could not be saved.", 8000);
+          return false;
+        }
+      });
+    });
     if (visibility.showDailyTime) this.renderTime(body, "Daily opening time", this.plugin.settings.launchAgentDailyHour, this.plugin.settings.launchAgentDailyMinute, (hour, minute) => {
       this.plugin.settings.launchAgentDailyHour = hour; this.plugin.settings.launchAgentDailyMinute = minute;
     });
